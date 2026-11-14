@@ -1,0 +1,485 @@
+id: "08"
+slug: design-system
+title: 设计系统与视觉
+summary: 视觉令牌（颜色、字号、间距、圆角、阴影、层级、动效）怎么命名、分层、存放和生成；深色模式与主题、字体、图标集、品牌图标，以及设计稿和代码怎么保持一致。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 视觉令牌：颜色、字号与行高、间距、圆角、阴影、z-index、动效时长与缓动、密度
+    - 令牌的格式、命名、分层与多端生成
+    - 深色模式与多主题
+    - 字体选择与许可
+    - 图标集选择、品牌标志与应用图标母稿
+    - 设计工具与代码之间的令牌同步
+  excludes:
+    - { what: 对比度阈值、不只靠颜色传达信息、减少动效、焦点可见、触控尺寸, see: "09" }
+    - { what: 组件库及其主题实现、Storybook、Stylelint 等前端工具链, see: "07" }
+    - { what: 视觉回归测试的方法、截图基线的生成与审批, see: "04" }
+    - { what: 图表类型选择与数据可视化规范, see: "22" }
+    - { what: 字体、图标、插画的开源许可口径与扫描工具；设计稿中个人信息出境, see: "27" }
+    - { what: 各端应用图标的打包与上架细节, see: "28-31" }
+    - { what: Agent 不得自行批准基线或放松检查, see: "23" }
+overview: |
+  1. **令牌文件是唯一事实来源。** 令牌放在 Git 仓库里，用 DTCG 格式（设计令牌社区组的交换格式，2025-10-28 发布首个稳定版；它是 W3C 社区组报告，不是 W3C 正式标准）。Figma、Penpot 只是同步端，改动要导出成文件差异走 PR。
+  2. **三层令牌。** 原始值（`color.blue.600`）→ 语义（`color.text.danger`）→ 组件（`button.primary.background`）。业务界面只用语义或组件令牌，不写裸颜色和魔法数字。
+  3. **用现成转换工具生成各端产物。** 默认 Style Dictionary；它官方说明对 DTCG 2025.10 还没完整支持，用到的特性要写兼容用例。生成目录不手改。
+  4. **深色是另一套映射，不是反相。** 每个主题完整覆盖语义键；OKLCH 适合生成色阶，但 L 值不等于对比度，每个主题的配对都要实算（阈值见 09）。
+  5. **跨端统一的是名字和意图。** 不要求 px、pt、dp 数值一致；原生端遵循平台惯例。
+  6. **字体先用系统字体。** 要打包就用允许再分发的字体（如思源黑体 / Noto Sans CJK，SIL OFL 1.1），随包带许可证。
+  7. **一个项目一个主图标集。** Web 和桌面默认 Lucide（ISC）；原生端用平台图标。
+  8. **数值是参考，结构是规则。** 字号阶梯、间距、时长这些数字只是起点；硬性要求的是格式合法、引用可解析、生成可复现、界面只用令牌。
+rules:
+  # ── 令牌格式与存放 ──
+  - id: DSN-001
+    title: 令牌源文件放在 Git 仓库并走 PR 评审；设计工具里的改动导出成文件差异后再合并
+    level: soft
+    check: semi
+    how: 评审时检查令牌改动是否来自仓库内的文件差异；设计工具的同步记录能对应到某个 PR
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 只存在设计工具里的变量没有版本、没有评审、没法回滚，也绑死在一个工具上。
+    sources: [S01, S20]
+  - id: DSN-002
+    title: 令牌文件采用 DTCG 格式：每个令牌都有 `$value`，类型由自身或所在组的 `$type` 确定，并通过 JSON Schema 校验
+    level: hard
+    check: auto
+    how: CI 用 JSON Schema 校验器（如 AJV）校验所有 `*.tokens.json`
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 类型不明的令牌，转换工具会猜错单位或格式，各端输出就不一致。
+    sources: [S01, S02, S04]
+  - id: DSN-003
+    title: 令牌之间不得有循环别名或指向不存在令牌的引用
+    level: hard
+    check: auto
+    how: CI 解析全部引用并做图遍历，发现环或悬空引用时失败
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 循环或悬空引用会让构建失败，或者在某些工具里被静默替换成错误的值。
+    sources: [S01]
+  - id: DSN-004
+    title: 每个支持的主题组合都必须完整解析：必需的语义键（文字、背景、边框、状态）一个不缺，构建时不得静默回退到默认主题
+    level: hard
+    check: auto
+    how: CI 枚举支持的主题组合逐个构建，对照必需键清单，缺键即失败
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 缺键时静默回退，深色模式里就会冒出浅色的背景或看不清的文字。
+    sources: [S03]
+  - id: DSN-005
+    title: 只用转换工具实测支持的 DTCG 特性；项目用到的每类令牌（颜色对象、复合令牌、主题解析等）都有兼容用例
+    level: soft
+    check: auto
+    how: 维护一组覆盖所用特性的样例令牌和期望输出，CI 比对
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 「支持 DTCG」不等于支持最新版的全部特性，Style Dictionary 官方就说明对 2025.10 还没完整支持。
+    sources: [S05]
+  - id: DSN-006
+    title: 生成的产物（CSS 变量、Swift、Kotlin、XML 资源等）不手改；CI 重新生成后必须与仓库内容一致
+    level: hard
+    check: auto
+    how: CI 跑令牌构建后执行 `git diff --exit-code` 检查生成目录
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 手改的生成文件下次构建就被覆盖，而且源文件和产物从此对不上。
+  - id: DSN-007
+    title: 升级令牌转换工具前，在样例令牌上比对新旧输出，差异逐条确认
+    level: soft
+    check: semi
+    how: 升级 PR 附上样例令牌的新旧输出差异
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 转换工具的大版本常改默认格式和单位处理，不比对就会把视觉变化悄悄带进发布。
+    sources: [S05]
+    see: ["03"]
+  # ── 命名与分层 ──
+  - id: DSN-008
+    title: 令牌分三层：原始值、语义、组件；平台适配层只做映射，不新增含义
+    level: soft
+    check: manual
+    how: 评审令牌目录结构，看语义层是否只引用原始值、组件层是否只引用语义或原始值
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 分层后换主题、换品牌只改映射，不用逐个组件改。
+    detail: |
+      | 层 | 例子 | 谁用 |
+      |---|---|---|
+      | 原始值 | `color.blue.600`、`space.4` | 只给设计系统内部引用 |
+      | 语义 | `color.text.primary`、`color.surface.raised` | 业务界面首选 |
+      | 组件 | `button.primary.background` | 组件内部，由组件负责人维护 |
+    sources: [S07, S21]
+  - id: DSN-009
+    title: 在采用设计令牌的项目里，业务界面只用语义或组件令牌，不写新的裸颜色、间距、圆角、阴影、z-index、动效值；例外要登记
+    level: hard
+    check: auto
+    how: 样式 lint 禁止这些属性使用字面量（Web 可用 Stylelint 规则，CSS-in-JS 用 ESLint 规则）；例外清单之外的命中让 CI 失败
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 散落的字面量让换主题、调品牌变成全局搜索替换，视觉也会一点点漂移。
+    detail: 工具配置见 07。图片叠色、第三方嵌入等确实要用字面量的地方，写进例外清单（见 DSN-033）。
+    sources: [S07]
+    see: ["07"]
+  - id: DSN-010
+    title: 令牌名表达用途而不是取值：用 `color.text.danger`，不用 `color.red`；统一小写点分
+    level: soft
+    check: auto
+    how: 命名脚本检查语义层和组件层的名字里不含色名或数值
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 名字里写值，一换主题名字就成了谎话；按用途命名，Agent 和新人也能看名字选对令牌。
+    detail: 推荐结构 `类别.用途.变体.状态`，如 `color.background.button.hover`。不要把品牌名、主题名写进组件 API。
+    sources: [S07]
+  - id: DSN-011
+    title: 语义令牌和组件令牌写 `$description`，说明什么时候用
+    level: soft
+    check: auto
+    how: 脚本列出缺描述的令牌，CI 给出警告
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 只看名字很难区分 `surface.raised` 和 `surface.overlay`，描述能减少用错。
+    sources: [S01]
+  # ── 颜色与主题 ──
+  - id: DSN-012
+    title: "深色主题单独映射一套语义值，不用 `filter: invert()` 反转整页"
+    level: hard
+    check: auto
+    how: "样式 lint 禁止在根元素或大容器上使用 `filter: invert(...)`"
+    applies: [platform:web]
+    why: 反相会把图片、品牌色、状态色一起反掉，层级关系也会颠倒。
+    detail: 深色下用表面的明度区分层级（画布、表面、浮层、选中），阴影要配合边框或表面色，不能只靠模糊半径。
+    sources: [S07]
+  - id: DSN-013
+    title: 主题按维度分开定义（如明暗、密度），列出支持的组合，不做任意自由组合
+    level: soft
+    check: manual
+    how: 评审主题配置，看是否有明确的组合清单，且清单里的每个组合都在 DSN-004 的构建测试里
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 维度叠加会让组合数爆炸，没列出的组合没人测过。
+    sources: [S03]
+  - id: DSN-014
+    title: 色阶可以用 OKLCH 生成，但发布值要做色域映射；输出广色域颜色时同时给 sRGB 回退
+    level: soft
+    check: semi
+    how: 构建脚本检查每个颜色在 sRGB 内或带回退值，审查亮端和暗端的色相偏移
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: OKLCH 的明度变化更均匀，适合生成色阶；但超出屏幕色域的值在不同设备上显示不同。
+    detail: 用成熟的色彩库做换算和色域映射，不自己写色阶算法。
+    sources: [S02, S08]
+  - id: DSN-015
+    title: 为每个主题维护前景/背景配对表，CI 按 09 的对比度阈值逐对计算；不能凭 OKLCH 的 L 值判断达标
+    level: hard
+    check: auto
+    how: 脚本读取配对表和各主题的解析结果，按 WCAG 公式计算对比度，低于 09 的阈值即失败
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: OKLCH 的 L 是感知明度，和 WCAG 对比度的相对亮度公式不是一回事，同样的 L 值可能不达标。
+    sources: [S08, S09]
+    see: ["09"]
+  - id: DSN-016
+    title: 状态色按语义家族定义（中性、信息、成功、警告、危险），不按色名定义
+    level: soft
+    check: auto
+    how: 命名脚本检查状态类令牌使用语义家族名
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 按语义定义才能在不同主题里换实际颜色；「颜色之外还要有文字或图标」的要求见 09。
+    sources: [S07]
+    see: ["09"]
+  - id: DSN-017
+    title: 图表配色用分类、顺序、发散三类色板令牌，不为新数据系列临时生成随机颜色
+    level: soft
+    check: semi
+    how: 检查图表配置里的颜色是否引用色板令牌
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 随机颜色每次渲染都可能变，相邻系列也可能撞色；固定色板可复现、可校对比度。
+    sources: [S13]
+    see: ["22"]
+  # ── 字体与排版 ──
+  - id: DSN-018
+    title: 字号和行高成对定义为排版令牌，组件只用排版令牌，不私造新的字号
+    level: soft
+    check: auto
+    how: 样式 lint 禁止 `font-size`、`line-height` 使用字面量
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 一套固定的字阶让层级清楚；每个组件自己定字号，页面很快就有十几种大小。
+    ref_value: 参考值（信息密度较高的中文后台，字号/行高，px）：12/18、13/20、14/22、16/24、18/26、22/30、28/36。门户、教学、移动端应整体加大；没有标准出处，按真实中英文本截图调整。
+  - id: DSN-019
+    title: 默认用系统字体栈；栈里要有中文字体，并以通用字体族结尾
+    level: soft
+    check: semi
+    how: 检查字体令牌的回退链；在目标系统上截图确认中文实际显示的字体
+    applies: [platform:web, platform:desktop]
+    why: 系统字体不占包体积，也更符合各平台的阅读习惯；缺中文字体时浏览器会挑一个不可控的字体。
+    detail: |
+      Web 示例（按目标系统确认字体真实存在）：
+      `system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`
+  - id: DSN-020
+    title: 随产品打包的字体必须允许再分发，并随包附带许可证文件；不得从操作系统或网上抽取商用字体打包
+    level: hard
+    check: semi
+    how: 资产清单列出每个字体文件的来源、许可证和哈希；发布前人工核对
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 系统自带的商用字体（如微软雅黑、苹方）只授权给系统本身使用，随产品分发有侵权风险。
+    detail: 思源黑体与 Noto Sans CJK 是同一字体家族的两个发行名，均为 SIL OFL 1.1：可以随软件分发，要保留版权声明和许可证；修改后再发布不能沿用保留字体名（Source / Noto）。
+    sources: [S10, S11]
+    see: ["27"]
+  - id: DSN-021
+    title: 对中文字体做子集化后，在断网环境里截图检查不缺字
+    level: soft
+    check: semi
+    how: 用覆盖常用字和业务专有字的样例页，在断网环境下截图人工检查
+    applies: [platform:web, platform:desktop]
+    why: 中文字体体积大，子集化能省很多，但切掉的字会显示成方框或回退字体。
+  - id: DSN-022
+    title: "数字列、金额、计时器使用等宽数字（`font-variant-numeric: tabular-nums`）"
+    level: soft
+    check: semi
+    how: 检查表格和数字组件的样式；截图看列是否对齐
+    applies: [platform:web, platform:desktop]
+    why: 比例数字宽度不一，数字一变列就跳动、对不齐。
+    sources: [S12]
+  # ── 间距、圆角、阴影、层级、密度 ──
+  - id: DSN-023
+    title: 间距用一套有名字的阶梯，页面和组件只从阶梯里取值
+    level: soft
+    check: auto
+    how: 样式 lint 禁止 `margin`、`padding`、`gap` 使用字面量
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 统一的阶梯让视觉节奏一致；成熟设计系统都用有名字的空间体系，但没有「必须 8px」的标准。
+    ref_value: 参考阶梯（px）：0、2、4、6、8、12、16、20、24、32、40、48、64、80，布局优先取 4 和 8 的倍数，2px 只用于小元素微调。没有标准出处，是常见做法。
+    sources: [S14]
+  - id: DSN-024
+    title: 圆角和阴影各定少数几档令牌；阴影按层级含义命名，不按模糊半径命名
+    level: soft
+    check: auto
+    how: 样式 lint 禁止 `border-radius`、`box-shadow` 使用字面量
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 档位少才统一；按层级命名，深色主题里才能换成边框或表面色来表达。
+    ref_value: 参考值：圆角 0、4、8、12、16、full（px）；阴影 none、sm、md、lg。没有标准出处。
+  - id: DSN-025
+    title: z-index 只用项目的层级清单；第三方弹层组件的层级也纳入同一清单
+    level: soft
+    check: auto
+    how: 扫描样式里的 `z-index`，不在清单内的值报错
+    applies: [platform:web]
+    why: 各写各的 `99999` 最后谁也盖不住谁；弹窗、下拉、提示的上下关系要在一处定。
+    ref_value: 参考清单：base 0、sticky 100、dropdown 200、popover 300、modal 400、toast 500。只是项目约定；浏览器 top layer（如原生 dialog）不受 z-index 影响，要单独验证。
+  - id: DSN-026
+    title: "紧凑模式用密度令牌调整尺寸和间距，不用 `transform: scale` 或 `zoom` 整页缩放"
+    level: soft
+    check: auto
+    how: 样式 lint 检查根元素和页面容器上的 `scale`、`zoom`
+    applies: [platform:web, platform:desktop]
+    why: 整页缩放会让文字发虚、像素对不齐、点击区域变小。
+    ref_value: 参考值：数据表行高舒适 44px、紧凑 36px；字号一般不随紧凑模式变小。没有标准出处。
+    sources: [S21]
+  # ── 动效 ──
+  - id: DSN-027
+    title: 动效时长和缓动曲线用动效令牌，不在组件里写字面量
+    level: soft
+    check: auto
+    how: 样式 lint 禁止 `transition`、`animation` 的时长和缓动使用字面量
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 统一的时长和曲线让动效节奏一致，也方便在「减少动效」时集中关闭（行为要求见 09）。
+    ref_value: 参考值：instant 0ms、fast 120ms（悬停、颜色过渡）、normal 180ms（控件展开收起）、slow 280ms（面板、布局变化）；standard 缓动 `cubic-bezier(0.2, 0, 0, 1)`，exit 缓动 `cubic-bezier(0.4, 0, 1, 1)`。时长没有标准出处；原生端优先用系统动画参数。
+    see: ["09"]
+  - id: DSN-028
+    title: 过渡动画优先只改 `transform` 和 `opacity`，大面积模糊和无限循环的闪烁骨架要有理由
+    level: soft
+    check: semi
+    how: 评审动效代码；对可疑页面录性能面板看布局和重绘
+    applies: [platform:web]
+    why: 改宽高、位置会触发重排，模糊和循环动画持续占用渲染，低端设备上会卡顿。
+    see: ["07"]
+  # ── 图标、品牌资产 ──
+  - id: DSN-029
+    title: 每个项目选定一个主图标集；平台原生图标作为有映射的例外
+    level: soft
+    check: semi
+    how: 检查依赖清单和资源目录里的图标来源
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 不同图标集的线宽、端点、光学尺寸不同，混用后同样 20px 也看着不齐。
+    ref_value: 参考尺寸 16、20、24px，同一图标集内统一线宽。
+    sources: [S15]
+  - id: DSN-030
+    title: 随产品分发的图标、插画、字体登记到资产清单：来源、许可证、版本或哈希
+    level: hard
+    check: semi
+    how: CI 检查资源目录里的每个文件都在清单中；新增条目由人核对许可证
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 设计资产也是要分发的第三方组件，来源不明的素材有侵权风险，出了问题也无从追查。
+    detail: 许可口径和扫描工具见 27。SVG 打包前要检查外链、脚本和远程字体引用。
+    sources: [S10, S15, S16]
+    see: ["27"]
+  - id: DSN-031
+    title: 断网或内网部署的产品，运行时不得从外部地址加载字体、图标和插画
+    level: hard
+    check: auto
+    how: 在断网环境里跑页面测试；Web 端用 CSP 限制字体和图片来源，并检查网络请求记录
+    applies: [kind:onprem]
+    why: 外链资源在内网里加载不出来，界面就缺字缺图；对外请求还会暴露使用信息。
+    detail: 常见漏网的是 Google Fonts、图标 CDN、在线徽章。自托管设计工具也要检查其默认的外部服务和更新检查。
+    sources: [S19]
+    see: ["25", "32"]
+  - id: DSN-032
+    title: 品牌标志和应用图标保留矢量母稿，各平台按官方规范分别导出，不用一张位图通用
+    level: soft
+    check: semi
+    how: 脚本检查各平台图标的尺寸和格式；评审看母稿是否在仓库或资产库中
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 各平台对图标的尺寸、安全区、分层要求不同，一张图到处缩放会糊或被裁切。
+    detail: |
+      - Web：SVG 母稿 + 多尺寸 `favicon.ico` + manifest 图标（含 maskable）。
+      - Apple：1024×1024 分层母稿，交给 Xcode 生成下游尺寸。
+      - Android：自适应图标 108×108dp 分层，主体在 66×66dp 安全区内，提供单色层。
+      - Windows：多尺寸 ICO 和 MSIX 资产。
+      具体打包和上架见 28–31。
+    sources: [S22, S23, S24, S25]
+    see: ["28-31"]
+  # ── 跨端与设计—代码一致 ──
+  - id: DSN-033
+    title: 视觉例外登记在一份清单里，写明范围、原因、负责人和复核日期；过期由 CI 提示
+    level: soft
+    check: auto
+    how: 例外清单用 schema 校验必填项，CI 检查复核日期是否已过
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 允许受控的例外，规则才能落地；没有到期日的例外会悄悄变成常态。
+    see: ["02"]
+  - id: DSN-034
+    title: 跨端统一令牌的名字和语义，不要求 px、pt、dp 数值逐一相同；原生端遵循平台的字体、图标和材质惯例
+    level: soft
+    check: manual
+    how: 设计评审时按语义核对各端，不做像素比对
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 各平台单位、系统字体和交互惯例不同，强求像素一致反而让原生端显得别扭。
+    sources: [S17, S26]
+    see: ["28"]
+  - id: DSN-035
+    title: 项目用了组件库时，由令牌生成组件库的主题配置，不并行维护两套令牌
+    level: soft
+    check: manual
+    how: 评审主题配置的来源，确认组件库主题值来自令牌构建产物
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 组件库自带一套令牌（如 Ant Design 的基础、派生、别名令牌），两套各改各的就会对不上。
+    sources: [S21]
+    see: ["07"]
+  - id: DSN-036
+    title: 视觉改动的 PR 写明令牌差异（或说明没有令牌改动）、受影响的组件和主题，并附改动前后的截图
+    level: soft
+    check: semi
+    how: PR 模板固定这些栏目；改到令牌或样式目录时 CI 检查栏目非空
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 评审者要能看到改了哪些令牌、影响到哪里；截图基线的生成和审批规则见 04。
+    see: ["04", "23"]
+choices:
+  - category: 令牌格式
+    pick: DTCG 设计令牌格式（Format、Color、Resolver 模块）
+    alternatives:
+      - { name: 项目自定的简化 JSON, when: 令牌很少且只有一端，但要写清到 DTCG 的映射 }
+    avoid:
+      - { name: 只用设计工具里的私有变量, why: 没有版本和评审，换工具就丢 }
+    license: 社区组规范文本，按 W3C 社区组协议发布，可免费实现
+    notes: 首个稳定版 2025.10 于 2025-10-28 发布；是社区组报告，不是 W3C 推荐标准。
+    sources: [S01, S02, S03, S04]
+  - category: 令牌转换与多端生成
+    pick: Style Dictionary
+    alternatives:
+      - { name: Terrazzo, when: Style Dictionary 不支持项目要用的 DTCG 特性时，先做小范围验证 }
+      - { name: 简单生成脚本, when: 只有一端、令牌很少 }
+    avoid:
+      - { name: 自建完整的令牌语言或解析器, why: 维护成本高，标准一更新就落后 }
+    license: Style Dictionary 为 Apache-2.0
+    notes: 官方说明对 DTCG 2025.10 的支持仍在完善中，用到的特性要写兼容用例（DSN-005）。
+    sources: [S05, S06]
+  - category: 令牌校验
+    pick: JSON Schema + AJV，加循环引用和必需键的检查脚本
+    alternatives:
+      - { name: 其他 JSON Schema 校验器, when: 项目不用 Node 时 }
+    avoid:
+      - { name: 只靠 TypeScript 类型检查令牌, why: 查不了引用、循环和主题完整性 }
+    license: AJV 为 MIT
+    sources: [S01]
+  - category: 设计工具
+    pick: Figma Variables（联网团队）
+    alternatives:
+      - { name: Penpot 自托管, when: 设计稿不能出网、需要内网部署或开源工具时；断网安装要单独验证 }
+      - { name: Tokens Studio 插件, when: 需要在 Figma 里管理 DTCG 令牌并与 Git 同步时 }
+    avoid:
+      - { name: 把插件或设计工具当唯一事实来源, why: 难以 diff 和回滚 }
+    license: Figma 为商业服务；Penpot 为 MPL-2.0
+    notes: 用设计工具做的产品本身可以完全离线运行，设计工具是否自托管是另一回事。
+    sources: [S18, S19, S20]
+  - category: 色阶生成与对比度计算
+    pick: OKLCH 设计 + 成熟色彩库做换算、色域映射和对比度计算
+    alternatives:
+      - { name: Material 3 的 HCT 动态配色, when: Android 风格或需要动态取色的项目 }
+    avoid:
+      - { name: 固定 HSL 亮度就认为对比度达标, why: HSL 亮度和对比度不对应 }
+      - { name: 自写「万能色阶算法」, why: 结果难预测，维护成本高 }
+    sources: [S08, S26]
+  - category: 中文字体
+    pick: 系统字体栈；需要打包时用思源黑体 / Noto Sans CJK
+    alternatives:
+      - { name: 已购买再分发授权的商业字体, when: 品牌有指定字体 }
+    avoid:
+      - { name: 从操作系统抽取商用字体随产品分发, why: 没有再分发授权 }
+      - { name: 从字体 CDN 在线加载, why: 内网缺字、首屏慢 }
+    license: 思源黑体 / Noto Sans CJK 为 SIL OFL 1.1
+    sources: [S10, S11]
+  - category: 图标集（Web 与桌面）
+    pick: Lucide
+    alternatives:
+      - { name: Material Symbols, when: 产品采用 Material 风格或主要面向 Android }
+      - { name: Phosphor, when: 需要多种字重风格时 }
+    avoid:
+      - { name: 不经评审混用多个图标集, why: 线宽和光学尺寸不一致 }
+    license: Lucide 为 ISC（部分图标源自 Feather，需同时保留 MIT 声明）；Material Symbols 为 Apache-2.0
+    sources: [S15, S16]
+  - category: 原生图标
+    pick: iOS / macOS 用 SF Symbols；Android 用 Material Symbols
+    alternatives:
+      - { name: 项目自有矢量图标集, when: 品牌要求跨端统一图标造型 }
+    avoid:
+      - { name: 把 SF Symbols 带到 Web 或 Android 使用, why: 平台专用素材，授权受限 }
+    sources: [S16, S17]
+antipatterns:
+  - { bad: 把 DTCG 稳定版说成「W3C 正式标准」, instead: 写「W3C 社区组稳定报告」 }
+  - { bad: 认为转换工具「支持 DTCG」就能无损处理全部新特性, instead: 只用实测支持的特性，写兼容用例 }
+  - { bad: "在各页面直接写 `#1677ff`、`12px`", instead: 用语义令牌或组件令牌 }
+  - { bad: 深色模式直接对整页反相, instead: 单独映射一套语义值，逐对校验对比度 }
+  - { bad: OKLCH 的 L 相同就宣称对比度合规, instead: 按 WCAG 公式实算前景和背景 }
+  - { bad: "各处写 `z-index: 99999`", instead: 用层级清单 }
+  - { bad: 用整页 `scale(0.85)` 做紧凑模式, instead: 用密度令牌 }
+  - { bad: 混用 Lucide、Material、Heroicons 而不审风格, instead: 每个项目一个主图标集 }
+  - { bad: 内网系统仍从 CDN 加载字体和图标, instead: 自托管资源，断网测试 + CSP }
+  - { bad: 把含真实客户信息的截图或设计稿传到外部 SaaS, instead: 先脱敏，涉及个人信息出境按 27 处理 }
+  - { bad: 为几个页面搭建实时双向令牌同步平台, instead: 令牌文件 + 转换工具 + PR 评审 }
+sources:
+  - { id: S01, title: Design Tokens Format Module 2025.10, url: "https://www.designtokens.org/tr/2025.10/format/", publisher: W3C Design Tokens Community Group, date: 2025-10-28, kind: standard, checked: 2026-11-14 }
+  - { id: S02, title: Design Tokens Color Module 2025.10, url: "https://www.designtokens.org/tr/2025.10/color/", publisher: W3C Design Tokens Community Group, date: 2025-10-28, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: Design Tokens Resolver Module 2025.10, url: "https://www.designtokens.org/tr/2025.10/resolver/", publisher: W3C Design Tokens Community Group, date: 2025-10-28, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: Design Tokens specification reaches first stable version, url: "https://www.w3.org/community/design-tokens/2025/10/28/design-tokens-specification-reaches-first-stable-version/", publisher: W3C Design Tokens Community Group, date: 2025-10-28, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "Style Dictionary: DTCG support", url: "https://styledictionary.com/info/dtcg/", publisher: Style Dictionary, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: Style Dictionary repository, url: "https://github.com/style-dictionary/style-dictionary", publisher: Style Dictionary, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Atlassian Design: Design tokens", url: "https://atlassian.design/tokens/design-tokens/", publisher: Atlassian, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S08, title: "MDN: oklch()", url: "https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Values/color_value/oklch", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: Web Content Accessibility Guidelines (WCAG) 2.2, url: "https://www.w3.org/TR/WCAG22/", publisher: W3C, date: 2023-10-05, kind: standard, checked: 2026-11-13 }
+  - { id: S10, title: "Noto CJK: Sans LICENSE", url: "https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: Source Han Sans, url: "https://github.com/adobe-fonts/source-han-sans", publisher: Adobe, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "MDN: font-variant-numeric", url: "https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/font-variant-numeric", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "Carbon: Data visualization color palettes", url: "https://www.carbondesignsystem.com/building-blocks/data-visualization/color-palettes", publisher: IBM, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S14, title: "Carbon: Spacing", url: "https://www.carbondesignsystem.com/building-blocks/foundations/spacing/overview", publisher: IBM, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S15, title: Lucide repository and LICENSE, url: "https://github.com/lucide-icons/lucide", publisher: Lucide, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: Material Symbols guide, url: "https://developers.google.com/fonts/docs/material_symbols", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: SF Symbols, url: "https://developer.apple.com/sf-symbols/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: Penpot repository, url: "https://github.com/penpot/penpot", publisher: Penpot, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "Penpot: Cloud or self-host", url: "https://help.penpot.app/user-guide/first-steps/cloud-selfhost/", publisher: Penpot, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Figma REST API: Variables endpoints", url: "https://developers.figma.com/docs/rest-api/variables-endpoints/", publisher: Figma, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "Ant Design: Customize theme", url: "https://ant.design/docs/react/customize-theme/", publisher: Ant Design, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S22, title: "MDN: Web app manifest icons", url: "https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Manifest/Reference/icons", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Human Interface Guidelines: App icons", url: "https://developer.apple.com/design/human-interface-guidelines/app-icons", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: Adaptive icons, url: "https://developer.android.com/develop/ui/compose/system/icon_design_adaptive", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: App icon construction, url: "https://learn.microsoft.com/zh-cn/windows/apps/design/iconography/app-icon-construction", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: Android color for mobile design, url: "https://developer.android.com/design/ui/mobile/guides/styles/color", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - 动效参考缓动 `cubic-bezier(0.2, 0, 0, 1)` 是否与 Material 3 的 standard 缓动取值相同，未核实
+  - Figma Variables REST API 的写入接口是否仅限 Enterprise 套餐，未核实最新条款
+  - Tokens Studio 插件、Terrazzo、Phosphor 的许可证未从官方 LICENSE 核实
+  - SF Symbols 的使用授权范围（是否仅限 Apple 平台）未核实原文条款
+  - Lucide 中源自 Feather 的图标需要保留哪些声明（ISC 与 MIT 并存），官方讨论未定论
+  - Penpot 在断网环境中的完整安装和外部服务关闭方式未实测
+  - 待补调研：空状态、加载、骨架屏等视觉状态的参考做法和尺寸
+  - 待补调研：插画风格与素材来源的可参考方案
+  - 待补调研：Terrazzo 与 Style Dictionary 对 DTCG 新特性支持程度的对比
+  - 待补调研：Linux 桌面应用图标的交付规范
+  - 待补调研：选定组件库后令牌接入其主题机制的具体做法（与 07 一起定）
