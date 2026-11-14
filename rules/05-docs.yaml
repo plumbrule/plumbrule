@@ -1,0 +1,647 @@
+id: "05"
+slug: docs
+title: 文档与写作
+summary: 项目文档怎么分类、放在哪、怎么写、怎么检查、怎么保持不过期：README、ADR、变更日志、中文排版、图表、文档站和文档 lint。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 文档分类与目录（README、CONTRIBUTING、CHANGELOG、docs/）
+    - ADR（架构决策记录）的格式与位置
+    - Markdown 结构、链接文字、图片替代文本
+    - 中文技术写作与中英混排
+    - 操作文档的准确性与示例验证
+    - 文档与代码同步、负责人、复核元数据
+    - 文档 lint（markdownlint、中文排版检查、Vale、链接检查）
+    - 图表工具与图的安全
+    - 文档站选型与离线交付
+    - llms.txt
+    - 面向用户的变更日志写法
+  excludes:
+    - { what: AGENTS.md 的范围与写法（每个有 Agent 参与的仓库都要有）, see: "23" }
+    - { what: 界面文案、按钮、错误提示、危险操作确认的写法, see: "09" }
+    - { what: 提交信息格式、发布自动化工具、CODEOWNERS 与分支保护, see: "03" }
+    - { what: 运行手册与事故复盘的内容要求、复盘流程, see: "26" }
+    - { what: 接口参考文档（OpenAPI 等）, see: "16" }
+    - { what: 架构设计方法本身（何时拆分、依赖方向）, see: "01" }
+    - { what: 代码注释与公共接口的文档注释, see: "02" }
+    - { what: 文档进入 RAG 检索时的切块、权限与注入防护, see: "24" }
+    - { what: 工具与图表引擎的许可证义务口径, see: "27" }
+overview: |
+  1. **按读者要做的事分类。** 用 Diátaxis 的四类（教程、操作指南、参考、解释）组织导航，不机械套成目录；README、变更日志、运行手册、ADR 各有固定入口。
+  2. **文档即代码。** 文档就近放在仓库里，用 Markdown 写，和代码同一个 PR 评审；改了行为就同 PR 改文档，或写明「不影响文档」及理由。
+  3. **README 是入口。** 写清这是什么、前置条件、怎么启动、怎么测试、文档在哪、支持边界。
+  4. **能机器查的交给工具。** markdownlint 查结构，AutoCorrect 查中文排版，lychee 查链接，文档构建查渲染；Vale 查术语和措辞是第二步。中文排版只让一个工具自动修复。
+  5. **PR 里的文档检查不依赖外网。** 内链离线查，外链放到联网的定时任务，失败由人确认。
+  6. **操作文档要能照着做。** 写环境、准确命令、期望输出；没实测的标「未验证」。
+  7. **新鲜度靠显式复核。** 需要时效管理的文档写负责人和 `reviewed_at`/`review_due`；只有真的复核过才更新日期，不拿最后修改时间冒充。
+  8. **图要能复现。** 提交文本源文件，CI 用固定版本渲染；敏感内容不进第三方在线渲染服务；Mermaid 保持默认的 `strict`。
+  9. **变更日志写给用户。** 提交信息生成草稿，人工改写成「影响谁、要做什么」，按 Keep a Changelog 的结构归档。
+  10. **llms.txt 是可选的社区提案。** 只列公开内容，不是标准，也不是访问控制。
+rules:
+  # ── 文档体系与位置 ──
+  - id: DOC-001
+    title: 每个交付的仓库根目录必须有 README，写明用途、前置条件、启动命令、测试命令、文档入口和支持边界
+    level: hard
+    check: semi
+    how: CI 检查 README.md 存在且包含这几类小节；内容是否准确靠评审，启动和测试命令能自动跑的放进示例测试（见 DOC-016）
+    applies: [all]
+    why: README 是人和 Agent 接触仓库的第一站；缺了前置条件和命令，每个新人都要重新摸索一遍。
+    detail: |
+      - 「支持边界」指支持哪些平台和版本、哪些用法不保证。
+      - 只有截图和徽章的 README 不算数。
+      - Agent 的工作约定写在 AGENTS.md（见 23），README 只放给所有读者的入口信息，两边互相链接，不重复。
+    sources: [S01]
+    see: ["AGT-001"]
+  - id: DOC-002
+    title: 读者任务明显不同的内容，分成教程、操作指南、参考、解释四类，分开写、分开导航
+    level: soft
+    check: manual
+    how: 评审时看新文档属于哪一类，是否把教程、参考和原理解释混在一篇里
+    applies: [all]
+    why: 学会、做成、查准、理解是四种不同的阅读目的；混在一起，每一类读者都读不顺。
+    detail: |
+      - Diátaxis 是导航逻辑，不要求目录一定叫 `tutorials/`、`how-to/`。小项目一篇 README 就够。
+      - README、变更日志、运行手册、事故复盘、ADR、贡献指南跨越这四类，各设固定入口，不硬塞进某一类。
+    sources: [S01]
+  - id: DOC-003
+    title: README、CONTRIBUTING、CHANGELOG 放仓库根目录，其余文档放 docs/；按需建目录，不提交空目录和空模板
+    level: soft
+    check: semi
+    how: 脚本列出 docs/ 下的空文件、只有标题的页面和空目录，评审时确认
+    applies: [all]
+    why: 固定位置让人和工具都能找到；为了「完整」建的空页面会让读者以为有内容、实际没有。
+    detail: |
+      常见布局（示意，按需取用）：
+
+      ```text
+      README.md  CONTRIBUTING.md  CHANGELOG.md
+      docs/
+        index.md
+        tutorials/  how-to/  reference/  explanation/
+        adr/        runbooks/  migrations/
+        glossary.md
+      ```
+
+      - CONTRIBUTING.md 在有多位贡献者时才需要；可放根目录或 `.github/`。
+  - id: DOC-004
+    title: 文档放在代码仓库里和代码一起评审；跨项目共用的规范按版本号或提交编号引用，不整份复制进每个项目
+    level: soft
+    check: manual
+    how: 评审时检查是否有从别处整份复制过来的规范文本，引用外部规范时是否锁定了版本
+    applies: [all]
+    why: 文档离代码越远越容易过期；复制进来的规范会和原件各自演化，读者不知道哪份是对的。
+    detail: 不要先建 Wiki、知识库或 CMS 再考虑变更流程；只有仓库 Markdown 不够用时再建文档站（见文档站选型）。
+    sources: [S23]
+  - id: DOC-005
+    title: 文档文件名用小写 ASCII 加连字符（kebab-case）；被外部引用的标题要显式设定锚点，不依赖中文标题自动生成
+    level: soft
+    check: auto
+    how: 脚本检查 docs/ 下文件名；构建后用链接检查验证锚点
+    applies: [all]
+    why: 中文和大写文件名在不同系统、URL 编码下容易出错；中文标题自动生成的锚点各工具规则不同，换工具就断链。
+    detail: 标题本身可以用中文，只是文件名和稳定链接不依赖它。
+    sources: [S26]
+  # ── ADR ──
+  - id: DOC-006
+    title: 影响多个模块、难以撤销或有明显取舍的技术决定，写一篇 ADR，包含背景、决定、考虑过的备选、后果和状态
+    level: soft
+    check: manual
+    how: 评审跨模块、引入新基础设施或改变公共约定的 PR 时，检查是否有对应的 ADR 链接
+    applies: [all]
+    why: 半年后没人记得为什么这样选；没有记录，后来者要么不敢改，要么重蹈覆辙。
+    detail: |
+      - 一篇只记一个决定，篇幅短；写清当时的约束，后来的人才能判断约束是否还成立。
+      - 状态用「提议、已接受、已弃用、已被取代」这几种。
+      - 什么样的决定算架构决定、怎么做设计，见 01。
+    see: ["01"]
+  - id: DOC-007
+    title: ADR 放在 docs/adr/，按递增编号命名（如 0007-use-postgres-queue.md）；已接受的 ADR 不改结论，要推翻就新写一篇并在两边互相链接
+    level: soft
+    check: auto
+    how: 脚本检查 docs/adr/ 下的文件名格式和编号不重复；评审时检查对已接受 ADR 的修改只涉及状态和链接
+    applies: [all]
+    why: ADR 的价值在于保留当时的判断；改写旧结论会抹掉历史，读者看不出决定是怎么演变的。
+    detail: 改错别字、补链接可以直接改；改「决定」一节要新写一篇，把旧的标为「已被取代」并链到新的。
+  # ── Markdown 结构与可访问性 ──
+  - id: DOC-008
+    title: 每篇 Markdown 只有一个一级标题，标题逐级递进，代码块标明语言
+    level: hard
+    check: auto
+    how: markdownlint 开启 MD001（标题逐级）、MD025（单个一级标题）、MD040（代码块标语言）
+    applies: [all]
+    why: 目录生成、读屏导航和代码高亮都依赖这几项；工具能直接判定，没有理由靠人看。
+    detail: |
+      推荐的起步配置（`.markdownlint.jsonc`，示意）：
+
+      ```jsonc
+      {
+        "default": true,
+        "MD013": false,              // 中文长段和表格不按英文行宽折行
+        "MD046": { "style": "fenced" }
+      }
+      ```
+
+      - MD033（禁止内联 HTML）按路径配置：普通文档开着，文档站里确实要用 HTML 或 MDX 组件的目录单独放开，不要全局关闭。
+    sources: [S08, S09]
+  - id: DOC-009
+    title: 链接文字写明去向，不用「这里」「点击这里」「链接」；图片必须有替代文本
+    level: hard
+    check: auto
+    how: markdownlint 开启 MD045（图片要有替代文本）和 MD059（链接文字要有描述性），并在 MD059 的禁用词里补上中文的「这里」「点击这里」「此处」「链接」
+    applies: [all]
+    why: 读屏软件常把链接单独列出来读，「点击这里」脱离上下文就没有意义；没有替代文本的图片对读屏用户等于不存在。
+    detail: MD059 默认的禁用词只有英文（click here、here、link、more），中文要自己加。替代文本写得好不好仍要人看；无障碍的通用要求见 09。
+    sources: [S08]
+    see: ["09"]
+  - id: DOC-010
+    title: 图承载关键信息时，在图下用几句话写出结论，不只写「架构图」这样的替代文本
+    level: soft
+    check: manual
+    how: 评审含架构图、流程图的文档时，检查图下是否有文字说明
+    applies: [all]
+    why: 只看得见文字的读者（读屏用户、搜索、Agent）需要从文字里拿到图的结论。
+    ref_value: 参考写 2–5 句：范围、主要组件或步骤、关键结论。这是经验值，不是标准。
+  # ── 中文写作 ──
+  - id: DOC-011
+    title: 中文句子用全角标点；中文与英文、数字之间是否留空格，按团队定下的风格和例外表执行，并用一个工具在 CI 里检查
+    level: soft
+    check: auto
+    how: CI 跑 AutoCorrect（或 zhlint）的检查模式，例外写进工具的配置文件
+    applies: [all]
+    why: 排版不一致会分散注意力；靠人眼盯空格和标点既慢又不准。
+    detail: |
+      常见默认（团队风格，示意）：
+
+      | 场景 | 写法 | 不这样写 |
+      |---|---|---|
+      | 中英混排 | 使用 React 开发界面。 | 使用React开发界面。 |
+      | 中文与数字 | 等待 30 秒。 | 等待30秒。 |
+      | 中文标点 | 选择「保存」，再点击「发布」。 | 选择"保存", 再点击"发布". |
+      | 专有名词 | GitHub、TypeScript、Node.js | Github、Typescript、NodeJS |
+
+      - 例外：代码、路径、命令、ISO 时间戳、产品的官方拼写；英文整句按英文标点。
+      - 百分号、度数等符号前是否留空格，团队定一种写进例外表。
+    sources: [S04, S10, S11]
+  - id: DOC-012
+    title: 中英混排的空格属于团队风格，不要写成国家标准的强制要求；需要引国标时引 GB/T 15834（标点）和 GB/T 15835（数字）
+    level: soft
+    check: manual
+    how: 评审风格指南时检查是否把团队约定标成了「国标要求」
+    applies: [all]
+    why: 这两项是推荐性国家标准，而且没有规定中英之间留空格；写错依据会让人在合同和验收时误判。
+    detail: 是否必须遵循国标，以客户合同和行业要求为准。浏览器里的中文排版细节可参考 W3C《中文排版需求》，它是工作组说明，不保证浏览器实现。
+    sources: [S02, S03, S05]
+  - id: DOC-013
+    title: 中文排版检查只选一个工具负责自动修复，其他工具只报告；CI 里只检查、不写回源文件
+    level: soft
+    check: semi
+    how: 检查 CI 配置里没有 `--fix` 类参数；检查仓库里是否同时启用了多个中文排版修复器
+    applies: [all]
+    why: 几个修复器规则略有不同，同时自动修复会互相改来改去；CI 写回文件会让提交内容和评审内容对不上。
+    sources: [S10, S11]
+  - id: DOC-014
+    title: 启用中文排版检查前，先建一组回归样例，覆盖中文、英文、数字、代码、链接、表格和界面字符串
+    level: soft
+    check: semi
+    how: 样例集放在仓库里，升级检查工具或修改规则时先跑一遍，比对结果
+    applies: [all]
+    why: 排版工具在代码、链接和术语附近容易误伤；没有样例，升级后才发现大面积误改。
+    ref_value: 参考值约 30 条，保证每种场景都有正反例；数量本身没有出处，按项目规模调整。
+  - id: DOC-015
+    title: 产品名、术语、大小写和单位以仓库里版本化的术语表为准，新术语先进术语表再使用
+    level: soft
+    check: semi
+    how: 用 Vale 的词表规则（accept/reject 列表）检查文档里的写法；术语表的修改随 PR 评审
+    applies: [all]
+    why: 人和 Agent 都会在不同文档里用不同叫法，读者以为是不同的东西。
+    detail: |
+      - 位置：`docs/glossary.md`，或机器可读的 YAML，字段如术语、推荐中文、推荐英文、禁用写法、定义、负责人。
+      - 不必强行给每个英文词定唯一中译名；面向客户的界面可以另设业务名词。
+      - 代码里命名一致的要求见 COD-001；界面上的按钮原文见 09。
+    sources: [S12]
+    see: ["COD-001", "09"]
+  - id: DOC-016
+    title: 句子写具体：一句一个主要动作，写出前提和可观察的结果；不用「显然」「简单」「只需」代替事实条件；句长只作提示，不设硬阈值
+    level: soft
+    check: semi
+    how: Vale 自定义规则把「显然」「简单地」「只需」「随便」等标为提示；句长规则只告警不阻断
+    applies: [all]
+    why: 「很简单」对不会的人没有信息量；限制和失败情况不写明，读者只能自己踩坑。英文的句长阈值不能直接套到中文上。
+    sources: [S06, S12]
+  # ── 操作文档与示例 ──
+  - id: DOC-017
+    title: 操作指南和运行手册必须写明适用环境与版本、准确的命令和路径、输入和期望输出；示例完整可复制，省略处明确标出
+    level: hard
+    check: semi
+    how: 评审操作类文档时逐项检查；能自动化的示例放进示例测试（见 DOC-019）
+    applies: [all]
+    why: 照着操作的人（包括 Agent）没法猜被省略的参数；缺了期望输出，就不知道做对了没有。
+    sources: [S07]
+  - id: DOC-018
+    title: 文档里要求读者执行的关键命令，必须在声明支持的环境里实测过；没实测的标明「未验证」和环境
+    level: hard
+    check: semi
+    how: 示例测试覆盖的命令视为已验证；其余命令评审时要求附实测记录，否则必须带「未验证」标记
+    applies: [all]
+    why: 没跑过的命令写得再像真的也可能是错的；在运行手册里，错命令会在事故中放大损失。
+    sources: [S07]
+  - id: DOC-019
+    title: 能自动执行的示例（README 启动命令、代码片段、配置样例）放进 CI 定期跑
+    level: soft
+    check: auto
+    how: 用各语言的文档测试能力或脚本抽取代码块执行；失败时阻断或开任务
+    applies: [all]
+    why: 代码会变，示例会悄悄失效；自动跑是唯一可靠的发现方式。
+    detail: 语言自带的文档测试工具（如 Rust doctest、Python doctest、Go Example）见 10–15。
+    see: ["10-15"]
+  # ── 文档与代码同步、负责人、复核 ──
+  - id: DOC-020
+    title: '改动命令行参数、配置项、权限、界面行为、部署方式或兼容性的 PR，必须在同一 PR 更新相关文档，或在 PR 描述里写 `docs-impact: none` 和理由'
+    level: hard
+    check: semi
+    how: CI 按「代码路径 → 文档」映射表判断是否命中；命中但没改文档也没写影响声明时失败；声明是否合理由评审判断
+    applies: [all]
+    why: 文档和代码分开改，几乎一定会忘；事后补文档的 PR 往往永远不来。
+    detail: 路径映射只是启发式，不能自动判断语义是否变了，所以最后一步要人确认。PR 模板见 03。
+    sources: [S23]
+    see: ["03"]
+  - id: DOC-021
+    title: 重要文档目录（对外文档、运行手册、规范）在 CODEOWNERS 里指定负责人，并要求负责人批准；Agent 生成的文档同样要人审
+    level: soft
+    check: auto
+    how: 检查 CODEOWNERS 覆盖这些目录，分支保护开启「需要代码负责人批准」
+    applies: [all]
+    why: 没有负责人的文档没人维护；只写 CODEOWNERS 不开强制审批，等于没有门槛。
+    detail: CODEOWNERS 与分支保护的通用规则见 FLW-020。
+    see: ["FLW-020"]
+  - id: DOC-022
+    title: 需要时效管理的文档（运行手册、对外操作指南、规范、版本支持矩阵）在 frontmatter 写 owner、status、reviewed_at、review_due、applies_to，并用 schema 校验
+    level: soft
+    check: auto
+    how: CI 用 JSON Schema 校验这些字段存在、日期格式正确
+    applies: [all]
+    why: 没有负责人和复核日期，就没法知道一篇文档还能不能信。
+    detail: |
+      示意：
+
+      ```yaml
+      ---
+      title: 数据库回滚
+      owner: team-orders
+      status: active
+      reviewed_at: 2026-11-14
+      review_due: 2027-02-14
+      applies_to: ">=2.4 <3.0"
+      source_paths: [deploy/db/, migrations/]
+      ---
+      ```
+
+      - `source_paths` 可选，供 DOC-020 的路径映射使用。
+      - 普通的原理解释类文档不必加。
+  - id: DOC-023
+    title: 只有真的复核过内容才更新 reviewed_at；不拿文件最后修改时间或最近提交时间代替复核时间
+    level: soft
+    check: semi
+    how: PR 改动 reviewed_at 时，要求在描述里写明复核了什么；定期抽查
+    applies: [all]
+    why: 改了个错别字不等于整篇核对过；虚假的新鲜度比没有日期更误导人。
+  - id: DOC-024
+    title: 文档过了 review_due 只生成待复核任务，不阻断无关的 PR；生产应急用的运行手册过期可以设为发布门禁
+    level: soft
+    check: auto
+    how: 定时任务扫描 frontmatter，过期的给 owner 开任务；只对标记为应急的运行手册接入发布检查
+    applies: [all]
+    why: 一篇旧的原理说明卡住所有功能 PR，大家就会去改日期糊弄过去；应急手册过期的后果才值得卡发布。
+    detail: 「链接返回 403」「很久没提交」不等于内容错误，只作为复核线索。复核周期由各文档负责人定；运行手册的内容要求见 26。
+    see: ["26"]
+  - id: DOC-025
+    title: 规范、选型和决策文档引用法规、版本、政策日期等外部事实时，写来源链接和核实日期；查不到的写「未核实」
+    level: soft
+    check: semi
+    how: 评审时检查外部事实是否带来源和日期；脚本可扫描文档里的版本号和日期附近是否有链接
+    applies: [all]
+    why: 外部事实会变；不留来源和日期，读者和 Agent 没法判断它还成不成立。
+  # ── 文档检查与 CI ──
+  - id: DOC-026
+    title: 文档构建失败、Markdown 结构检查失败、仓库内链接失效时必须阻断合并
+    level: hard
+    check: auto
+    how: 把 markdownlint、`lychee --offline`（只查本地文件和内链）和文档站构建设为必过检查
+    applies: [all]
+    why: 这几项都能可靠地自动判定；放过去，读者拿到的就是坏页面和死链接。
+    detail: |
+      - 锚点和标题大小写在文档站构建后再校验一次。
+      - 中文排版检查（DOC-011）稳定后也可设为必过。
+      - 把这些命令封装成一个入口（DOC-028）。
+    sources: [S09, S14]
+  - id: DOC-027
+    title: 外部链接检查不放进 PR 的必过检查，改为联网的定时任务；失败由人确认后再修复或登记豁免
+    level: soft
+    check: auto
+    how: 定时任务跑 lychee 全量检查，设重试、限速和域名白名单；结果开任务而不是直接改文档
+    applies: [all]
+    why: 外链失败常是限流、403、地区限制或内网不通，和本次改动无关；放进 PR 会让合并随机失败，在断网的 CI 里永远失败。
+    sources: [S14]
+  - id: DOC-028
+    title: 文档检查封装成仓库里的一个命令（如 `make docs-check` 或 `scripts/docs-check.sh`），本地、CI 和 Agent 都跑这一条
+    level: soft
+    check: semi
+    how: 检查 CI 配置调用的是这个入口而不是散落的命令
+    applies: [all]
+    why: 命令分散在 CI YAML 里，本地跑不出同样的结果，Agent 也只能猜用 npm 还是别的。
+    detail: |
+      示意：
+
+      ```bash
+      #!/usr/bin/env bash
+      set -euo pipefail
+      markdownlint-cli2 'README.md' 'AGENTS.md' 'docs/**/*.md'
+      autocorrect --lint docs/
+      lychee --offline 'README.md' 'AGENTS.md' 'docs/**/*.md'
+      # 有文档站时接入真实的构建命令
+      ```
+
+      - 工具用锁定的版本；断网环境预置二进制并校验 SHA256，不用 `curl | sh` 或 `@main` 这类不固定的来源。
+      - CI 逻辑放仓库脚本的通用规则见 FLW-024。
+    see: ["FLW-024"]
+  # ── 图 ──
+  - id: DOC-029
+    title: 架构图、流程图、时序图提交可编辑的文本源文件（.mmd、.d2、.puml）或白板源文件（.excalidraw）；PNG、SVG 只是导出物
+    level: soft
+    check: semi
+    how: 脚本列出 docs/ 下没有同名源文件的图片，评审时确认
+    applies: [all]
+    why: 只有图片的图没人改得动，很快就和系统对不上；文本源文件还能在 PR 里看出改了什么。
+    detail: 截图、照片不需要源文件。白板图适合讨论草稿，正式的架构图最好另有文本源文件。
+  - id: DOC-030
+    title: 文本图在 CI 里用锁定版本的渲染器渲染，渲染失败即检查失败
+    level: hard
+    check: auto
+    how: CI 调用 Mermaid CLI、d2、PlantUML 的本地命令渲染所有图源文件，非零退出即失败
+    applies: [all]
+    why: 渲染器升级可能改变语法和布局；不在 CI 里渲染，坏图会直接发布出去。
+    sources: [S18, S19, S20]
+  - id: DOC-031
+    title: 图写明范围和图例：箭头表示调用、事件还是数据流，标出信任边界和外部依赖；节点名和真实组件一致
+    level: soft
+    check: manual
+    how: 评审图时逐项检查图例、边界和节点名
+    applies: [all]
+    why: 同一个箭头不同人读成不同意思；节点名对不上代码，图就成了猜谜。
+    detail: |
+      - 流程图：判断节点写成问句，分支标「是/否」，画出失败和重试路径；不画覆盖全部业务的巨图。
+      - 时序图：标同步/异步、错误路径、超时和重试。
+  - id: DOC-032
+    title: 含内部或客户信息的图和文档，不得发到第三方在线渲染或编辑服务（公网 PlantUML 服务器、在线 Mermaid 编辑器、公共 Kroki 实例等），改用本地或自托管渲染
+    level: hard
+    check: semi
+    how: 扫描文档、文档站配置和构建脚本里指向外部渲染服务的地址；在私有化环境用网络出口策略禁止
+    applies: [all]
+    why: 图源文件会原样发给渲染服务，等于把架构和客户信息交给第三方。
+    detail: 第三方托管的字体、搜索、CDN 同样会外发访问信息，是否涉及数据出境见 27。
+    see: ["27"]
+  - id: DOC-033
+    title: Mermaid 的 securityLevel 保持默认的 strict，不为了点击跳转改成 loose；必须渲染不可信来源的图时，用 sandbox 模式并配合 CSP
+    level: hard
+    check: auto
+    how: 扫描文档站和应用里 `mermaid.initialize` 等配置，出现 `loose` 或 `antiscript` 时失败
+    applies: [all]
+    why: loose 允许图里的 HTML 和点击回调，渲染别人写的图时就是 XSS 入口；已有产品因此修过漏洞。
+    detail: |
+      - strict：对图中文字里的 HTML 编码、禁用点击，是默认值。
+      - sandbox：在禁用脚本的 iframe 里渲染，适合用户提交的图；官方文档曾标注为测试阶段，启用前验证效果。
+      - securityLevel 不能被图源里的 frontmatter 覆盖，只能在初始化时设置。
+    sources: [S18]
+    see: ["25"]
+  # ── 文档站 ──
+  - id: DOC-034
+    title: 文档站锁定依赖、能在本地复现构建；生产站点不用 alpha、beta 等预发布版本
+    level: soft
+    check: auto
+    how: CI 用锁文件安装并构建；检查依赖清单里文档站框架不是预发布版本
+    applies: [all]
+    why: 预发布版本的接口和插件兼容性随时会变，升级要回归，出问题也难求助。
+    detail: 升级文档站框架时跑全站构建和中文搜索验收。
+    sources: [S15]
+  - id: DOC-035
+    title: 断网或私有化交付的文档站，字体、搜索索引、脚本和样式都必须打进交付包，不依赖 CDN、托管搜索或遥测；交付前做一次断网冒烟测试
+    level: hard
+    check: semi
+    how: 在断网环境打开构建产物，抽查页面渲染、搜索和图片；构建产物里扫描外部域名
+    applies: [kind:onprem]
+    why: 「能静态构建」不等于「能离线用」；字体、搜索服务和 CDN 在内网里会静默失效。
+    detail: 默认依赖托管搜索的框架（如 Docusaurus 默认接 Algolia）要换成本地搜索。还要测客户的代理、证书和 CSP 设置。
+    sources: [S16, S17, S25]
+  # ── llms.txt ──
+  - id: DOC-036
+    title: 发布 llms.txt 时，只列已公开的页面并由站点导航自动生成；不列内部地址和私有内容，也不把它当作访问控制
+    level: hard
+    check: semi
+    how: 发布 CI 从导航生成 llms.txt，扫描其中的域名和路径是否都在公开站点范围内
+    applies: [all]
+    why: llms.txt 是公开文件，列进去的东西谁都能看到；它只是给模型看的索引，挡不住任何访问。
+    detail: |
+      - llms.txt 是社区提案，不是 W3C 或 IETF 标准，也没有主流模型厂商承诺会读取它；可选，不强求。
+      - 格式：一级标题（站点名，唯一必需项）、引用块摘要、若干二级标题下的链接列表；名为 Optional 的二级标题放可以跳过的次要链接。
+      - 提案建议给页面提供同地址加 `.md` 的纯 Markdown 版本。
+      - 内部知识库给 Agent 用时走有权限的检索，见 24。
+    sources: [S22]
+    see: ["24"]
+  # ── 变更日志 ──
+  - id: DOC-037
+    title: 有对外发布版本的项目维护 CHANGELOG.md：每个已发布版本一节，写版本号和发布日期，最新的在最上面
+    level: hard
+    check: auto
+    how: 发布 CI 检查即将打的版本号在 CHANGELOG.md 里有对应一节且带日期
+    applies: [all]
+    why: 用户和下游要靠它判断升级风险；版本发了却查不到改了什么，只能去翻提交记录。
+    detail: |
+      结构按 Keep a Changelog：顶部放「未发布」一节；每版按新增、变更、弃用、移除、修复、安全分组；日期用 YYYY-MM-DD。中文项目可以用中文分组名。
+    sources: [S24]
+  - id: DOC-038
+    title: 变更日志面向用户写：改变了什么、影响谁、要做什么；草稿从提交信息生成，人工删掉内部改动后改写，不原样贴提交记录
+    level: soft
+    check: manual
+    how: 发布评审时抽查条目是否用用户能懂的话写，是否还有内部任务编号和重构类条目
+    applies: [all]
+    why: 提交信息是写给开发者的，直接给用户看全是噪声，真正要注意的变化反而被淹没。
+    detail: |
+      - 破坏性变更、需要用户动手的升级步骤、安全修复单独标出。
+      - 内部工单编号可以放在条目末尾作为可追溯链接。
+      - 草稿生成工具（release-please、Changesets 等）和提交信息格式见 03。
+    sources: [S24]
+    see: ["FLW-006"]
+  - id: DOC-039
+    title: 含破坏性变更的版本，提供迁移指南，写清从哪个版本迁、要改什么、怎么验证、能否回退，并从变更日志链接过去
+    level: soft
+    check: semi
+    how: 发布 CI 发现版本含破坏性变更标记时，检查变更日志里有迁移指南链接
+    applies: [all]
+    why: 只写「不兼容」不告诉怎么迁，用户只能不升级或自己摸索。
+    detail: 迁移指南放 `docs/migrations/`。不支持跨版本直接升级时要写明。
+    see: ["03"]
+choices:
+  - category: 文档分类方法
+    pick: Diátaxis（教程、操作指南、参考、解释）作导航逻辑
+    avoid:
+      - { name: 所有文档套同一个模板, why: 不同读者任务需要不同写法 }
+    sources: [S01]
+  - category: ADR 格式
+    pick: MADR（Markdown 架构决策记录模板）的精简版
+    alternatives:
+      - { name: Michael Nygard 的原始格式（背景、决定、状态、后果）, when: 团队刚开始写 ADR，想要最少的栏目 }
+    avoid:
+      - { name: 把决定只记在聊天记录或会议纪要里, why: 找不到，也没有状态 }
+      - { name: 用 Wiki 存 ADR, why: 和代码不同步，不能随 PR 评审 }
+  - category: Markdown 结构检查
+    pick: markdownlint-cli2
+    alternatives:
+      - { name: Prettier 加 markdownlint, when: 项目已用 Prettier 统一格式（格式化原则见 02） }
+    avoid:
+      - { name: 只用 Prettier, why: 只管格式，不查标题层级、替代文本等语义问题 }
+      - { name: 让大模型检查语法和标点, why: 慢、贵、结果不可复现 }
+    license: MIT
+    sources: [S08, S09]
+  - category: 中文排版检查
+    pick: AutoCorrect
+    alternatives:
+      - { name: zhlint, when: 团队更认同它的规则，或主要是 JS 工具链 }
+    avoid:
+      - { name: 自写正则批量替换空格和标点, why: 误伤代码、链接和术语 }
+      - { name: 多个中文检查器同时自动修复, why: 规则冲突，改来改去 }
+    license: AutoCorrect、zhlint 均为 MIT（待逐一核实官方仓库 LICENSE）
+    notes: 单一可执行文件，适合多语言项目和断网环境。
+    sources: [S10, S11]
+  - category: 术语与措辞检查
+    pick: Vale（在结构和排版检查稳定后再上）
+    alternatives:
+      - { name: textlint, when: 团队熟悉 JS 生态，需要它的插件 }
+    avoid:
+      - { name: 纯正则脚本, why: 不懂上下文，误报多 }
+    license: Vale 为 MIT；textlint 为 MIT（待核实）
+    notes: Vale 是单个二进制文件，离线可用；规则写在仓库里的 Styles 目录。
+    sources: [S12, S13]
+  - category: 链接检查
+    pick: lychee（PR 里用 --offline 只查内链，外链放定时任务）
+    alternatives:
+      - { name: 文档站框架自带的死链检查, when: 已用文档站且它的检查覆盖足够 }
+    avoid:
+      - { name: 每个 PR 联网检查全站外链, why: 限流和网络问题导致随机失败 }
+    license: MIT 或 Apache-2.0 双许可（以所用分发包为准）
+    sources: [S14]
+  - category: 文档站（中小型、中文为主）
+    pick: 先不建站：README 加 docs/ 下的 Markdown，相对链接互通
+    when: 几十页以内，只在仓库里读
+    alternatives:
+      - { name: VitePress（稳定的 1.x 线）, when: 几十到几百页、中文为主、团队不排斥 Vue；用内置本地搜索 }
+      - { name: Starlight, when: 想要开箱即用的本地搜索（Pagefind）和较好的内容写作体验；它仍是 0.x，升级要回归 }
+      - { name: Docusaurus, when: 需要多版本文档、多语言和 MDX 组件，团队接受 React；内网要换掉默认的托管搜索 }
+    avoid:
+      - { name: VitePress 2.x 预发布版用于生产, why: 截至核实日仍是 alpha，稳定版仍是 1.x }
+      - { name: 为几十页文档上 Wiki、CMS 或数据库, why: 维护成本超过收益 }
+    license: VitePress、Starlight、Docusaurus 均为 MIT
+    notes: VitePress 稳定线已较长时间没有新的正式版、2.0 仍在 alpha；选它时关注 1.x 是否还收安全修复。三者都能构建成静态文件，但离线可用要单独验证（DOC-035）。
+    sources: [S15, S16, S17, S25]
+  - category: 通用流程图、关系图
+    pick: Mermaid
+    alternatives:
+      - { name: D2, when: 布局复杂的架构图，Mermaid 自动布局排不清楚时 }
+    avoid:
+      - { name: 只存手工编辑的图片, why: 不能维护，看不出改动 }
+    license: MIT
+    sources: [S18, S27]
+  - category: 复杂架构图
+    pick: D2
+    when: 组件多、嵌套深，需要较好的自动布局
+    alternatives:
+      - { name: Mermaid, when: 图不复杂，且希望在 Markdown 里直接渲染 }
+    avoid:
+      - { name: 小流程图也一律用 D2, why: 多一个工具链，Markdown 预览里看不到 }
+    license: MPL-2.0；布局引擎 TALA 已于 2026-09-07 以 MPL-2.0 开源并随 D2 一起分发（--layout=tala），不再需要商业授权
+    sources: [S19, S28]
+  - category: 时序图和 UML 细节图
+    pick: PlantUML（本地或自托管运行）
+    alternatives:
+      - { name: Mermaid 时序图, when: 图简单，想在 Markdown 里直接渲染 }
+    avoid:
+      - { name: 用公网 PlantUML 服务器渲染敏感内容, why: 图源会发给第三方 }
+    license: 提供多种许可的分发包（GPL、LGPL、Apache、EPL、MIT 等），默认包为 GPL-3.0 或更新版本；集成进产品分发时按 27 选包
+    sources: [S20]
+  - category: 讨论草图
+    pick: Excalidraw，同时提交 .excalidraw 源文件
+    alternatives:
+      - { name: draw.io（diagrams.net）, when: 团队已经在用；同样提交可编辑源文件 }
+    avoid:
+      - { name: 只存 PNG, why: 无法再编辑 }
+    license: Excalidraw 主项目为 MIT；协作云服务另行评估；draw.io 许可待核实
+    sources: [S21]
+  - category: 变更日志结构
+    pick: Keep a Changelog 的结构，草稿由提交信息生成、人工改写
+    avoid:
+      - { name: 原样贴提交记录给用户, why: 内部噪声多，缺少用户影响 }
+    notes: 草稿生成工具见 03 的「变更日志草稿与发布自动化」。
+    sources: [S24]
+  - category: 给模型看的站点索引
+    pick: 不强求；公开文档站需要时再生成 llms.txt
+    alternatives:
+      - { name: sitemap.xml 加页面的 Markdown 导出, when: 已有站点地图，想让 Agent 直接读 Markdown }
+    avoid:
+      - { name: 把 llms.txt 当权限控制或搜索排名保证, why: 它只是公开的索引提案 }
+    sources: [S22]
+antipatterns:
+  - { bad: README 只有截图和徽章, instead: 写用途、前置条件、启动和测试命令、文档入口 }
+  - { bad: 一篇上百页的「设计说明」把教程、参考、原理全混在一起, instead: 按读者任务拆开，设统一入口 }
+  - { bad: 为几十页文档先上 Wiki、CMS 和数据库, instead: 仓库 Markdown，需要时再建静态站 }
+  - { bad: 为中英空格和标点自写一堆正则, instead: 用 AutoCorrect 或 zhlint 加例外配置 }
+  - { bad: 所有中文检查器同时开自动修复, instead: 一个工具修复，其他只报告 }
+  - { bad: 每个 PR 联网检查全部外链, instead: PR 离线查内链，外链放定时任务 }
+  - { bad: 图只存 PNG, instead: 提交文本或白板源文件，图片只是导出物 }
+  - { bad: 用公网在线服务渲染客户架构图, instead: 本地 CLI 或自托管渲染 }
+  - { bad: 为了点击跳转把 Mermaid 改成 loose, instead: 保持 strict，不可信来源用 sandbox }
+  - { bad: 用最近提交时间当「已复核」, instead: 显式的 reviewed_at，只在真实复核后更新 }
+  - { bad: 变更日志直接贴 git log, instead: 提交信息生成草稿，人工改写给用户看的部分 }
+  - { bad: llms.txt 里塞进全部内部文档, instead: 只列公开页面，内部资料走有权限的检索 }
+  - { bad: 以为「能静态构建」就「能离线交付」, instead: 打包字体和搜索索引，交付前断网测试 }
+  - { bad: 修改已接受的 ADR 的结论, instead: 新写一篇，把旧的标为已被取代并互相链接 }
+sources:
+  - { id: S01, title: "Diátaxis: Start here", url: "https://diataxis.fr/start-here/", publisher: Diátaxis, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: "GB/T 15834-2011 标点符号用法", url: "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=22EA6D162E4110E752259661E1A0D0A8", publisher: 国家市场监督管理总局、国家标准化管理委员会, date: 2011-12-30, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: "GB/T 15835-2011 出版物上数字用法", url: "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=F5DAC3377DA99C8D78AE66735B6359C7", publisher: 国家市场监督管理总局、国家标准化管理委员会, date: 2011-07-29, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: 中文文案排版指北, url: "https://github.com/sparanoid/chinese-copywriting-guidelines/blob/master/README.zh-Hans.md", publisher: sparanoid, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S05, title: "W3C: Requirements for Chinese Text Layout（中文排版需求）", url: "https://www.w3.org/TR/clreq/", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: "Google Technical Writing: Clear sentences", url: "https://developers.google.com/tech-writing/one/clear-sentences", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Google Technical Writing: Sample code", url: "https://developers.google.com/tech-writing/two/sample-code", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "markdownlint: rules（含 MD059 描述性链接文字）", url: "https://github.com/DavidAnson/markdownlint", publisher: DavidAnson, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: markdownlint-cli2, url: "https://github.com/DavidAnson/markdownlint-cli2", publisher: DavidAnson, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: AutoCorrect, url: "https://github.com/huacnlee/autocorrect", publisher: huacnlee, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: zhlint, url: "https://github.com/zhlint-project/zhlint", publisher: zhlint-project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Vale, url: "https://github.com/vale-cli/vale", publisher: vale-cli, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: textlint, url: "https://github.com/textlint/textlint", publisher: textlint, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: lychee, url: "https://github.com/lycheeverse/lychee", publisher: lycheeverse, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: VitePress releases, url: "https://github.com/vuejs/vitepress/releases", publisher: Vue.js, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Docusaurus: Search", url: "https://www.docusaurus.io/docs/search", publisher: Meta, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Starlight: Site search", url: "https://starlight.astro.build/guides/site-search/", publisher: Astro, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Mermaid config: securityLevel", url: "https://mermaid.js.org/config/schema-docs/config-properties-securitylevel.html", publisher: Mermaid, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: TALA is open source, url: "https://d2lang.com/blog/tala-is-open-source/", publisher: D2, date: 2026-09-07, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: PlantUML licenses, url: "https://github.com/plantuml/plantuml/blob/master/LICENSES.md", publisher: PlantUML, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Excalidraw, url: "https://github.com/excalidraw/excalidraw", publisher: Excalidraw, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: The /llms.txt file（提案）, url: "https://llmstxt.org/", publisher: Jeremy Howard, date: 2024-09-03, kind: community, checked: 2026-11-14 }
+  - { id: S23, title: "GitLab: Documentation workflow", url: "https://docs.gitlab.com/development/documentation/workflow/", publisher: GitLab, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S24, title: Keep a Changelog 1.1.0, url: "https://keepachangelog.com/en/1.1.0/", publisher: Keep a Changelog, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S25, title: "VitePress: Search", url: "https://vitepress.dev/reference/default-theme-search", publisher: Vue.js, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "GitLab: Documentation style guide", url: "https://docs.gitlab.com/development/documentation/styleguide/", publisher: GitLab, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S27, title: Mermaid, url: "https://github.com/mermaid-js/mermaid", publisher: Mermaid, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: D2, url: "https://github.com/d2lang/d2", publisher: D2, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - llms.txt：官网标为提案第 2 版（最后修改 2026-08-10），已核实；主流模型厂商是否实际读取它，只有第三方说法，未核实
+  - VitePress 1.x 稳定线是否还会发安全修复、2.0 何时转正，官方没有明确说法，待跟进
+  - Docusaurus 4 的进展、Starlight 维护方变化（第三方称 Astro 团队已被 Cloudflare 收购）只有第三方来源，未从官方核实
+  - Mermaid 的 sandbox 模式是否已脱离测试阶段，待核实当前文档
+  - ADR 格式（MADR 与 Nygard 格式）的现状和许可未联网核实；待补调研：ADR 工具（如 adr-tools、log4brains）是否值得推荐
+  - AutoCorrect、zhlint、textlint、draw.io 的许可证未从官方仓库 LICENSE 逐一核实
+  - 待补调研：公开的中文技术写作指南（如中文文案排版指北、中文技术文档写作风格指南）之间冲突时怎么取舍，以及一份完整的中文标点与空格例外表
+  - 待补调研：文档过期检测的现成工具（基于 frontmatter 的检查器、文档站插件），目前只有自写脚本的做法
+  - 待补调研：中文界面文案的公开规范（归 09，本主题只引用）
+  - 待补调研：文档站和文档工具在国产操作系统、国产 CPU、国产浏览器上的实测情况
