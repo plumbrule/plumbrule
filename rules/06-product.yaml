@@ -1,0 +1,610 @@
+id: "06"
+slug: product
+title: 产品与需求
+summary: 从一个想法到上线后的复盘：需求怎么写、验收标准怎么写得能判定、什么时候该问人、范围和优先级怎么定、任务怎么拆、原型交付什么、发布说明和效果复盘怎么做。优先级、任务状态、风险分级这几组词在这里定义用法。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 需求文档的形式与详略
+    - 验收标准（AC）的字段和写法
+    - 需求澄清：什么时候问、问什么、什么算阻塞
+    - 范围、优先级（P0–P3）、MoSCoW 的用法
+    - 任务拆分、依赖、任务状态（含就绪定义）
+    - 原型档次与设计交付清单
+    - 交付简报的字段
+    - 发布说明的内容、用户反馈与效果复盘
+  excludes:
+    - { what: 验收证据的绑定字段、证据状态的记录、证据失效, see: "04" }
+    - { what: 每个风险级别必跑哪些检查, see: "04" }
+    - { what: 分支、PR、评审、发布流程与版本号, see: "03" }
+    - { what: 面向用户的变更日志写法、ADR、图表工具, see: "05" }
+    - { what: 空态、加载、错误等交互行为的具体规范, see: "09" }
+    - { what: Agent 不得自我验收、交付证据的通用要求, see: "23" }
+    - { what: 提示注入与不可信输入, see: "25" }
+    - { what: 个人信息、数据出境等法规要求, see: "27" }
+    - { what: 埋点、指标口径与实验, see: "22" }
+overview: |
+  1. **详略看风险，不看代码量。** 需求文档按改动风险分级（R0–R3，见公共词表）决定写多少：R0–R1 一张任务卡，R2 一页规格，R3 完整规格加风险审查。不要求所有项目写长 PRD。
+  2. **先写问题，再写方案。** 写清为谁解决什么问题、现在怎么做、希望改变什么，再谈怎么做。事实、假设、未决问题分开写。
+  3. **一份语义，多处链接。** 需求的批准版本说了算；issue 管执行状态，设计稿管具体方案，测试和证据管验证事实。用链接互相引用，不各写一套。
+  4. **验收标准要能判定。** 前置条件、操作、可观察的结果、边界和反例、怎么验证、谁验证。不写「快」「友好」「完善」。Gherkin 只在有净收益时用。
+  5. **先查再问，阻塞就停。** 能从仓库和已有文档查到的不问；每轮只问少数只有人能决定的问题，附推荐默认值；权限、隐私、资金、合同、不可逆操作的未决问题不用默认值替人回答。
+  6. **三个维度分开记。** 下面三组词含义不同，不要混用：
+
+     | 维度 | 用词 | 回答的问题 |
+     |---|---|---|
+     | 优先级 | P0 / P1 / P2 / P3 | 什么时候做（P0 立刻、P1 本迭代、P2 排期、P3 有空再做） |
+     | 范围级别（MoSCoW） | 必须 / 应该 / 可以 / 本次不做（字段值 `must` / `should` / `could` / `wont`） | 这一版里它是不是必须交付 |
+     | 风险分级 | R0 / R1 / R2 / R3 | 要走多严的流程和检查（必跑检查见 04） |
+
+  7. **任务状态只有七个。** 待澄清 → 就绪 → 进行中 → 待评审 → 待验收 → 已完成；任何未完成的状态都可以转为已取消。「阻塞」是标记不是状态；「已发布」看发布记录，不是任务状态。
+  8. **CI 绿、AC 通过、业务验收、发布是四件事。** 前一件通过推不出后一件，分别有人负责、分别留记录。
+  9. **原型按要降低的风险选档次。** 默认不上高保真；AI 生成的原型只是候选方案，不是实现证据。
+  10. **发布后要回头看。** 发布说明写清用户能感到的变化、已知问题和回滚方式；上线后按约定周期看效果是否达到预期。
+rules:
+  # ── 需求怎么写 ──
+  - id: PRD-001
+    title: 已批准的需求必须有唯一且不复用的编号、版本号、负责人和状态
+    level: hard
+    check: auto
+    how: 用 JSON Schema 校验需求文件的头部字段，再用脚本检查编号全仓唯一、已删除的编号不被重新使用
+    applies: [all]
+    why: 没有稳定编号和版本，任务、测试、证据就无法指回「当时批准的是哪一版」。
+    detail: |
+      需求文件头部字段（唯一一套）：
+
+      | 字段 | 含义 |
+      |---|---|
+      | `id` | 需求编号，如 `REQ-0012`，不复用 |
+      | `title` | 要解决的问题，一句话 |
+      | `version` | 整数，批准后每次实质修改加一 |
+      | `owner` | 负责人（角色或账号） |
+      | `status` | 草稿 / 已批准 / 已废弃（修改即出新版本） |
+      | `priority` | P0–P3 |
+      | `risk` | R0–R3 |
+      | `offline_required` | 是否要求断网可用 |
+
+      编号格式由项目自定，示例里的 `REQ-` 前缀只是示意。
+    sources: [S08]
+  - id: PRD-002
+    title: 开始实现前写清问题、目标用户、现状和希望带来的改变
+    level: soft
+    check: semi
+    how: 模板固定这几栏，CI 检查非空；内容是否站得住由评审判断
+    applies: [all]
+    why: 只写方案不写问题，开发（尤其是 Agent）会很高效地解决一个错误的问题。
+    sources: [S01, S02]
+  - id: PRD-003
+    title: 写明本次范围内和范围外的内容，范围外要写具体的能力，不写「暂不考虑高级功能」
+    level: soft
+    check: semi
+    how: 模板固定「范围内」「范围外」两栏，CI 检查非空；评审看范围外是否具体
+    applies: [all]
+    why: 含糊的「不做」挡不住范围蔓延，也挡不住实现者自己加功能。
+    detail: |
+      - 弱：「本期先不考虑一些高级功能」。
+      - 强：「本期不做跨部门批量授权；不向第三方 AI 服务发送业务数据；不支持离线编辑冲突自动合并。如需引入，另开需求并单独验收。」
+    sources: [S01, S02]
+  - id: PRD-004
+    title: 把已确认的事实、未证实的假设、外部约束、未决问题分开写；推断出来的内容不写成已确认的需求
+    level: soft
+    check: semi
+    how: 模板分栏；Agent 或评审标出没有出处的「已确认」内容
+    applies: [all]
+    why: 猜测一旦写进需求就会被当成用户要求去实现和验收。
+  - id: PRD-005
+    title: 需求文档的详略按风险分级 R0–R3 决定，看影响面不看代码量
+    level: soft
+    check: manual
+    how: 评审时对照词表的风险分级核对需求标的级别；改动者只能往高定
+    applies: [all]
+    why: 所有需求都写长文档会拖死小改动，所有需求都一句话又会让高风险改动失控。
+    detail: |
+      | 风险 | 需求形式（示意） | 额外要求 |
+      |---|---|---|
+      | R0–R1 | 任务卡：目标、复现或现状、最小 AC、风险 | 不要求原型 |
+      | R2 | 一页规格：问题、范围、结构化 AC、任务拆分 | 有界面时按需出低保真 |
+      | R3 | 完整规格 | 风险审查（PRD-006）、依赖图、验收矩阵、发布与回滚计划、有权人批准 |
+
+      验证技术可行性、摸清成本的工作单独开**探索任务**（PRD-024），不算需求级别。
+    see: ["04"]
+  - id: PRD-006
+    title: R3 需求在需求阶段必须完成风险检查：权限、资金、个人信息与数据出网、迁移与不可逆操作、断网要求、对不可信输入的处理；不适用的写明原因
+    level: hard
+    check: semi
+    how: 需求模板带风险检查栏，CI 检查 R3 需求每一栏都填了结论或「不适用」及原因；由对应负责人确认
+    applies: [all]
+    why: 这些问题拖到实现或上线后才发现，代价是返工、数据泄露或违规。
+    detail: |
+      - 本条只要求**在需求阶段触发检查**，具体怎么判断：法规与隐私见 27，提示注入与不可信输入（需求文本、客户反馈里夹带的指令）见 25。
+      - 断网要求写进验收条件：在无外网、空缓存的环境里完成承诺的流程（验证方式见 TST-035）。
+    see: ["25", "27", "TST-035"]
+  # ── 验收标准 ──
+  - id: PRD-007
+    title: 每条「必须」级需求至少关联一条有编号的验收标准（AC）
+    level: hard
+    check: auto
+    how: 脚本检查每个 priority 为必须的需求都至少有一个 AC 指向它
+    applies: [all]
+    why: 没有验收标准的必须项，做完了也无法判断算不算完成。
+    sources: [S05]
+  - id: PRD-008
+    title: 验收标准用统一的一套字段：前置条件、操作、预期结果、边界与反例、验证方式、证据类型、验证人
+    level: soft
+    check: auto
+    how: 用 JSON Schema 校验 AC 文件；字段名只用下表一套
+    applies: [all]
+    why: 字段各写各的，就没法自动检查覆盖，也没法跨项目复用。
+    detail: |
+      AC 字段（唯一一套）：
+
+      | 字段 | 含义 |
+      |---|---|
+      | `id` | AC 编号，如 `AC-0042` |
+      | `requirement_id` | 所属需求编号 |
+      | `scope_level` | 必须 / 应该 / 可以（`must` / `should` / `could`） |
+      | `kind` | 行为 / 约束 / 质量 / 人工判断 |
+      | `preconditions` | 前置条件（列表） |
+      | `action` | 操作或输入 |
+      | `expected` | 可观察的结果、明确的拒绝，或判定阈值 |
+      | `boundary_cases` | 边界与反例；没有就写「无」及原因 |
+      | `verification.method` | 自动 / 人工 / 混合 |
+      | `verification.ref` | 测试编号或人工步骤 |
+      | `verification.evidence` | 需要的证据类型（测试报告、截图、日志等） |
+      | `verification.environment` | 在哪个环境验证 |
+      | `verification.verifier` | 验证人（角色） |
+      | `status` | 草稿 / 已批准 / 已废弃 |
+
+      批准人和批准时间不写在 AC 文件里，由系统记录（PRD-026）。
+    sources: [S06]
+  - id: PRD-009
+    title: 「必须」级 AC 必须写明验证方式、证据类型和验证人
+    level: hard
+    check: auto
+    how: JSON Schema 对 scope_level 为必须的 AC 要求 verification 下三个字段非空
+    applies: [all]
+    why: 不写谁来验、拿什么证明，验收就只能靠「我觉得做完了」。
+    see: ["04"]
+  - id: PRD-010
+    title: AC 写可观察的结果或可量化的判定，不只写「快」「友好」「完善」「和设计稿一样」；阈值由产品方按基线给出，不由开发或 Agent 编造
+    level: soft
+    check: semi
+    how: 用词表扫描 AC 里的模糊词，命中的由评审改写；阈值字段要注明来源
+    applies: [all]
+    why: 模糊的词无法判定通过与否；编造的阈值看起来精确，实际没人认可。
+    detail: |
+      | 模糊写法 | 改写方向（数值仅示意） |
+      |---|---|
+      | 导出要快 | 在给定数据集、机器和并发下，多数导出作业不超过约定阈值；超时给出可追踪的失败原因 |
+      | 权限完善 | 普通成员读其他部门的私有报告时服务端拒绝，响应不含报告内容；有授权的管理员可读 |
+      | 和设计稿一样 | 指定屏幕、内容和状态下符合已批准的界面验收清单；动态内容和系统字体差异列为例外 |
+      | 错误提示友好 | 校验失败时显示可操作的建议，不暴露服务端堆栈，用户可以再次提交 |
+      | 上传成功即可 | 允许的类型返回文件编号；不允许的类型被拒绝；超限不落盘；失败时清理临时文件 |
+      | 支持离线 | 关闭外网、空缓存的新安装环境里完成规定流程，过程中没有必要的外网请求 |
+    sources: [S06]
+  - id: PRD-011
+    title: 涉及失败、拒绝、空结果、边界值的流程，AC 要覆盖这些情形，不只写顺利路径
+    level: soft
+    check: semi
+    how: Agent 或评审逐条检查 AC 的 boundary_cases；写「无」的要有原因
+    applies: [all]
+    why: 只验正例的验收，上线后第一个异常输入就会出问题。
+    sources: [S05]
+    see: ["TST-007"]
+  - id: PRD-012
+    title: Gherkin 只在业务规则稳定、且场景会绑定步骤定义真正执行时使用；不强制所有需求写成 .feature
+    level: soft
+    check: manual
+    how: 评审时看 .feature 文件是否都有对应的步骤定义并在 CI 里执行
+    applies: [all]
+    why: 没绑步骤定义的 Gherkin 只是另一种格式的文字，却给人「已自动验收」的错觉。
+    detail: |
+      - Given 写前置上下文，When 写事件，Then 写可观察结果。
+      - 不适合用 Gherkin 的：接口数据契约、数学约束、部署验收、纯文案评审。
+    sources: [S06, S07]
+  - id: PRD-013
+    title: 规格质量通过、实现证据通过、业务验收通过是三层判断，前一层通过推不出后一层；CI 通过不等于 AC 通过
+    level: hard
+    check: semi
+    how: 任务状态转换检查：进入「待验收」要求每条必须级 AC 都有证据；进入「已完成」要求有权人的验收记录
+    applies: [all]
+    why: 把 CI 绿或规格检查清单全勾当成验收，是最常见的「假完成」。
+    detail: |
+      - 规格质量：字段齐全、无未决的阻塞问题、AC 可判定。可以部分自动化。
+      - 实现证据：在指定提交和环境上执行验证，证据可追溯（绑定字段见 TST-030）。
+      - 业务验收：有权的人确认符合批准的意图、剩余风险可接受，留下时间、决定和例外。
+    sources: [S05]
+    see: ["04", "AGT-014"]
+  - id: PRD-014
+    title: 每条 AC 的验证结果只用「未运行、通过、失败、已跳过」记录；没有真正验证的写「未运行」并说明原因和后续负责人，不得写成通过
+    level: hard
+    check: auto
+    how: 交付简报和验收矩阵用 schema 校验状态枚举；「未运行」「已跳过」缺原因时报错
+    applies: [all]
+    why: 把没验证的写成通过，评审者就失去了判断依据。
+    see: ["TST-029", "AGT-013"]
+  - id: PRD-015
+    title: 必须级 AC 全部通过才算验收通过，不用总体通过率抵消未通过的必须项；例外由有权人记录
+    level: hard
+    check: auto
+    how: 脚本根据验收矩阵计算：任一必须级 AC 不是「通过」且没有已批准的例外，就不允许转为「已完成」
+    applies: [all]
+    why: 「95% 的测试通过」可能恰好漏掉的是那条权限或数据安全的验收。
+  # ── 澄清 ──
+  - id: PRD-016
+    title: 提问前先查仓库、已有规格、历史决定和现有产品行为；能查到的不问
+    level: soft
+    check: manual
+    how: 评审时抽查澄清问题，看答案是否本来就在仓库或文档里
+    applies: [all]
+    why: 重复问已知的事浪费决策者时间，也说明没读上下文。
+    sources: [S04]
+  - id: PRD-017
+    title: 每轮只问少数高影响、只有人能决定的问题；每个问题写明影响、可选项和推荐默认值，并把问答记进需求
+    level: soft
+    check: semi
+    how: 脚本统计每轮问题数和字段是否齐全；问题质量由评审判断
+    applies: [all, kind:agent]
+    why: 问题太多会被敷衍回答；不给推荐值，决策者要自己从头想。
+    ref_value: 参考值每轮不超过 3 个，这是控制打扰的经验值，不是标准。可对照 Spec Kit 的做法：规格里的「待澄清」标记最多 3 个；澄清环节一次只问一个、每次会话最多问 5 个，每题给推荐选项。
+    detail: |
+      澄清问题字段（唯一一套）：`question_id`、`requirement_id`、`blocking`（是否阻塞）、`options`、`recommended_default`、`reason`（影响说明）、`decider`（决定人）、`answer`、`decided_at`。
+
+      上限是每一轮的预算，不是整个需求只能问这么多；答完可以开下一轮。
+    sources: [S04, S05]
+    see: ["AGT-018"]
+  - id: PRD-018
+    title: 涉及权限、隐私、资金、合同、不可逆操作或验收口径的未决问题必须标为阻塞；阻塞未解除时任务停在「待澄清」，不得用默认值替人回答
+    level: hard
+    check: auto
+    how: 状态转换检查：需求下有 blocking 为真且未回答的问题时，拒绝转为「就绪」
+    applies: [all]
+    why: 这类问题猜错了的代价是越权、泄露或违约，不能用「先按默认做」来赌。
+    detail: |
+      - 低影响的不确定性：写成假设，继续做可以撤回的工作。
+      - 能自己研究的：转成探索任务。
+      - 高影响又只能由人定的：标阻塞，等明确决定。
+  # ── 范围与优先级 ──
+  - id: PRD-019
+    title: 优先级只用 P0–P3，范围级别只用 必须/应该/可以/本次不做，风险只用 R0–R3，三者分开记，不互相替代
+    level: hard
+    check: auto
+    how: 用 JSON Schema 限定三个字段的枚举值（范围级别的字段值为 must、should、could、wont）
+    applies: [all]
+    why: 各项目自造一套词，跨项目汇总和迁移就会出错；把「必须做」和「马上做」混为一谈，优先级就失真。
+    detail: |
+      - P0–P3 的定义见公共词表；工作量另记，不用「小」代替「急」（见 FLW-036）。
+      - 「本次不做」的字段值统一写 `wont`，不写 `won't`、`wontfix`。
+      - 风险分级的改动者只能往高定，拿不准按高一级。
+    see: ["FLW-036", "TST-003"]
+  - id: PRD-020
+    title: 法规、合同、安全阻断类事项先作为硬门槛排进去，再对剩下的用 MoSCoW 或 RICE 排序；分数只作参考，不自动决定做不做
+    level: soft
+    check: manual
+    how: 评审排期时检查硬门槛事项是否单列，排序结果是否有人确认
+    applies: [all]
+    why: 打分模型会把强制但「影响人数少」的合规事项排到最后；RICE 的作者也说排序不必严格按分数。
+    detail: |
+      - MoSCoW：适合单个版本的范围协商，必须配「本次不做」清单。
+      - RICE（触达 × 影响 × 信心 ÷ 工作量）：适合需求池里能比较触达和工作量的项；没有基线时不编造数字。
+      - Shape Up 的 appetite（愿意投入的时间上限）：适合需求不确定、资源固定的情况。
+    sources: [S10, S11, S02]
+  - id: PRD-021
+    title: 控制「必须」级的数量，并给本次工作定时间或预算上限；超出时先砍非关键范围、再分期，最后才加资源，不隐瞒超支
+    level: soft
+    check: manual
+    how: 评审时看必须级占比和预算上限是否写明；超支时检查是否有记录和决定
+    applies: [all]
+    why: 什么都是必须，就等于没有优先级；不设上限，范围会一直长。
+    detail: |
+      估算给区间和假设（如「3–5 天，前提是接口已存在」），并写超出多少就停下来重新决定；不给单点的精确工时。
+    sources: [S02]
+  - id: PRD-022
+    title: 加范围、降级或删除「必须」级 AC，必须有变更记录和有权人批准，并保留旧版本
+    level: hard
+    check: semi
+    how: 需求和 AC 放在 Git 里，CI 比对批准版本与当前版本的差异；必须级 AC 的改动要求需求负责人批准（如写进 CODEOWNERS）
+    applies: [all]
+    why: 悄悄改掉验收标准再宣布通过，等于没有验收。
+    detail: |
+      变更记录字段：`change_id`、原因、影响的需求和 AC、增加的成本或时间、移出或推迟的范围、决定人、批准时间。
+
+      原型迭代可以改实现细节；一旦改变用户可见的结果或已批准的验收条件，就要走变更。
+    sources: [S02]
+    see: ["03"]
+  # ── 任务拆分与依赖 ──
+  - id: PRD-023
+    title: 每个实现任务关联到需求或 AC，或者关联到已批准的维护目标（如技术债、依赖升级）
+    level: soft
+    check: auto
+    how: 脚本检查任务的 requirement_ids、acceptance_ids 或维护目标字段至少有一个非空
+    applies: [all]
+    why: 找不到来源的任务没人能判断该不该做、做完了怎么验收。
+  - id: PRD-024
+    title: 探索任务（摸清可行性、成本或假设）和实现任务分开；探索的产出是结论和建议，不自动获得上线授权
+    level: soft
+    check: semi
+    how: 任务类型字段区分「实现」「探索」；探索任务的代码不直接合入发布分支，评审时检查
+    applies: [all]
+    why: 原型跑通不等于方案可上线，探索代码通常没过安全、性能和边界检查。
+  - id: PRD-025
+    title: 任务按能独立演示的用户价值纵向切分，写清要做、不做和允许改动的范围；多个任务共同实现一条 AC 时指定最终验证责任人
+    level: soft
+    check: manual
+    how: 评审拆分结果时看每个任务能否单独演示和验证
+    applies: [all]
+    why: 按层拆（先全部数据库、再全部接口）的任务单独做完没法验证，问题要到最后才暴露。
+    ref_value: 常规编码任务超过约 0.5–2 个开发工作日时，提示考虑继续拆分。这是发现任务过大的经验提示，不是工时规定；Agent 做得快不等于验证成本变小。
+    detail: |
+      任务字段（唯一一套）：`id`、`kind`（实现 / 探索 / 文档）、`status`、`requirement_ids`、`acceptance_ids`、`depends_on`、`owner`、`budget`（区间或时间盒）；正文写要做、绝不做、允许改动的模块和环境、停下来的条件。
+    sources: [S09]
+  - id: PRD-026
+    title: depends_on 只表示阻塞依赖，信息关联另记；任务依赖图不得有环
+    level: hard
+    check: auto
+    how: 脚本读取所有任务的 depends_on，做环检测，并检查引用的任务编号存在
+    applies: [all]
+    why: 有环的依赖排不出执行顺序；把「同模块」写成阻塞依赖会让任务互相卡住。
+  - id: PRD-027
+    title: 任务状态只用「待澄清、就绪、进行中、待评审、待验收、已完成、已取消」，按规定的条件转换
+    level: hard
+    check: auto
+    how: 任务系统或仓库脚本校验状态枚举和转换条件；不允许跳过「待验收」直接到「已完成」
+    applies: [all]
+    why: 状态名和转换条件不统一，「做完了」在不同人嘴里就是不同的意思。
+    detail: |
+      | 状态 | 进入条件 |
+      |---|---|
+      | 待澄清 | 新建；或有未回答的阻塞问题 |
+      | 就绪 | 目标、范围、必须级 AC、风险分级已批准，没有未决的阻塞问题，依赖已就绪或已排期（这就是就绪定义） |
+      | 进行中 | 有人认领开始做 |
+      | 待评审 | 改动已提交，等代码评审 |
+      | 待验收 | 评审通过、可信 CI 通过，每条必须级 AC 都有验证结果 |
+      | 已完成 | 有权人确认验收通过（PRD-015） |
+      | 已取消 | 任何未完成的状态都可转入，必须写原因 |
+
+      - 「阻塞」用 `blocking` 标记，不另立状态。
+      - 「已完成」只表示验收通过；是否已发布看发布记录（见 03）。
+      - PR 合并是触发状态变化的事件，不是状态本身。
+    see: ["FLW-036", "03"]
+  - id: PRD-028
+    title: 需求批准和业务验收由有权限的人在任务系统或代码托管平台里留下记录；Agent 不代填批准人和时间，文件里手写的「批准人」不算批准
+    level: hard
+    check: auto
+    how: 批准以平台的审批事件为准（如 PR 批准、issue 状态变更记录）；脚本校验批准者身份属于授权名单
+    applies: [all]
+    why: 任何人或 Agent 都能在 Markdown 里写一行「approved_by」，只有平台的身份记录才证明真的有人批准了。
+    see: ["AGT-014"]
+  # ── 原型与设计交付 ──
+  - id: PRD-029
+    title: 按要降低的风险选原型档次，默认不做高保真；流程图和原型保留可编辑的源文件
+    level: soft
+    check: manual
+    how: 评审时看原型档次是否和要回答的问题匹配；检查仓库或设计工具里有源文件而不只有图片
+    applies: [all]
+    why: 方向未定就做高保真会锁死方案；只留图片的原型改不了、也复现不了。
+    detail: |
+      | 档次 | 用来降低什么风险 | 最少交付 |
+      |---|---|---|
+      | 无原型 | 接口、脚本、极小修复 | 流程说明或输入输出示例 |
+      | 低保真 / 流程图 | 信息路径和步骤顺序 | 流程节点、关键状态、待确认问题 |
+      | 可点击原型 | 主要路径和交互分支 | 链接或文件、版本、主流程和异常入口 |
+      | 高保真设计 | 视觉方案、复杂业务界面 | 稳定版本、关键状态、和上一版的差异 |
+      | 可运行原型 | 真实数据或复杂交互 | 仓库和提交、启动步骤、样例数据、已知限制 |
+    sources: [S12]
+    see: ["05"]
+  - id: PRD-030
+    title: 原型标明「探索」或「已批准设计」；未批准的原型和 AI 生成的原型不当定稿，也不当作功能已实现的证据
+    level: soft
+    check: semi
+    how: 设计文件或原型目录带状态标记；评审时检查交付简报里没有拿原型当实现证据
+    applies: [all]
+    why: AI 生成的可运行界面看起来像成品，但安全、无障碍、数据正确性都没验证过。
+    sources: [S22, S23]
+  - id: PRD-031
+    title: 有界面的需求，设计交付写清关联的需求和 AC、设计版本、用户路径、必需的状态和真实数据边界
+    level: soft
+    check: semi
+    how: 交付清单模板固定这些栏目，CI 检查非空；内容由评审确认
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 只给一张「正常状态」截图，开发只能自己猜空态、失败和无权限时长什么样。
+    detail: |
+      - 必需状态（适用时）：正常、空结果、加载中、失败、无权限、只读或禁用。各状态的交互细则见 09。
+      - 数据边界：最大长度、数量、脱敏样例、不能出现的内容。
+      - 哪些是示意、哪些已确认；未决问题和批准人。
+      - 私有化或断网的客户怎么查看设计，字体和资源是否依赖外网。
+    see: ["09"]
+  - id: PRD-032
+    title: 客户数据或敏感数据进入云端原型工具、外部 AI 服务之前，先确认数据分类和授权
+    level: hard
+    check: manual
+    how: 使用前由数据负责人按数据分类确认并留记录；能用合成或脱敏数据的就不用真实数据
+    applies: [all]
+    why: 数据一旦发给外部服务就收不回来，可能违反合同或个人信息、数据出境的规定。
+    sources: [S22, S23]
+    see: ["27"]
+  # ── 交付、发布与复盘 ──
+  - id: PRD-033
+    title: 交付简报写清关联的需求和任务、起止提交、用户可见的改动、没做的部分、逐条 AC 的结果和证据、偏差、风险和回滚方式
+    level: hard
+    check: semi
+    how: 交付简报模板固定这些栏目，CI 检查非空、AC 结果状态合法；评审核对证据链接能打开
+    applies: [all]
+    why: 只说「已完成」的交付无法评审；逐条 AC 的结果才能让验收人快速判断。
+    detail: |
+      交付简报字段（唯一一套）：
+
+      - 头部：`requirement_ids`、`task_ids`、`spec_version`（依据的需求版本）、`base_commit`、`head_commit`、`environment`、`finished_at`、`claim`（交付结论：待评审 / 部分完成 / 阻塞）。
+      - 正文：用户可见的结果；没做什么；PR 和制品；逐条 AC 表（AC、预期、实际观察、证据状态、证据链接）；无法验证的项和原因；是否偏离需求或原型；剩余风险；回滚和数据影响；需要人确认的点。
+      - 最终的验收人和时间由平台记录（PRD-028），不在简报里由 Agent 填写。
+
+      证据要绑定哪些字段见 TST-030。
+    see: ["AGT-015", "TST-030"]
+  - id: PRD-034
+    title: 每次对外发布都要有发布说明：用户能感到的变化、已知问题和限制、数据或权限变化、迁移和回滚要求、没验证的部分
+    level: hard
+    check: semi
+    how: 发布流程检查发布说明存在且这几栏非空；发布评审确认内容
+    applies: [all]
+    why: 没有发布说明，用户不知道变了什么，运维出问题时也不知道怎么退。
+    detail: |
+      - 发布前确认：版本和提交、目标环境、必须级 AC 覆盖情况、例外和风险的批准记录、断网检查（适用时）。
+      - 变更日志的写法和提交信息生成草稿的约定见 05 和 03；发布流程本身见 03。
+    sources: [S21]
+    see: ["03", "05"]
+  - id: PRD-035
+    title: 发布后按约定周期复盘：预期指标、观测期、实际结果、副作用和被证伪的假设；不用 PR 数、代码量或 token 数衡量价值
+    level: soft
+    check: semi
+    how: 发布时自动创建复盘任务并写明观测期；到期检查是否有结论
+    applies: [all]
+    why: 交付前的验证回答「是否实现了预定行为」，复盘回答「是否解决了问题」，两件事不能互相代替。
+    ref_value: 参考周期：上线后 1–2 周看稳定性，4–8 周看业务结果。这是经验值，按功能的使用频率调整；合同有约定的按合同。
+    see: ["22"]
+  - id: PRD-036
+    title: 用户反馈归到原有需求或新需求，再复核优先级；收集反馈只要必要的信息
+    level: soft
+    check: semi
+    how: 反馈模板固定字段；定期统计没有关联需求的反馈
+    applies: [all]
+    why: 反馈散在聊天里就无法汇总；多收的个人信息是额外的合规负担。
+    detail: |
+      - 反馈字段：环境、用户在做什么、期望和实际、严重程度、复现条件、反馈人是否同意联系。
+      - 数据很少的内部产品，先用工单、表单和定期访谈，不为几个功能上大型分析平台。
+      - 匿名化不免除个人信息处理的其他义务，口径见 27。
+    see: ["22", "27"]
+choices:
+  - category: 需求与验收文档的载体
+    pick: 放在 Git 仓库里的 Markdown 模板，头部用 YAML 写结构化字段
+    when: 默认；断网和私有化环境也能用
+    alternatives:
+      - { name: GitLab issue 描述模板, when: 团队用 GitLab（含自管版）跟踪任务时；免费版可用 }
+      - { name: GitHub Issue Forms, when: 用 GitHub.com 时收集结构化的需求和反馈；目前是公开预览，不支持 PR }
+    avoid:
+      - { name: 一律写长 PRD, why: 小改动的文书成本超过价值 }
+      - { name: 一句提示词当需求, why: 对象、异常、边界、优先级都缺 }
+      - { name: GitLab Requirements Management 当免费功能用, why: 官方标明仅 Ultimate 版提供，名字相近容易误解 }
+    sources: [S19, S20, S24]
+  - category: 验收标准的表达
+    pick: 结构化 AC（YAML，字段见 PRD-008）加业务示例
+    alternatives:
+      - { name: Gherkin（.feature）, when: 业务规则稳定，场景会绑定步骤定义并在 CI 执行 }
+    avoid:
+      - { name: 强制所有需求写 .feature, why: 没有步骤定义时只是换了格式的文字 }
+    license: Gherkin 解析器为 MIT，项目仍在活跃维护
+    sources: [S06, S07]
+  - category: 需求文件的结构校验
+    pick: JSON Schema 2020-12 + Ajv（Node）
+    alternatives:
+      - { name: Python jsonschema, when: 仓库的工具链是 Python }
+    avoid:
+      - { name: 用大模型打分代替确定性校验, why: 结果不稳定，不能作为阻断条件；大模型只适合列出「可能有问题」的候选 }
+      - { name: 自己写正则校验字段, why: 跨文件引用和条件必填很快就维护不动 }
+    license: Ajv 为 MIT
+    notes: JSON Schema 只管字段类型、必填和枚举；跨文件引用、依赖环、状态转换、AC 覆盖要另写校验脚本。
+    sources: [S17, S18]
+  - category: 规格驱动的需求流程参考
+    pick: GitHub Spec Kit 的模板和流程（规格 → 计划 → 任务 → 实现，含澄清和检查清单）作为参考
+    when: 由 Agent 参与起草需求和任务时，借用它的模板和澄清做法
+    avoid:
+      - { name: 自己从零设计一套需求分解 Agent 流程, why: 现成模板和检查清单已覆盖常见缺口 }
+      - { name: 认为自动生成的任务一定完整, why: 仍要人审范围和 AC }
+    license: MIT
+    notes: 它的澄清环节一次只问一个问题、每次会话最多 5 个，每题给推荐选项；规格里的「待澄清」标记最多 3 个。
+    sources: [S03, S04, S05]
+  - category: 排优先级的方法
+    pick: 硬门槛（法规、合同、安全阻断）+ MoSCoW
+    alternatives:
+      - { name: RICE, when: 需求池里的项能比较触达人数和工作量 }
+      - { name: Shape Up 的 appetite、no-gos, when: 需求不确定但时间或人力固定 }
+    avoid:
+      - { name: 单一分数自动决定做不做, why: 强制事项会被排到后面 }
+    sources: [S10, S11, S02]
+  - category: 可点击原型与设计交付
+    pick: Penpot
+    when: 需要私有化或断网，或不想把设计绑在云服务上
+    alternatives:
+      - { name: Figma, when: 项目允许用云服务，团队已有 Figma 资产 }
+    avoid:
+      - { name: 用静态截图代替多状态的交互说明, why: 空态、失败、无权限这些状态会丢 }
+    license: Penpot 为 MPL-2.0，可自托管
+    notes: 能自托管不等于默认就断网可用；断网部署要在配置里加 `enable-air-gapped-conf`，它会关掉从 GitHub 下载的模板与库以及 Google Fonts。
+    sources: [S12, S13]
+  - category: 需求里的流程图
+    pick: 文本图（如 Mermaid），和需求文件一起放进仓库
+    when: 图表工具的统一选型以 05 为准，这里只补原型场景的注意事项
+    alternatives:
+      - { name: diagrams.net（draw.io）源文件, when: 跨角色的复杂流程，需要拖拽编辑 }
+      - { name: Excalidraw, when: 草图和头脑风暴 }
+    avoid:
+      - { name: 只留导出的 PNG, why: 改不了，也无法比对差异 }
+    license: draw.io 网页版仓库为 Apache-2.0，drawio-desktop 仓库为 GPL-3.0，两者不同；Excalidraw 为 MIT。只当独立工具使用一般不受影响，要嵌入产品分发时按 27 的口径核查
+    sources: [S14, S15, S16]
+  - category: AI 生成原型
+    pick: 在本地仓库里由受控的 Agent 用现有组件和样例数据生成
+    alternatives:
+      - { name: v0、Figma Make, when: 项目允许数据进云，只用于探索方向 }
+    avoid:
+      - { name: 云端生成的结果直接当生产代码, why: 安全、无障碍、数据正确性都没验证 }
+      - { name: 把客户敏感数据发给云端生成工具, why: 数据收不回来，见 PRD-032 }
+    notes: 本地方案要断网可用，前提是模型也在本地。
+    sources: [S22, S23]
+  - category: 用户反馈收集
+    pick: 现有的工单系统或内网表单，加定期访谈
+    avoid:
+      - { name: 用户很少时就上大型产品分析平台, why: 运维和合规负担超过收益；埋点和分析平台的选型见 22 }
+  - category: 发布证据
+    pick: CI 生成的证据清单 + 发布说明，随发布保存
+    alternatives:
+      - { name: GitLab Release Evidence, when: 用 GitLab 发布，想自动生成发布时的证据快照；仍需自己补上 AC 和人工批准的信息 }
+    avoid:
+      - { name: 为了「可追溯」自己重写一套发布系统, why: 现有 CI 和发布工具已能产出证据 }
+    sources: [S21]
+antipatterns:
+  - { bad: 只给一句话就开始写代码, instead: 先起草任务卡和最少的 AC，阻塞问题问清再动手 }
+  - { bad: 把 PRD 的每个栏目都填满, instead: 按风险分级决定写多少，不适用的写一句原因 }
+  - { bad: 写了 Gherkin 就当作有了自动验收, instead: 绑定步骤定义并在 CI 里执行，否则只当示例 }
+  - { bad: 把技术方案写成唯一的需求, instead: 需求写可观察的目标，方案放到设计文档或 ADR }
+  - { bad: 所有需求都是「必须」, instead: 控制必须级数量，配「本次不做」清单和预算上限 }
+  - { bad: 所有需求都用 RICE 打分排序, instead: 强制事项先作为硬门槛，剩下的再打分 }
+  - { bad: 发布前临时补 AC，再宣布通过, instead: 先批准 AC，改动走变更记录和批准 }
+  - { bad: 「每轮最多问 3 个」变成跳过高危问题的理由, instead: 问题数有预算，但阻塞问题不解除就不开工 }
+  - { bad: 把规格检查清单全勾当成实现完成, instead: 规格质量、实现证据、业务验收分三层判断 }
+  - { bad: 云端原型能跑就当内网也能跑, instead: 在断网、空缓存的环境里实测，字体和脚本都本地化 }
+  - { bad: 用 PR 数量或 Agent 的 token 用量衡量产品价值, instead: 上线后按约定周期看用户和业务结果 }
+sources:
+  - { id: S01, title: "Atlassian: How to create a product requirements document", url: "https://www.atlassian.com/agile/product-management/requirements", publisher: Atlassian, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: "Shape Up", url: "https://basecamp.com/shapeup", publisher: Basecamp, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S03, title: "GitHub Spec Kit", url: "https://github.com/github/spec-kit", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Spec Kit: clarify command template", url: "https://github.com/github/spec-kit/blob/main/templates/commands/clarify.md", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "Spec Kit: specify command template", url: "https://github.com/github/spec-kit/blob/main/templates/commands/specify.md", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "Cucumber: Gherkin reference", url: "https://cucumber.io/docs/gherkin/reference/", publisher: Cucumber, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "cucumber/gherkin", url: "https://github.com/cucumber/gherkin", publisher: Cucumber, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "ISO/IEC/IEEE 29148:2018 Requirements engineering", url: "https://www.iso.org/standard/72089.html", publisher: ISO, date: 2018-11, kind: standard, checked: 2026-11-13 }
+  - { id: S09, title: "Agile Alliance: INVEST", url: "https://agilealliance.org/glossary/invest/", publisher: Agile Alliance, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S10, title: "Atlassian: Prioritization frameworks", url: "https://www.atlassian.com/agile/product-management/prioritization-framework", publisher: Atlassian, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S11, title: "RICE: Simple prioritization for product managers", url: "https://www.intercom.com/blog/rice-simple-prioritization-for-product-managers", publisher: Intercom, date: 2018-01-05, kind: case, checked: 2026-11-13 }
+  - { id: S12, title: "Penpot", url: "https://github.com/penpot/penpot", publisher: Penpot, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "Penpot: Configuration (air-gapped)", url: "https://help.penpot.app/technical-guide/configuration/", publisher: Penpot, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "jgraph/drawio-desktop", url: "https://github.com/jgraph/drawio-desktop", publisher: JGraph, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: "jgraph/drawio", url: "https://github.com/jgraph/drawio", publisher: JGraph, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Excalidraw", url: "https://github.com/excalidraw/excalidraw", publisher: Excalidraw, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "JSON Schema Specification", url: "https://json-schema.org/specification", publisher: JSON Schema, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S18, title: "Ajv JSON schema validator", url: "https://github.com/ajv-validator/ajv", publisher: Ajv, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "GitHub: Syntax for issue forms", url: "https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-issue-forms", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "GitLab: Description templates", url: "https://docs.gitlab.com/user/project/description_templates/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "GitLab: Release evidence", url: "https://docs.gitlab.com/user/project/releases/release_evidence/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "Figma Make is now generally available", url: "https://www.figma.com/blog/figma-make-general-availability/", publisher: Figma, date: 2025-07-24, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Introducing the new v0", url: "https://vercel.com/blog/introducing-the-new-v0", publisher: Vercel, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "GitLab: Requirements management", url: "https://docs.gitlab.com/user/project/requirements/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - 需求和 AC 的批准状态（草稿、已批准、已废弃）、交付结论（待评审、部分完成、阻塞）还没有进公共词表，建议补进 _词表.yaml
+  - ISO/IEC/IEEE 29148 的 2026 修订草案进度未核实；正式版发布后要复核 PRD-001 的来源
+  - v0 那篇发布文章的日期（报告称 2026-02-03）、Figma Make 与 v0 的数据使用条款未核实
+  - Python jsonschema、Excalidraw 的许可证本次未从仓库 LICENSE 重新核实
+  - 待补调研：发布说明模板（与 03、05 的变更日志约定对齐）
+  - 待补调研：估算方法（区间估算、置信度）与灰度发布、功能开关下的效果实验（实验部分与 22 对齐）
+  - 待补调研：国内可用、可私有化的 AI 原型和设计工具对比
+  - 待补调研：2025–2026 年 PRD、JTBD、Shape Up 的新实践资料，报告基本只引用了经典方法
