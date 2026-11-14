@@ -1,0 +1,635 @@
+id: "29"
+slug: android
+title: Android
+summary: Android 原生应用的平台细节：Kotlin 与 Jetpack Compose、Gradle 与 Android Gradle 插件（AGP）、targetSdk 与 16KB 页面大小、权限与组件暴露、本地存储与加密、网络安全配置、R8 与签名、Android 开发者验证、单元与 Compose UI 测试、性能与后台任务、国内应用市场。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - Kotlin、Jetpack Compose 与官方推荐架构在 Android 上的落地
+    - Android 工程的 Gradle、AGP、Kotlin、KSP、Compose 编译插件的组合与升级
+    - targetSdk、minSdk、16KB 页面大小、大屏行为变化
+    - Manifest 权限、组件导出、深链、WebView
+    - DataStore、Room、Android Keystore、备份规则
+    - 网络安全配置（network security config）
+    - R8 混淆与压缩、签名、Play App Signing、Android 开发者验证
+    - Android 单元测试、Compose UI 测试、Lint
+    - Baseline Profiles、WorkManager 与前台服务
+    - Google Play Data safety 表单与国内应用市场上架清单
+  excludes:
+    - { what: 跨端选型、离线同步、推送总体架构与国内厂商推送通道, see: "28" }
+    - { what: 移动端 E2E 工具、真机 Release 冒烟、崩溃与性能监控, see: "28" }
+    - { what: 运行时权限的通用做法、用户同意前不初始化 SDK、凭据存储的通用要求, see: "28" }
+    - { what: JVM 服务端的 Gradle 基线（Wrapper、动态版本、依赖锁定）, see: "14" }
+    - { what: 测试分层、覆盖率口径、截图基线审核、验收证据, see: "04" }
+    - { what: 对比度、触控尺寸、TalkBack、字号缩放、国际化行为, see: "09" }
+    - { what: 推送服务端接口（FCM 的调用方式）, see: "21" }
+    - { what: 密钥扫描、SBOM、依赖漏洞与签名来源证明, see: "25" }
+    - { what: App 备案、个人信息保护法规、SDK 合规清单与许可证口径, see: "27" }
+    - { what: 断网构建与制品归档的通用做法, see: "26" }
+overview: |
+  1. **默认栈。** Kotlin + Jetpack Compose + Material 3；官方推荐的 UI 层 / 数据层分层，ViewModel 暴露不可变状态，协程 + Flow。存量 View 项目渐进迁移，不一次性重写。依赖按功能出现再加，不预装 Hilt、Room、Paging、WorkManager。
+  2. **构建按组合升级。** AGP、Gradle、Kotlin、KSP、Compose 编译插件一起升级，组合要在官方兼容表内并有 CI 结果。AGP 9 起内置 Kotlin 支持，不再应用 `org.jetbrains.kotlin.android`；Compose 编译器随 Kotlin 版本走。Wrapper、版本目录、禁止动态版本沿用 14 的做法。
+  3. **targetSdk 跟着 Google Play 走。** 满足 Google Play 当前的目标 API 要求，在截止日前完成升级；minSdk 看自己用户的设备清单。带原生库（含 SDK 带进来的 `.so`）的应用必须支持 16KB 页面大小。
+  4. **最小暴露。** 合并后的 Manifest 权限按白名单管；不需要被外部调用的组件不导出；深链参数、WebView 桥都当不可信输入。选图用系统照片选择器。
+  5. **数据放对地方。** 配置用 DataStore，关系数据用 Room 并写迁移测试；密钥放 Android Keystore，不再新用已弃用的 EncryptedSharedPreferences；备份规则排除令牌和设备绑定的数据。
+  6. **生产禁明文。** network security config 关明文流量，私有 CA 只信任到指定域名，不写「信任所有证书」的代码。
+  7. **发布链条可追溯。** Release 开 R8 和资源压缩，keep 规则最小，mapping 每版归档；Play 用 Play App Signing，本地只管上传密钥；同包名跨渠道的签名在首发前定死。在 Google 认证设备上分发（含 Play 以外的渠道）要完成 Android 开发者验证。
+  8. **测试看行为。** ViewModel 和数据层有本地单元测试，关键界面有 Compose UI 测试，截图测试只是补充；Lint 在 CI 阻断新问题。
+  9. **性能和后台。** 发布 Baseline Profile 并用 Macrobenchmark 量；可延后的工作用 WorkManager，前台服务只给用户能感知的任务，系统不保证准点。
+  10. **国内市场。** 每个应用市场单独维护上架清单，以其当期规则为准；合规判断归 27，推送通道归 28。
+rules:
+  # ── 语言、界面与架构 ──
+  - id: AND-001
+    title: 新代码用 Kotlin，新界面用 Jetpack Compose；存量 Java 和 View 代码渐进迁移，不一次性重写
+    level: soft
+    check: semi
+    how: CI 统计新增的 `.java` 文件和新增的 XML 布局，出现时要求在 PR 里说明原因
+    applies: [platform:android]
+    why: Android 官方的新能力、示例和架构指南都以 Kotlin 和 Compose 为主；一次性重写风险大，渐进迁移更稳。
+    sources: [S06, S09]
+  - id: AND-002
+    title: 界面层不直接调用网络或数据库，通过 ViewModel 和数据层（Repository）访问
+    level: soft
+    check: semi
+    how: 用模块依赖规则（如 UI 模块不依赖网络或 DAO 模块）或 ArchUnit 类检查找出界面层对 Retrofit、OkHttp、DAO 的直接引用，评审确认
+    applies: [platform:android]
+    why: 界面直接访问数据会让状态散落在各处，换数据源或写测试时都得改界面代码。
+    detail: |
+      - 只有业务规则复杂或要在多个 ViewModel 间复用时才加 domain 层（use case），不为每个 getter 包一层。
+      - MVI 是组织方式，不需要为它引入状态管理框架。
+    sources: [S09]
+    see: ["01"]
+  - id: AND-003
+    title: 屏幕状态由 ViewModel 以不可变的 StateFlow 暴露；Compose 中用 collectAsStateWithLifecycle 收集
+    level: soft
+    check: semi
+    how: 评审时检查 ViewModel 是否对外暴露 MutableStateFlow；文本扫描 Composable 里的 `collectAsState()` 调用，评审确认
+    applies: [platform:android]
+    why: 单向数据流让状态只有一个出口，便于测试和进程恢复；生命周期感知的收集在界面不可见时停止，避免白白消耗资源。
+    sources: [S09, S10]
+  - id: AND-004
+    title: 应用代码不使用 GlobalScope；捕获异常时不吞掉 CancellationException
+    level: hard
+    check: auto
+    how: detekt 的协程规则（GlobalCoroutineUsage、SuspendFunSwallowedCancellation 等）或自定义 Lint 在 CI 阻断；测试代码可按目录豁免
+    applies: [platform:android]
+    why: GlobalScope 里的任务不随界面或 ViewModel 取消，容易泄漏和重复执行；吞掉 CancellationException 会让取消失效。
+    detail: |
+      - 用 viewModelScope、lifecycleScope 等有生命周期的作用域；要在界面关闭后继续的工作交给 WorkManager 或应用级作用域。
+      - 协程里写 `catch (e: Exception)` 时要把 CancellationException 重新抛出。
+      - 调度器（Dispatchers）通过构造参数注入，方便测试替换。
+    sources: [S10]
+  - id: AND-005
+    title: 依赖注入框架和第三方库按需引入；小项目手工注入，引入 Hilt 或 Koin 时写明收益
+    level: soft
+    check: manual
+    how: 评审时看新增依赖的 PR 是否写了用途和理由
+    applies: [platform:android]
+    why: 样板工程默认装满框架，会拉长构建时间、增加包体和升级负担。
+    sources: [S09]
+    see: ["02"]
+  - id: AND-006
+    title: 不靠锁定屏幕方向或禁止调整窗口大小来规避大屏适配；在平板、折叠屏和分屏下验证核心界面
+    level: hard
+    check: semi
+    how: CI 检查 Manifest 里的 `screenOrientation`、`resizeableActivity` 等限制；发布前在大屏模拟器和分屏模式下跑核心流程，记录结果
+    applies: [platform:android]
+    why: 从 Android 16 起，以其为 targetSdk 的应用在大屏设备上会被系统忽略方向和尺寸限制，锁方向已经挡不住布局问题。
+    detail: |
+      - 用窗口尺寸类（window size class）和自适应布局组件按可用空间排版，不按机型或 `screenWidthDp` 硬判。
+      - 横竖屏切换后状态要能恢复。
+    sources: [S34]
+    see: ["09"]
+  # ── 构建：Gradle 与 AGP ──
+  - id: AND-007
+    title: Android 工程只通过 Gradle Wrapper 构建，用 Kotlin DSL 和版本目录（libs.versions.toml），禁止动态版本和未批准的快照版
+    level: hard
+    check: auto
+    how: CI 跑 wrapper 校验，设置 `failOnDynamicVersions()` 和 `failOnChangingVersions()`；做法同 14 的 Wrapper 与依赖锁定规则
+    applies: [platform:android]
+    why: 动态版本会让同一份代码今天和明天构建出不同的结果，官方也明确不建议对 AGP 用 `+` 这类写法。
+    sources: [S04, S35]
+    see: ["14"]
+  - id: AND-008
+    title: AGP、Gradle、Kotlin、KSP、Compose 编译插件成组升级；组合必须在官方兼容表内，升级 PR 附兼容表链接和 CI 结果
+    level: hard
+    check: semi
+    how: 升级 PR 模板固定「兼容表链接」「CI 结果」两栏；CI 对比 AGP 要求的最低 Gradle 版本和实际 Wrapper 版本
+    applies: [platform:android]
+    why: 这几样工具的支持范围各不相同，单独追最新常常组合不兼容；AGP 对 Gradle 最低版本、Kotlin 插件对 AGP 范围都有官方表格。
+    detail: |
+      - 「各项最新」不等于「组合受支持」。以 AGP 版本页的 Gradle 最低版本表、Kotlin 官方的 Gradle/AGP 兼容表为准。
+      - Android Studio 只支持一定时间范围内的 AGP，AGP 太旧时 IDE 会要求升级。
+      - 编码 Agent 不得自行改这些版本，升级单独开 PR。
+    sources: [S04, S08]
+    see: ["23"]
+  - id: AND-009
+    title: AGP 9 及以后的工程使用内置 Kotlin 支持，不再应用 org.jetbrains.kotlin.android 插件；新代码的注解处理用 KSP，不新增 kapt
+    level: hard
+    check: auto
+    how: CI 检查各模块 `plugins` 块和版本目录里没有 `org.jetbrains.kotlin.android`、`kotlin-kapt`（迁移中的模块按清单豁免）
+    applies: [platform:android]
+    why: AGP 9 内置了 Kotlin 支持，再应用旧插件会直接构建失败；kapt 比 KSP 慢，新项目没有理由再用。
+    detail: |
+      - 只有显式设了 `android.builtInKotlin=false` 的过渡期工程才保留旧插件，并写明移除计划。
+      - 还依赖 kapt 的库，按官方迁移指南改用 KSP 版本或迁移插件。
+    sources: [S05]
+  - id: AND-010
+    title: Compose 工程通过 org.jetbrains.kotlin.plugin.compose 插件启用 Compose 编译器，其版本跟随 Kotlin；Compose 库用 BOM 管版本
+    level: hard
+    check: auto
+    how: CI 检查 Compose 模块应用了该插件、没有残留 `kotlinCompilerExtensionVersion`；Compose 库依赖不单独写版本号（BOM 覆盖的除外要写理由）
+    applies: [platform:android]
+    why: 从 Kotlin 2.0 起 Compose 编译器和 Kotlin 同版本发布，旧的单独配置方式已不再适用；BOM 保证各 Compose 库版本一起测过。
+    sources: [S06, S07]
+  - id: AND-011
+    title: 各构建变体（debug、staging、release）的包名后缀和后端地址分开配置，非 release 变体不得指向生产环境
+    level: soft
+    check: auto
+    how: CI 读取各变体生成的 BuildConfig 或资源配置，比对后端地址白名单
+    applies: [platform:android]
+    why: 测试包连上生产环境会产生真实数据和真实扣费，且很难事后发现。
+  # ── 目标版本与包格式 ──
+  - id: AND-012
+    title: targetSdk 满足 Google Play 当前的目标 API 要求，在截止日前完成升级；其他分发渠道有更高要求时按该渠道执行
+    level: hard
+    check: auto
+    how: 仓库里维护一份「渠道 → 最低 targetSdk → 截止日」配置，CI 断言各变体的 targetSdk 不低于它；每次复核时按官方页面更新这份配置
+    applies: [platform:android]
+    why: 低于要求的新应用和更新无法在 Google Play 发布，存量应用会对新系统用户不可见；每次升级还会带来行为变化，要提前测试。
+    ref_value: |
+      截至 2026-11-14 的 Google Play 要求（以官方页面为准，每年会上调）：
+      - 手机和平板的新应用和更新：2026-08-31 起须以 Android 16（API 36）及以上为目标，可申请延期到 2026-11-01。
+      - 存量应用：须以 Android 15（API 35）及以上为目标，否则对较新系统的用户不可见。
+      - Wear OS、Android Automotive OS 的新应用和更新为 API 35，Android TV 为 API 34。
+    sources: [S01]
+  - id: AND-013
+    title: minSdk 按目标用户的实际设备清单决定，并在决策记录里写明依据
+    level: soft
+    check: manual
+    how: 评审 minSdk 变更时检查是否附设备清单或用户系统版本统计
+    applies: [platform:android]
+    why: 公开的系统版本份额是网页访问统计，不能代表企业终端、工控平板这类存量设备；minSdk 定错会直接让一部分用户装不上。
+    see: ["28"]
+  - id: AND-014
+    title: 包含原生库（含第三方 SDK 带入的 .so）的应用必须支持 16KB 内存页面大小，并在 16KB 环境里测试
+    level: hard
+    check: auto
+    how: CI 对 Release 包跑 `zipalign -c -P 16 -v 4` 和官方 `check_elf_alignment.sh`；Lint 会提示未对齐的原生库；发布前在 16KB 模拟器镜像上跑核心流程
+    applies: [platform:android]
+    why: 越来越多设备采用 16KB 页面，未对齐的原生库在这类设备上装不上或崩溃；Google Play 已把它列为发布门槛。
+    detail: |
+      - 先用 APK Analyzer 看包里有没有 `lib/` 下的 `.so`；纯 Kotlin/Java 的应用天然兼容，但仍建议在 16KB 环境跑一遍。
+      - 官方说明：AGP 8.5.1 及以后、NDK r28 及以后默认按 16KB 对齐；更旧的 NDK 要加链接参数 `-Wl,-z,max-page-size=16384`。
+      - 预编译的第三方 `.so` 要换成供应商提供的 16KB 兼容版本。
+      - 原生代码不得假设页面大小是 4096，用 `sysconf(_SC_PAGESIZE)` 取值。
+    ref_value: 截至 2026-11-14：Google Play 要求以 Android 15（API 35）及以上为目标的应用在 64 位设备上支持 16KB 页面；2027-02-01 起不支持的更新将无法发布。
+    sources: [S02]
+  # ── 权限与组件暴露 ──
+  - id: AND-015
+    title: 合并后的 Manifest 权限按白名单管理；新增权限（包括 SDK 带进来的）必须在 PR 里说明用途
+    level: hard
+    check: auto
+    how: CI 从 Release 变体的合并后 Manifest 提取 `uses-permission`，与仓库里的白名单比对，多出的阻断；不需要的权限用 `tools:node="remove"` 去掉
+    applies: [platform:android]
+    why: 第三方库会悄悄带入权限，开发者往往在审核被拒或用户投诉时才发现。
+    sources: [S19]
+    see: ["27"]
+  - id: AND-016
+    title: 运行时权限在用户触发对应功能时请求，被拒后功能降级；选图片和视频用系统照片选择器，不为此申请读取全部媒体的权限
+    level: soft
+    check: semi
+    how: 测试里覆盖「拒绝」和「永久拒绝」路径；CI 发现 `READ_MEDIA_IMAGES`、`READ_MEDIA_VIDEO`、`READ_EXTERNAL_STORAGE` 时要求说明为什么照片选择器不够用
+    applies: [platform:android]
+    why: 照片选择器不需要任何权限就能让用户选图；启动时一次性要全部权限会被拒、被差评，也违背最小必要。
+    detail: |
+      - 用 Activity Result API 的 `RequestPermission` 请求，用 `shouldShowRequestPermissionRationale` 判断是否先解释用途。
+      - 通知权限（Android 13 起）也是运行时权限，在用户开启提醒类功能时再请求。
+    sources: [S17, S18]
+    see: [MOB-039]
+  - id: AND-017
+    title: 每个带 intent-filter 的组件都显式声明 android:exported；不需要被其他应用调用的组件设为 false
+    level: hard
+    check: auto
+    how: Android Lint 在 CI 阻断；CI 从合并后 Manifest 列出所有 `exported="true"` 的组件，与白名单比对
+    applies: [platform:android]
+    why: 导出的 Activity、Service、Receiver、Provider 任何应用都能调用，是常见的越权和数据泄露入口。
+    detail: |
+      - 必须导出的组件用签名级权限保护，或在入口校验调用方。
+      - PendingIntent 显式指定可变性，传给其他应用的用 `FLAG_IMMUTABLE`。
+    sources: [S20]
+    see: ["25"]
+  - id: AND-018
+    title: 深链和导出组件收到的参数一律当不可信输入；涉及账户或支付的操作在入口重新鉴权，不凭深链参数直接执行
+    level: hard
+    check: semi
+    how: 评审深链处理代码；安全测试里构造恶意深链和 Intent（如用 adb 发送）验证不会绕过登录或直接执行敏感操作
+    applies: [platform:android]
+    why: 任何应用和网页都能构造深链，参数里的跳转地址、订单号、令牌都可能被伪造。
+    detail: |
+      - 网页链接用经过验证的 App Links（`autoVerify` + 服务器上的 assetlinks.json），避免被其他应用抢先打开。
+      - 深链里的跳转地址要按白名单校验，不能原样传给 WebView 或下一个 Intent。
+    sources: [S20, S21]
+    see: ["25"]
+  - id: AND-019
+    title: WebView 加载不可信或第三方内容时，不暴露 addJavascriptInterface 桥接对象，不开启文件和内容访问
+    level: hard
+    check: semi
+    how: Lint 和文本扫描找出 `addJavascriptInterface`、`setAllowFileAccess(true)`、`setAllowUniversalAccessFromFileURLs` 等调用，评审确认加载来源只限自己的域名
+    applies: [platform:android]
+    why: 桥接对象对页面里的所有脚本可见，被注入的脚本能借它调用原生能力、读本地文件。
+    sources: [S22]
+    see: ["25"]
+  # ── 隐私与 SDK ──
+  - id: AND-020
+    title: 会采集数据的第三方 SDK 关闭自动初始化和自动采集，在用户同意后再显式初始化；每次新增或升级这类 SDK 后做首启抓包对比
+    level: hard
+    check: semi
+    how: 检查 Manifest 里 SDK 的自动启动 ContentProvider 是否移除、自动采集开关是否关闭；在全新安装、拒绝同意、同意后三种状态下抓包，对比请求的域名
+    applies: [platform:android]
+    why: 很多 SDK 在应用启动时就通过 ContentProvider 自动初始化并上报设备信息，早于隐私同意，是国内通报整改的高发问题。
+    detail: |
+      - 用 App Startup 或自己的初始化入口统一控制 SDK 的启动时机。
+      - 抓包记录和 SDK 清单归档，供上架和合规检查使用；合规口径以 27 为准。
+    sources: [S24]
+    see: [MOB-040, "27"]
+  - id: AND-021
+    title: 在 Google Play 发布的应用，Data safety 表单与实际的数据收集和共享一致（包括第三方 SDK）；SDK 或数据用途变化时同步更新
+    level: hard
+    check: manual
+    how: 发布清单里加「Data safety 已复核」一项，对照 SDK 清单和抓包结果签字
+    applies: [platform:android]
+    why: Data safety 表单由开发者自行申报，与实际不符属于违反 Play 政策，可能导致更新被拒或应用下架。
+    sources: [S23]
+    see: ["27"]
+  # ── 本地存储与加密 ──
+  - id: AND-022
+    title: 轻量配置用 DataStore，关系数据用 Room；Room 开启 exportSchema，schema 每次变化都有迁移和迁移测试
+    level: hard
+    check: auto
+    how: CI 检查 schema 导出文件已入库且随版本递增；用 MigrationTestHelper 跑从每个已发布 schema 版本升级到当前版本的测试
+    applies: [platform:android]
+    why: 没有迁移的 schema 变化会让升级后的用户启动即崩溃或丢数据，而这类问题在全新安装的测试机上看不出来。
+    detail: |
+      - 不用 Room 存几个开关，也不用 SharedPreferences / DataStore 存队列或事务数据。
+      - 不在主线程做磁盘读写。
+      - 离线写入的待发队列和幂等键见 28。
+    sources: [S11, S12]
+    see: [MOB-022, "17"]
+  - id: AND-023
+    title: 本地加密用 Android Keystore 管理密钥；不在新代码里使用已弃用的 Jetpack Security（EncryptedSharedPreferences、EncryptedFile）
+    level: hard
+    check: auto
+    how: CI 扫描依赖里的 `androidx.security:security-crypto` 和对应 API 调用，新增的阻断；存量用法登记迁移计划
+    applies: [platform:android]
+    why: Jetpack Security 的全部 API 已被官方弃用，官方建议直接用平台 API 和 Android Keystore；密钥放在 Keystore 里不能被导出。
+    detail: |
+      - 令牌等凭据的存储要求见 28；不要把加密当作把敏感数据存本地的理由，能不存就不存。
+      - 需要加密文件或数据库时，用 Keystore 里的密钥加解密，或选用经过评估的成熟加密库。
+    sources: [S13, S14]
+    see: [MOB-012]
+  - id: AND-024
+    title: 配置备份规则（dataExtractionRules / fullBackupContent），把令牌、设备绑定的数据和用 Keystore 密钥加密的数据排除在云备份和设备迁移之外
+    level: hard
+    check: semi
+    how: CI 检查 Manifest 引用了备份规则文件；评审规则是否覆盖存放凭据的文件和数据库；在新设备上做一次恢复测试
+    applies: [platform:android]
+    why: 自动备份默认会把应用数据带到新设备，而 Keystore 里的密钥不会跟着走，恢复后要么泄露凭据，要么数据解不开导致崩溃。
+    sources: [S14, S15]
+  - id: AND-025
+    title: Release 构建不输出调试日志；令牌、个人信息不写进 Logcat，也不写到外部共享存储
+    level: hard
+    check: semi
+    how: R8 规则移除 `Log.d`/`Log.v` 调用或用只在 debug 生效的日志门面；文本扫描日志调用里的令牌、手机号等字段名，评审确认
+    applies: [platform:android]
+    why: 外部存储和 Logcat 能被其他应用或连上电脑的人读到。
+    sources: [S20]
+    see: ["02", "25"]
+  # ── 网络 ──
+  - id: AND-026
+    title: 生产构建禁止明文 HTTP；私有 CA 用 network security config 按域名配置信任锚，不写信任所有证书或跳过主机名校验的代码
+    level: hard
+    check: auto
+    how: CI 检查 network security config 中 release 的 `cleartextTrafficPermitted` 不为 true；Android Lint 的 TrustAllX509TrustManager、BadHostnameVerifier 等检查阻断
+    applies: [platform:android]
+    why: 内网也不是可信网络；关掉证书校验等于对中间人攻击不设防。
+    detail: |
+      - 只有调试需要的用户 CA 信任放在 `debug-overrides` 里，不进 release。
+      - 证书固定（pinning）的取舍和备用公钥要求见 28。
+    sources: [S16]
+    see: [MOB-016, "25"]
+  - id: AND-027
+    title: 一个应用只用一套 HTTP 客户端，统一设置超时和重试；HTTP 日志拦截器只在 debug 构建启用
+    level: soft
+    check: semi
+    how: 依赖分析找出同时引入 OkHttp/Retrofit 和 Ktor 的模块；检查日志拦截器只出现在 debug 依赖配置里
+    applies: [platform:android]
+    why: 两套客户端会有两套超时、认证和证书配置，行为容易分叉；日志拦截器会把请求头和正文（含令牌）打到日志里。
+    see: ["16"]
+  # ── R8、签名与分发 ──
+  - id: AND-028
+    title: Release 构建开启 R8 代码压缩和资源压缩；keep 规则只保留反射和序列化真正用到的类，不用 -keep class ** 这类宽泛规则
+    level: hard
+    check: auto
+    how: CI 检查 release 变体的 `isMinifyEnabled` 和 `isShrinkResources` 为 true；对 keep 规则文件做差异检查，出现通配整包或全部类的规则时要求说明
+    applies: [platform:android]
+    why: 关掉 R8 包体更大、启动更慢、代码更易被逆向；宽泛的 keep 规则等于半关 R8。
+    sources: [S25]
+  - id: AND-029
+    title: 每个发布版本归档 R8 的 mapping 文件，并上传到 Play Console 和崩溃上报平台
+    level: hard
+    check: auto
+    how: 发布流水线把 mapping 文件作为制品保存，并校验上传步骤成功
+    applies: [platform:android]
+    why: 没有 mapping 文件，混淆后的崩溃堆栈无法还原，线上问题定位不了。
+    sources: [S25]
+    see: [MOB-026]
+  - id: AND-030
+    title: 在 Google Play 发布用 Play App Signing，本地和 CI 只保管上传密钥；签名密钥文件和密码不进仓库
+    level: hard
+    check: auto
+    how: 密钥扫描检查仓库里没有 `.jks`、`.keystore` 和签名密码；CI 从密钥管理服务读取上传密钥；发布前比对证书指纹
+    applies: [platform:android]
+    why: 应用签名密钥丢了或泄露了，用户就无法升级或会装上冒充的更新；Play App Signing 让 Google 托管签名密钥，上传密钥丢了还能重置。
+    sources: [S26, S27]
+    see: ["25"]
+  - id: AND-031
+    title: 同一包名在 Google Play、国内应用市场和官网直装等渠道使用的签名证书，在首次发布前确定，之后不随意更换
+    level: hard
+    check: manual
+    how: 发布清单记录每个渠道的签名证书指纹；每次发布比对指纹与记录一致
+    applies: [platform:android]
+    why: Android 只允许用相同签名的包覆盖升级；渠道间签名不一致，用户换渠道更新时会安装失败，只能卸载重装并丢数据。
+    sources: [S26]
+  - id: AND-032
+    title: 应用要安装到 Google 认证的 Android 设备上（包括 Play 以外的渠道）时，在要求生效前完成 Android 开发者验证的身份验证和应用注册
+    level: hard
+    check: manual
+    how: 发布清单里记录开发者账号的验证状态和已注册的包名；新增包名或签名时同步注册
+    applies: [platform:android]
+    why: 要求生效的地区里，未注册到已验证开发者名下的应用不能在认证设备上直接安装，只能走 ADB 或高级安装流程。
+    detail: |
+      - 通过企业自有商店分发到受管设备的应用不要求验证，但可能流出到非受管设备时建议注册。
+      - 学生和爱好者可用有限分发账号，安装量有上限。
+    ref_value: 截至 2026-11-14 的官方说明：2026-09-30 起在印度尼西亚、新加坡、泰国生效（部分报道还包括巴西，以官方页面为准）；2027 年扩展到全球所有认证设备。
+    sources: [S03]
+  # ── 测试与质量 ──
+  - id: AND-033
+    title: Android Lint 在 CI 运行，存量问题用 baseline 文件冻结，新问题阻断合并
+    level: hard
+    check: auto
+    how: CI 跑 `lint` 任务并设 `abortOnError`；baseline 文件的变化必须有人评审
+    applies: [platform:android]
+    why: Lint 能发现 Android 特有的问题（组件导出、权限、API 级别、16KB 对齐、Compose 误用），不跑就只能等线上暴露。
+    sources: [S28]
+    see: ["02"]
+  - id: AND-034
+    title: ViewModel 和数据层有本地单元测试，覆盖成功、失败、取消和无网络；协程用 kotlinx-coroutines-test 的测试调度器，依赖用 fake
+    level: soft
+    check: semi
+    how: CI 跑本地单元测试任务；评审新的 Repository 和 ViewModel 是否带测试
+    applies: [platform:android]
+    why: 本地单元测试不需要设备、跑得快；失败和取消路径最容易出错，又最难在手工测试里覆盖。
+    sources: [S10]
+    see: ["04"]
+  - id: AND-035
+    title: 关键界面有 Compose UI 测试，按语义或 testTag 查找元素并断言行为；截图测试只作补充，不代替行为断言
+    level: soft
+    check: semi
+    how: CI 在模拟器或 Robolectric 上跑 Compose UI 测试；评审截图测试是否有对应的行为测试
+    applies: [platform:android]
+    why: 截图一致不代表能点、能输入、能被读屏读出；语义断言才能验证行为。
+    detail: |
+      - 截图基线的更新必须人工审 diff，规则见 04。
+      - 官方的截图测试工具仍在实验阶段，不宜作为唯一的阻断检查。
+      - 跨端 E2E 工具和真机 Release 冒烟见 28。
+    sources: [S29, S30]
+    see: ["04", MOB-037]
+  - id: AND-036
+    title: 发布前在开启 R8 的 Release 构建上跑启动和主流程冒烟，不能只测 debug 包
+    level: hard
+    check: auto
+    how: 发布流水线安装 release 变体（或 benchmark 等开启 R8 的变体）到模拟器或真机，跑冒烟用例，失败阻断发布
+    applies: [platform:android]
+    why: R8 会移除和改名反射、序列化用到的类，debug 包里看不出这类崩溃。
+    sources: [S25]
+    see: [MOB-036]
+  # ── 性能与后台 ──
+  - id: AND-037
+    title: 面向用户的应用生成并随包发布 Baseline Profile，用 Macrobenchmark 衡量启动和关键路径；性能结论以 Release 构建上的实测为准
+    level: soft
+    check: semi
+    how: CI 检查 baseline-prof.txt 存在且随版本更新；定期在固定设备上跑 Macrobenchmark，记录趋势
+    applies: [platform:android]
+    why: Baseline Profile 让关键代码在安装后就预编译，明显改善首次启动和滚动；debug 包的性能和真实情况差别很大。
+    detail: |
+      - Compose 长列表给每项设稳定的 `key`；用 Compose 编译器报告和稳定性配置排查不必要的重组。
+      - 启动时间、卡顿等线上监控见 28。
+    sources: [S31, S36]
+    see: [MOB-028]
+  - id: AND-038
+    title: 可延后的后台工作用 WorkManager；前台服务只用于用户能感知的持续任务，并在 Manifest 中声明对应的 foregroundServiceType
+    level: hard
+    check: auto
+    how: CI 检查每个前台服务都声明了类型和对应权限；评审新增前台服务的用途
+    applies: [platform:android]
+    why: 新版本系统要求前台服务声明类型，否则启动时直接抛异常；系统和厂商的省电策略会延迟或杀掉后台任务，任何方式都不保证准点。
+    detail: |
+      - 不用常驻服务或频繁唤醒来「保活」；不引导用户关闭所有省电设置作为通用方案。
+      - 需要按时提醒的业务由服务端推送触发，并在应用打开时补拉，见 28。
+    sources: [S32, S33]
+    see: [MOB-021, MOB-023]
+  # ── 国内应用市场 ──
+  - id: AND-039
+    title: 发布到国内应用市场时，为每个市场单独维护上架清单（主体资质、备案信息、隐私政策、权限说明、SDK 清单、签名），以该市场当期规则为准
+    level: soft
+    check: manual
+    how: 发布前逐项核对清单并附证据（备案号、隐私政策链接、抓包记录、签名指纹）
+    applies: [platform:android]
+    why: 各市场审核要求不同且经常调整，照搬某一家的规则容易被拒；是否需要备案等法律判断由合规负责人决定。
+    sources: [S37, S38]
+    see: ["27", "28"]
+choices:
+  - category: 语言与界面
+    pick: Kotlin + Jetpack Compose + Material 3，Compose 库用 BOM 管版本
+    alternatives:
+      - { name: XML View 与 Compose 混用, when: 存量 View 项目渐进迁移 }
+    avoid:
+      - { name: 新业务全用 Java, why: 与协程、Compose 和官方示例脱节 }
+      - { name: 自造 UI 框架, why: 维护成本高，跟不上系统变化 }
+    license: Apache-2.0
+    sources: [S06]
+  - category: 架构
+    pick: 官方推荐的 UI 层 / 数据层分层 + ViewModel + 单向数据流
+    alternatives:
+      - { name: 加 domain 层（use case）, when: 业务规则复杂或需在多处复用时 }
+    avoid:
+      - { name: 全局可变单例保存状态, why: 状态来源不清，难测试、难恢复 }
+      - { name: 为 MVI 引入大型状态框架, why: 小应用用 ViewModel + StateFlow 已足够 }
+    sources: [S09]
+  - category: 异步
+    pick: Kotlin 协程 + Flow / StateFlow
+    alternatives:
+      - { name: LiveData, when: 维护存量代码 }
+    avoid:
+      - { name: GlobalScope、裸线程, why: 不随生命周期取消，容易泄漏 }
+    license: Apache-2.0
+    sources: [S10]
+  - category: 依赖注入
+    pick: 小项目手工注入；多模块中大型项目用 Hilt
+    alternatives:
+      - { name: Koin, when: 不想用注解处理，或要和 Kotlin Multiplatform 共享 }
+    avoid:
+      - { name: 没有复杂度就默认引入 DI 框架, why: 增加构建时间和理解成本 }
+    license: Hilt（Dagger）和 Koin 均为 Apache-2.0
+  - category: 网络与序列化
+    pick: OkHttp + Retrofit，序列化用 kotlinx.serialization
+    alternatives:
+      - { name: Ktor Client, when: 要和 Kotlin Multiplatform 共享网络层；与 Retrofit 二选一 }
+      - { name: Moshi / Gson, when: 维护存量代码 }
+    avoid:
+      - { name: 自己基于 HttpURLConnection 封装框架, why: 超时、重试、连接池都要重造 }
+      - { name: 两套 HTTP 客户端并存, why: 配置和行为分叉 }
+    license: Apache-2.0
+  - category: 本地存储
+    pick: DataStore 存配置，Room 存关系数据
+    alternatives:
+      - { name: SQLDelight, when: 偏好手写 SQL 或要跨平台共享数据库代码 }
+    avoid:
+      - { name: 自写 SQLite ORM, why: 迁移和类型映射都要重造 }
+      - { name: SharedPreferences 存队列或事务数据, why: 没有事务和迁移 }
+    license: Apache-2.0
+    notes: Room 有新的大版本发布线，坐标和 API 不同，不能直接替换；只在新项目或新模块评估，存量项目按迁移项目处理。
+    sources: [S11, S12]
+  - category: 本地加密
+    pick: Android Keystore + 平台加密 API
+    avoid:
+      - { name: Jetpack Security（EncryptedSharedPreferences）, why: 官方已弃用全部 API }
+      - { name: 把密钥硬编码在代码或资源里, why: 反编译即可拿到 }
+    sources: [S13, S14]
+  - category: 导航
+    pick: 新 Compose 项目用 Navigation 3
+    alternatives:
+      - { name: Navigation 2（Navigation Compose）, when: 存量项目，到有必要时再迁移 }
+    avoid:
+      - { name: 自己维护返回栈, why: 进程被杀后无法恢复，深链难处理 }
+    license: Apache-2.0
+  - category: 图片加载
+    pick: Coil
+    alternatives:
+      - { name: Glide, when: 存量 View 大项目 }
+    avoid:
+      - { name: 自管 Bitmap 缓存, why: 容易 OOM 和泄漏 }
+    license: Apache-2.0
+  - category: 后台任务
+    pick: WorkManager
+    alternatives:
+      - { name: 前台服务, when: 用户能感知的持续任务（如导航、通话、上传进度） }
+      - { name: AlarmManager 精确闹钟, when: 闹钟、日历提醒等确需准点的场景，需相应权限 }
+    avoid:
+      - { name: 常驻服务或频繁唤醒保活, why: 耗电，被系统和厂商限制 }
+    license: Apache-2.0
+    sources: [S32]
+  - category: 构建
+    pick: Gradle Wrapper + Kotlin DSL + 版本目录 + AGP（内置 Kotlin）
+    alternatives:
+      - { name: Groovy DSL, when: 旧仓库渐进迁移 }
+    avoid:
+      - { name: 动态版本、未锁定的快照版, why: 构建不可复现 }
+      - { name: 新项目默认用 kapt, why: 比 KSP 慢，AGP 9 下需额外迁移 }
+    sources: [S04, S05]
+  - category: 格式化与静态检查
+    pick: Android Lint（必选）+ ktlint
+    alternatives:
+      - { name: detekt, when: 需要协程、复杂度等额外规则；先确认支持当前 Kotlin 版本再设为阻断 }
+      - { name: Spotless, when: 想用一个入口统一调用格式化工具 }
+    avoid:
+      - { name: 两套格式化工具同时改同一批文件, why: 互相打架 }
+    license: Lint 为 Apache-2.0；ktlint 为 MIT；detekt 为 Apache-2.0
+    sources: [S28]
+  - category: 单元与 UI 测试
+    pick: JUnit + kotlinx-coroutines-test + fake；界面用 Compose UI 测试
+    alternatives:
+      - { name: MockK / Mockito, when: 确实无法用 fake 替代时 }
+      - { name: Robolectric, when: 想在 JVM 上跑 UI 测试，减少模拟器依赖 }
+      - { name: Roborazzi / Paparazzi, when: 需要截图测试，先试点、不作唯一阻断 }
+    avoid:
+      - { name: 单元测试连真实后端, why: 慢且不稳定 }
+    sources: [S29, S30]
+  - category: 性能
+    pick: Baseline Profile + Macrobenchmark
+    sources: [S31]
+  - category: 发布自动化
+    pick: Gradle Play Publisher（Google Play）
+    alternatives:
+      - { name: fastlane, when: 团队已在用，或要同时管 iOS 发布 }
+      - { name: 国内各市场的开放接口或手工上传, when: 国内渠道，单独一条流水线 }
+    avoid:
+      - { name: 商店账号密钥放进仓库, why: 泄露后可被冒名发版 }
+    sources: [S39]
+antipatterns:
+  - { bad: 照搬旧教程，在 AGP 9 工程里应用 kotlin-android 插件、写 kotlinCompilerExtensionVersion, instead: 用内置 Kotlin 和 Compose 编译器插件 }
+  - { bad: 把 AGP、Kotlin、Gradle 各自升到最新就当完事, instead: 按官方兼容表成组升级并跑 CI }
+  - { bad: 用锁竖屏、禁止调整大小来逃避大屏适配, instead: 自适应布局，并在大屏和分屏下验证 }
+  - { bad: "混淆后崩溃就加 `-keep class ** { *; }`", instead: 找到真正被反射的类，写最小 keep 规则，在 Release 包上回归 }
+  - { bad: 只测 debug 包就发布, instead: 在开启 R8 的 Release 构建上跑冒烟 }
+  - { bad: 首次启动先加载统计、推送 SDK 再弹隐私协议, instead: 关闭 SDK 自动初始化，同意后再初始化，并用抓包证明 }
+  - { bad: 启动时一次性申请所有权限, instead: 用到功能时再请求，选图用照片选择器 }
+  - { bad: 为了内网方便允许全局明文 HTTP 或忽略证书错误, instead: 私有 CA 写进 network security config，按域名信任 }
+  - { bad: 用 GlobalScope 或常驻服务「保活」后台任务, instead: WorkManager；用户可见的持续任务用声明了类型的前台服务 }
+  - { bad: Play 上传密钥和国内渠道签名随意混用, instead: 首发前规划好各渠道的签名证书并记录指纹 }
+  - { bad: 用截图测试代表无障碍和交互都没问题, instead: 语义断言的 UI 测试 + 读屏人工验证 }
+  - { bad: 给每个项目默认装上 Hilt、Room、Paging、WorkManager, instead: 功能需要时再引入 }
+sources:
+  - { id: S01, title: "Target API level requirements for Google Play apps", url: "https://support.google.com/googleplay/android-developer/answer/11926878", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Support 16 KB page sizes", url: "https://developer.android.com/guide/practices/page-sizes", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Understanding Android developer verification", url: "https://support.google.com/android-developer-console/answer/16561738", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Android Gradle plugin: Update AGP and Gradle", url: "https://developer.android.com/build/releases/about-agp", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "Migrate to built-in Kotlin", url: "https://developer.android.com/build/migrate-to-built-in-kotlin", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "Compose Bill of Materials", url: "https://developer.android.com/develop/ui/compose/bom", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Compose Compiler Gradle plugin", url: "https://developer.android.com/develop/ui/compose/compiler", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "Kotlin: Configure a Gradle project（Gradle 与 AGP 兼容表）", url: "https://kotlinlang.org/docs/gradle-configure-project.html", publisher: JetBrains, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "Recommendations for Android architecture", url: "https://developer.android.com/topic/architecture/recommendations", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "Best practices for coroutines in Android", url: "https://developer.android.com/kotlin/coroutines/coroutines-best-practices", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "Migrate your Room database", url: "https://developer.android.com/training/data-storage/room/migrating-db-versions", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "DataStore", url: "https://developer.android.com/topic/libraries/architecture/datastore", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "Jetpack Security releases", url: "https://developer.android.com/jetpack/androidx/releases/security", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "Android Keystore system", url: "https://developer.android.com/privacy-and-security/keystore", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: "Back up user data with Auto Backup", url: "https://developer.android.com/identity/data/autobackup", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Network security configuration", url: "https://developer.android.com/privacy-and-security/security-config", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Request runtime permissions", url: "https://developer.android.com/training/permissions/requesting", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Photo picker", url: "https://developer.android.com/training/data-storage/shared/photo-picker", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "Manage manifest files（合并 Manifest）", url: "https://developer.android.com/build/manage-manifests", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "Security tips", url: "https://developer.android.com/privacy-and-security/security-tips", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "Verify Android App Links", url: "https://developer.android.com/training/app-links/verify-applinks", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: "Insecure WebView native bridges", url: "https://developer.android.com/privacy-and-security/risks/insecure-webview-native-bridges", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "Provide information for Google Play's Data safety section", url: "https://support.google.com/googleplay/android-developer/answer/10787469", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: "工信部关于 APP/SDK 个人信息保护整治的公告", url: "https://www.miit.gov.cn/jgsj/xgj/APPqhyhqyzxzzxd/tzgg/art/2026/art_0d4f79b29eac4727b6b403a74b0d41fa.html", publisher: 工业和信息化部, date: 2026-08-25, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "Enable app optimization（R8）", url: "https://developer.android.com/topic/performance/app-optimization/enable-app-optimization", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "Sign your app", url: "https://developer.android.com/studio/publish/app-signing", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Use Play App Signing", url: "https://support.google.com/googleplay/android-developer/answer/9842756", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "Improve your code with lint checks", url: "https://developer.android.com/studio/write/lint", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: "Test your Compose layout", url: "https://developer.android.com/develop/ui/compose/testing", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: "Screenshot testing", url: "https://developer.android.com/training/testing/ui-tests/screenshot", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: "Baseline Profiles overview", url: "https://developer.android.com/topic/performance/baselineprofiles/overview", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: "Background tasks overview", url: "https://developer.android.com/develop/background-work/background-tasks", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: "Changes to foreground services", url: "https://developer.android.com/develop/background-work/services/fgs/changes", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: "App orientation, aspect ratio, and resizability", url: "https://developer.android.com/develop/adaptive-apps/guides/app-orientation-aspect-ratio-resizability", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: "Gradle: Verifying dependencies", url: "https://docs.gradle.org/current/userguide/dependency_verification.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S36, title: "Stability in Compose", url: "https://developer.android.com/develop/ui/compose/performance/stability", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: "华为应用市场开发者文档", url: "https://developer.huawei.com/consumer/cn/doc/App/50104/", publisher: 华为, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S38, title: "小米应用商店上架指引", url: "https://dev.mi.com/xiaomihyperos/documentation/detail?pId=1501", publisher: 小米, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S39, title: "Gradle Play Publisher", url: "https://github.com/Triple-T/gradle-play-publisher", publisher: Triple-T, date: null, kind: community, checked: 2026-11-14 }
+open_questions:
+  - Android 开发者验证首批生效国家：官方页面写印度尼西亚、新加坡、泰国，部分报道还包括巴西；对中国大陆非 Google 认证设备和国内应用市场分发是否有影响，待确认
+  - Google Play 对照片和视频权限的政策（只有核心功能才可申请 READ_MEDIA_* ）的当前条款未逐条核实；核实后 AND-016 可考虑升为硬约束
+  - Navigation 3 已发布稳定版、Room 新大版本发布线的现状来自原报告，未重新核实
+  - Kotlin 官方 Gradle/AGP 兼容表当前覆盖到哪个 AGP 版本，未重新核实（AGP 当前大版本为 9，已核实）
+  - detekt 对当前 Kotlin 版本的支持情况、ktlint 维护节奏，未核实
+  - Gradle Play Publisher、fastlane、Coil、Koin、Roborazzi、Paparazzi 等第三方库的许可证未从官方仓库 LICENSE 逐个核实（原报告对 Gradle Play Publisher 写 Apache-2.0，待确认）
+  - 小米推送通道 2026-12-31 的策略变化节点（原报告提及，细节未核实），归 28 跟踪
+  - 待补调研：OPPO、vivo、荣耀应用市场的上架审核规则
+  - 待补调研：崩溃上报与日志库的 Android 侧选型（国内外方案、私有化部署）
+  - 待补调研：Baseline Profile、Macrobenchmark、截图测试工具的成熟度与 CI 接入方式
