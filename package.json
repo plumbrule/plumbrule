@@ -12,7 +12,8 @@
     "dev": "astro dev",
     "build": "pnpm check && pnpm gen:skill && astro build && node tools/post-build.ts",
     "preview": "astro preview",
-    "deploy": "pnpm build && wrangler deploy"
+    "deploy": "pnpm build && wrangler deploy",
+    "release": "node tools/release.ts"
   },
   "devDependencies": {
     "@astrojs/starlight": "0.42.8",
