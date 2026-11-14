@@ -1,0 +1,595 @@
+id: "01"
+slug: architecture
+title: 架构与设计原则
+summary: 怎么为不同类型的项目选一个够用的结构：默认起点、何时拆服务、模块边界与依赖方向、数据一致性与失败处理、扩展点、多租户与私有化，以及哪些架构决定需要写下来。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 按项目类型选择架构起点（CLI、后端服务、Web、客户端、数据任务）
+    - 模块化单体、拆服务的判断
+    - 模块边界、依赖方向、数据所有权
+    - 事务、outbox、幂等、重试、超时、并发冲突的设计原则
+    - CQRS、事件溯源、Saga、插件的取舍
+    - 多租户模型与私有化、离线交付的架构要求
+    - 什么时候需要写架构决策记录（ADR）、架构图要表达什么
+  excludes:
+    - { what: ADR 和架构图的写法、模板、目录与图表工具, see: "05" }
+    - { what: 各语言架构检查工具的具体配置, see: "10-14" }
+    - { what: 幂等键的接口语义、错误格式、事件格式与版本, see: "16" }
+    - { what: outbox 表、乐观锁、事务隔离级别、迁移、行级安全的数据库细节, see: "17" }
+    - { what: 消息队列、任务调度与工作流引擎的选型, see: "18" }
+    - { what: 授权模型、租户上下文、多租户隔离的身份部分, see: "19" }
+    - { what: 不可信代码执行、最小权限凭证的安全细则, see: "25" }
+    - { what: SLO、可观测性、备份恢复演练、离线安装升级, see: "26" }
+    - { what: 数据出境、等保等法规, see: "27" }
+    - { what: 移动端跨端架构与离线同步, see: "28" }
+overview: |
+  1. **选最简单够用的结构，不固定一种。** 小 CLI 只要清楚的模块和显式输入输出；有一定复杂度的业务后端默认从**模块化单体**起步；只有拿得出独立部署、故障隔离、资源曲线或合规隔离的证据时才拆服务。模块化单体是默认候选，不是定律。
+  2. **三种边界分开看。** 业务模块边界、部署边界、信任与故障边界是三回事。为隔离不可信代码而单独起进程是正当理由，但不等于把业务拆成微服务。
+  3. **按业务能力分模块。** 不按 controller/service/repository 横切全仓库。模块只暴露公开接口；模块之间无环；不导入别人的内部实现；只有数据所属模块能改它的数据。这几条用工具在 CI 里检查。
+  4. **能用单库事务就用单库事务。** 数据库写入和发消息必须原子时用事务 outbox；消费者按「至少投递一次」设计，必须幂等。outbox 不等于端到端恰好一次，也不等于事件溯源。
+  5. **网络调用会失败。** 跨进程调用都有超时；超时不等于失败（可能已成功）；重试只针对暂时性失败，有上限、退避和抖动；非幂等的外部副作用不自动重试。
+  6. **检查放在真正写入的地方。** 授权、租户、业务状态、期望版本在写入边界校验，前置检查、UI、提示词都不能替代。
+  7. **模式按需加。** CQRS 从「同库读写代码分开」开始；事件溯源只给事件本身就是事实的子域；Saga 先写清终态和补偿；没有第二个真实实现不做插件框架。
+  8. **多租户是连续谱。** 按隔离要求选共享表、独库或独立部署；共享实例时每一层（数据库、缓存、索引、文件、任务、导出）都要隔离并做跨租户负例测试。私有化客户先考虑每客户一套部署。
+  9. **难以逆转的决定写 ADR。** 新架构模式、服务边界、消息中间件、插件系统等要有 ADR；小改动不写。写法见 05。
+  10. **工具查不全。** 静态依赖检查看不到反射、动态加载、SQL 跨表和运行时消息环；检查器要有负例自测，盲区靠测试和评审补。
+rules:
+  # ── 选结构 ──
+  - id: ARC-001
+    title: 在仓库文档里写明项目类型、采用的架构风格、主要模块及负责人，以及哪些架构规则不适用及原因
+    level: soft
+    check: manual
+    how: 评审时检查架构说明文档是否存在并与代码结构一致；格式不限（Markdown 小节、YAML 清单都可以）
+    applies: [all]
+    why: 规则要按项目类型取舍，不写明类型和例外，人和 Agent 只能把 Web 服务的那套套到 CLI 上。
+    detail: |
+      - 不要求特定文件名或格式；一个 `docs/architecture.md` 小节就够。
+      - 如果团队选择用机器可读清单（如列出模块路径和公开路径），要配上能实际运行的校验，否则只是又一份会过时的文档。
+      - 小工具写一两句即可，不必为它补全目录结构。
+  - id: ARC-002
+    title: 按项目类型选起点：小 CLI 用清楚的模块加显式输入输出；有一定复杂度的业务后端默认从模块化单体起步
+    level: soft
+    check: manual
+    how: 设计评审时检查是否和更简单的方案做过对比
+    applies: [all]
+    why: 分布式带来网络故障、契约兼容、数据一致性和运维成本；没有明确收益时这些成本白付。
+    detail: |
+      | 项目类型 | 默认起点 | 什么时候再加复杂度 | 默认不需要 |
+      |---|---|---|---|
+      | 小型 CLI / 一次性工具 | 清楚分包 + 显式输入输出边界 | 多个命令共享复杂业务逻辑 | 全套 DDD、事件总线、Saga |
+      | 后端服务 / API | 按业务模块划分的模块化单体，模块内简化分层 | 多团队独立发布、隔离要求、不同伸缩曲线 | 一开始就拆十几个服务 |
+      | Web 应用 | 前后端各自按功能划模块 | 前后端独立团队、复杂异步流程 | 全局事件驱动、事件溯源 |
+      | 移动 / 桌面客户端 | 功能模块 + 状态 + 平台适配层 | 多端复用、复杂离线同步 | 后端式微服务（跨端细节见 28） |
+      | 数据处理任务 | 按阶段划边界 + 输入输出带版本 + 可重跑 | 数据量大、增量处理、分布式执行 | 每个转换步骤一个服务 |
+      | Agent 运行器 | 控制部分与不可信执行隔离 + 状态机 + 持久化状态 | 长任务恢复、多租户资源隔离 | 每个工具一个微服务 |
+    sources: [S01, S03]
+    see: ["28"]
+  - id: ARC-003
+    title: 拆独立服务前，写明它解决的具体问题，并证明能独立部署、回滚、扩容，有数据迁移和回切方案
+    level: soft
+    check: manual
+    how: 拆分方案的 ADR 或 PR 里逐项回答下面六个问题，评审时核对
+    applies: [kind:service]
+    why: 不能独立部署和回滚的服务只是「分布式单体」，既有单体的耦合，又有分布式的故障。
+    detail: |
+      1. **问题**：具体的 SLO、故障域、监管隔离、独立发布或资源曲线数据是什么？答不出就继续在单体内改模块。
+      2. **边界稳定**：负责人、公开接口或事件、数据所有权是否清楚？不清楚先重构边界。
+      3. **真能独立**：能否单独部署、回滚、扩容？下游兼容窗口怎么维持？
+      4. **数据迁移**：写入权怎么转移、怎么避免双写、怎么回填和回滚？
+      5. **运维准备**：链路追踪、日志、超时、重试、告警负责人是否到位？
+      6. **可逆**：有功能开关、灰度流量、失败回切和恢复演练吗？
+
+      推荐路径：先理清模块 → 把边界稳定成公开接口 → 先拆独立进程或 worker → 收益明确时再拆服务。已有大系统用逐步替换，不做一次性重写。
+      没有通用的「超过 N 行代码或 N 个人就拆」的阈值，固定数字只能当复核提醒。
+    sources: [S02, S03]
+  - id: ARC-004
+    title: 业务模块边界、部署边界、信任与故障边界分开判断，不因为要隔离某段代码就把业务拆成微服务
+    level: soft
+    check: manual
+    how: 设计评审时检查架构图里三种边界是否分别标出
+    applies: [all]
+    why: 把三件事混在一起，会为了隔离一个沙箱而拆散整个业务，或者反过来以为拆了服务就安全了。
+    detail: |
+      一个系统可以同时是「模块化单体 + 模块内六边形 + 单库轻量 CQRS + 少数 outbox 事件 + 独立的沙箱进程」，这些不矛盾。
+      独立进程也不等于沙箱：隔离级别（进程、容器、虚拟机）、权限范围、网络和文件限制要单独设计，见 25、32。
+    see: ["25", "32"]
+
+  # ── 模块边界与依赖方向 ──
+  - id: ARC-005
+    title: 按业务能力和变化原因划分模块，不按 controller、service、repository 这类技术层横切全仓库
+    level: soft
+    check: manual
+    how: 评审新模块时检查它是否对应一项业务能力，并有一个反例说明什么需求会证明拆法错了
+    applies: [all]
+    why: 按技术层横切时，一个业务改动要动遍所有层，业务边界被目录掩盖。
+    detail: |
+      找边界的做法：
+      1. 列出核心业务动作（如「下单」「退款」），而不是 `insertOrder`。
+      2. 为每个动作列出必须在同一事务里成立的规则，它们通常决定模块内部的事务边界。
+      3. 指定每类数据由哪个模块负责修改。
+      4. 看变化原因：总是一起变的放一起，独立变化的分开。
+      5. 画出模块依赖图，确认无环。
+
+      模块内部可以再分层。示意（不是跨语言的强制结构）：
+      ```text
+      src/
+        orders/
+          api/             # 别的模块只能用这里
+          application/     # 用例、授权与状态检查、事务协调
+          domain/          # 业务规则，不依赖数据库和 HTTP
+          infrastructure/  # 数据库和外部系统的适配器
+        billing/
+          ...
+        main/              # 程序入口与依赖装配
+      ```
+    sources: [S04]
+  - id: ARC-006
+    title: 多模块项目中，业务模块之间的编译期依赖必须无环，并在 CI 里用依赖检查工具强制
+    level: hard
+    check: auto
+    how: 用所用语言的架构检查工具（见选型「架构边界检查」）在 CI 里检测模块依赖环，新增的环阻断合并
+    applies: [all]
+    why: 有环的模块无法单独理解、测试和替换，改一处会沿环扩散。
+    detail: |
+      - 存量项目先记录现有违规作为基线，只阻断新增，并给基线定清理期限。
+      - 模块之间通过事件形成的业务环不在编译期依赖里，要另外用状态机和防循环、防重放的保护处理。
+    sources: [S05]
+    see: ["10", "11", "12", "13", "14"]
+  - id: ARC-007
+    title: 多模块项目中，跨模块只能引用对方公开的接口，不得导入对方的内部实现
+    level: hard
+    check: auto
+    how: 在架构检查工具里把每个模块的公开路径登记出来，CI 阻断其他模块对非公开路径的引用
+    applies: [all]
+    why: 导入内部实现会形成看不见的强耦合，对方任何重构都可能把你弄坏。
+    detail: 跨模块共享的稳定基础类型（如用户 ID 类型）可以放进一个很小的共享模块，它要有负责人，不能变成什么都往里放的「公共工具」。
+    sources: [S05]
+    see: ["10", "11", "12", "13", "14"]
+  - id: ARC-008
+    title: 每个业务模块写明负责人、公开接口和它拥有的数据
+    level: soft
+    check: semi
+    how: CODEOWNERS 覆盖每个模块目录；评审时检查模块说明是否列出公开接口和数据
+    applies: [kind:service]
+    why: 没有负责人和数据归属，边界只能靠口头约定，迟早被绕开。
+    sources: [S03]
+  - id: ARC-009
+    title: 一个模块的数据只由该模块修改；其他模块要改，走它的公开入口，例外要登记并批准
+    level: hard
+    check: semi
+    how: 按模块划分数据库表的访问权限或代码层的数据访问分组，扫描跨模块直接写表的代码；例外在评审时确认登记
+    applies: [kind:service]
+    why: 多个模块都能直接改同一张表时，没人能保证业务规则，也无法再拆开。
+    detail: 同一个单体里多个模块可以共享一个物理数据库，但不能「所有模块都能改所有表」。跨模块查询用对方提供的接口或只读模型。
+    sources: [S02, S03]
+    see: ["17"]
+  - id: ARC-010
+    title: 被声明为核心领域的代码不直接依赖 HTTP、数据库、UI 框架或外部 SDK，通过接口和适配器接入
+    level: soft
+    check: auto
+    how: 在架构检查工具里禁止核心领域目录导入这些包
+    applies: [all]
+    why: 核心业务规则和 I/O 分开后，可以不起数据库就测，换外部依赖也不用改规则。
+    detail: 只对规则复杂、需要长期演进的领域这样做。简单的增删改查可以直接用数据访问层，不必为每次查询包三五层转发。
+    sources: [S04]
+  - id: ARC-011
+    title: 架构检查器要有负例自测：故意违规的样例必须让检查失败，路径别名、生成代码、条件编译、懒加载导入不能静默漏检
+    level: soft
+    check: auto
+    how: 在仓库里放一个违规样例目录，CI 断言检查器对它报错并返回非零退出码
+    applies: [all]
+    why: 配置写错的检查器永远是绿的，比没有检查更糟，因为大家以为有保护。
+    see: ["04"]
+  - id: ARC-012
+    title: 静态依赖检查覆盖不到的地方（反射、动态加载、SQL 跨模块访问表、运行时消息环），用负例测试、数据库权限和评审补上
+    level: soft
+    check: semi
+    how: 评审时列出本项目用到的动态机制，确认每一种都有对应的测试或权限控制
+    applies: [all]
+    why: CI 绿只说明检查器看得见的部分没问题，不证明架构或权限正确。
+  - id: ARC-013
+    title: 架构规则的豁免要登记编号、理由、负责人、影响范围和到期日；不得关闭或放宽检查器来让 CI 通过
+    level: hard
+    check: semi
+    how: 检查器配置文件写进 CODEOWNERS；CI 检查豁免清单格式并对过期条目报错
+    applies: [all]
+    why: 关掉检查让 CI 变绿，等于把规则悄悄废掉；没有到期日的豁免会永久留下。
+    detail: 修改豁免的人不能同时批准它；由 Agent 提出的豁免必须由人批准（见 AGT-011）。豁免的通用原则见 02。
+    see: ["02", "AGT-011"]
+
+  # ── 一致性与失败处理 ──
+  - id: ARC-014
+    title: 必须一起成立的业务规则在同一个事务里校验并提交；跨不了一个事务的，显式设计补偿流程
+    level: hard
+    check: semi
+    how: 用并发和事务回滚的集成测试验证不变量；评审时检查跨存储的流程是否写明补偿
+    applies: [kind:service]
+    why: 先校验后提交、中间不在一个事务里，并发时规则就会被打破。
+    sources: [S06, S13]
+    see: ["17"]
+  - id: ARC-015
+    title: 数据库写入和发消息需要原子时，用事务 outbox：业务变更和待发记录在同一个事务里提交，不得提交后直接发消息
+    level: hard
+    check: semi
+    how: 评审时查找「提交事务后直接调用消息客户端」的代码；用故障注入测试提交后进程崩溃的情况
+    applies: [kind:service]
+    why: 直接双写在两次写之间崩溃，就会丢事件或发出已回滚的事件。
+    detail: |
+      - outbox 只覆盖明确需要可靠发布的事件，不必覆盖所有行变更。
+      - outbox 不保证消费端恰好一次，也不保证全局有序；顺序是按业务实体提出的要求，要单独设计并测乱序。
+      - outbox 不是事件溯源。
+      - 能用数据库变更捕获（CDC）的存储也可以用它代替 outbox 表。
+      - 表结构和中继实现见 17，消息组件见 18。
+    sources: [S06]
+    see: ["17", "18"]
+  - id: ARC-016
+    title: 至少投递一次的消费者必须幂等：持久化去重，去重记录和本地副作用在同一个事务里提交
+    level: hard
+    check: semi
+    how: 用重复投递和回放测试，验证同一消息处理两次结果不变
+    applies: [kind:service]
+    why: 消息系统和 outbox 中继都会重发，不幂等的消费者会重复扣款、重复发货。
+    detail: |
+      - 消费成功的标准是「副作用已持久化且去重记录已写入」，不是收到 HTTP 200。
+      - 副作用是第三方接口时，还要对方支持幂等键，或者有业务对账。
+      - 接口层的幂等键语义（同键不同请求体怎么报错）见 16。
+    sources: [S06]
+    see: ["16", "18"]
+  - id: ARC-017
+    title: 跨进程调用必须设置超时，并写明失败语义：超时后结果未知（可能已成功），以及能否重试
+    level: hard
+    check: semi
+    how: 评审调用封装是否都有超时；用故障测试模拟超时后对方实际已成功的情况
+    applies: [kind:service]
+    why: 没有超时会把线程和连接耗尽；把超时当失败再重做，会重复执行已经成功的操作。
+    sources: [S02]
+  - id: ARC-018
+    title: 自动重试只用于暂时性失败，必须有次数上限、指数退避和随机抖动；没有幂等保证或对账手段的外部副作用不自动重试
+    level: hard
+    check: semi
+    how: 检查重试配置是否都有上限和退避；评审时确认被重试的操作是幂等的
+    applies: [kind:service]
+    why: 无上限的重试会在故障时放大流量形成雪崩；重试非幂等操作会重复产生副作用。
+    detail: 重试用尽后进入隔离或人工处理，不静默丢弃（见 ARC-022）。具体次数和间隔按依赖方的恢复时间和自身 SLO 定，没有通用值。
+    see: ["02", "18"]
+  - id: ARC-019
+    title: 并发修改共享状态必须用版本号、锁或等价机制；冲突时返回可识别的错误，不静默覆盖
+    level: hard
+    check: semi
+    how: 用并发更新测试验证两次同时修改时有一方收到冲突错误
+    applies: [kind:service]
+    why: 后写覆盖先写会悄悄丢掉别人的修改，事后很难发现。
+    detail: 人和自动化程序（包括 Agent）同时改同一对象时尤其要注意。乐观锁和隔离级别的数据库细节见 17。
+    see: ["17"]
+  - id: ARC-020
+    title: 授权、租户范围、业务状态和期望版本在真正写入数据的地方校验；前置检查、UI、HTTP 中间件或提示词都不能替代
+    level: hard
+    check: semi
+    how: 写绕过前端和中间件、直接调用后台任务、消息消费者或内部接口的负例测试，确认被拒绝
+    applies: [kind:service]
+    why: 从审批到提交之间状态可能已经变了；只在入口拦截，后台任务和内部调用就成了旁路。
+    detail: |
+      - 「做决定」（谁能做什么）可以集中，「执行检查」要落在每条真正写入的路径上：接口、后台任务、worker、批处理、Agent 工具。
+      - 前置检查的结果不能长期有效；提交事务时要重新检查必要的规则和版本。
+      - 预算、额度这类要先预留后结算的东西，预留、结算、退款、超时都要定义终态并保证幂等。
+      - 授权模型见 19。
+    see: ["19"]
+  - id: ARC-021
+    title: 统一的命令或授权入口只负责决策和公共记录，业务状态转换仍由所属模块执行，不做成什么都经过它写库的中心服务
+    level: soft
+    check: manual
+    how: 评审时检查统一入口是否直接操作其他模块的数据表
+    applies: [kind:service]
+    why: 所有读写都过一个中心，会成为吞吐瓶颈，业务知识也会泄漏到它里面。
+    detail: 统一的是日志字段、证据格式和授权契约，不是所有业务的写入实现。数据库日常维护、批量修复和只读查询也不必套同一条命令流。
+  - id: ARC-022
+    title: 事件处理失败必须可见：进入死信或失败队列、有监控，并能重放或人工修复，不得静默丢弃
+    level: hard
+    check: semi
+    how: 演练一次消费失败，确认消息进入失败队列、触发告警并能重放
+    applies: [kind:service]
+    why: 静默丢掉的事件会让下游数据悄悄不一致，往往很久才被发现。
+    detail: 值得监控的信号包括：最早未发布记录的等待时长、outbox 积压、重试和失败率、消费者滞后、死信未处理量。阈值按项目 SLO 定，没有通用值。
+    sources: [S06, S13]
+    see: ["18", "26"]
+  - id: ARC-023
+    title: 核心链路的失败路径要有可执行测试：提交后响应丢失、超时结果未知、重复、乱序、进程重启、回放
+    level: soft
+    check: semi
+    how: 评审时对照这份清单检查核心链路的测试用例
+    applies: [kind:service]
+    why: 只测正常路径，分布式故障一来全都没见过。
+    see: ["04"]
+  - id: ARC-024
+    title: 区分业务状态、审计记录、对外集成事件和运行事件，各自定保留期限、访问权限和演进方式
+    level: soft
+    check: manual
+    how: 设计评审时检查每类事件的用途和保留策略是否写明
+    applies: [kind:service]
+    why: 都叫「事件」就放一张表无差别重放，会把审计记录当业务事实，或把内部事件暴露成对外契约。
+    detail: 不可删改的审计或事件序列可能和数据保留期限、删除和更正义务冲突，要事先按数据分类设计（见 27）。事件格式和版本见 16。
+    see: ["16", "27"]
+
+  # ── 模式取舍 ──
+  - id: ARC-025
+    title: CQRS 从轻量做起：先在同一个数据库里把读和写的代码分开；有测量数据证明需要时才上独立读存储和异步投影
+    level: soft
+    check: manual
+    how: 引入独立读存储的 ADR 里附上负载或查询性能数据
+    applies: [kind:service]
+    why: 双存储带来最终一致性和投影维护成本，简单场景得不偿失。
+    sources: [S07]
+  - id: ARC-026
+    title: 事件溯源只用于事件序列本身就是事实来源的子域，不为审计或操作记录而采用
+    level: soft
+    check: manual
+    how: 采用事件溯源的 ADR 写明为什么状态表加审计日志不够
+    applies: [kind:service]
+    why: 事件溯源的格式演进、重放、快照、隐私删除成本都很高；审计用状态表加审计日志加 outbox 就够。
+    sources: [S08]
+  - id: ARC-027
+    title: 跨服务的长流程用 Saga 前，写清每一步的终态、超时、补偿、不可补偿的状态和人工恢复办法
+    level: soft
+    check: manual
+    how: 评审时检查 Saga 设计是否包含这五项
+    applies: [kind:service]
+    why: Saga 没有事务隔离，补偿是新的业务操作而不是撤销（取消授权和退款是两回事）；写不清就会卡在中间状态。
+    detail: 先考虑能否把参与方收缩到一个事务里。编排框架和工作流引擎的选型见 18，不要自己写。
+    sources: [S13]
+    see: ["18"]
+  - id: ARC-028
+    title: 扩展点按需递进：一个实现时直接调用；有第二个真实实现再抽接口和适配器；有真实的第三方生态才做隔离的插件机制
+    level: soft
+    check: manual
+    how: 新增扩展点或插件机制时，评审时确认已有第二个实现或明确的第三方需求
+    applies: [all]
+    why: 提前做的通用插件框架会带来安全、兼容和升级负担，而预想的变化往往不会来。
+    detail: |
+      做插件机制前回答：谁真的会替换它？插件能动哪些资源、谁审核权限？插件出错会不会让主进程崩溃？离线环境怎么分发和撤销？接口怎么版本化？
+      两个模块只是名字像、语义不同时，不要为复用硬塞进一个大接口。
+    sources: [S04]
+  - id: ARC-029
+    title: 不可信代码和第三方插件不与核心服务共享权限：放在隔离的进程或沙箱里，只给最小范围、有时效的凭证
+    level: hard
+    check: semi
+    how: 评审执行环境的权限配置；用越权和逃逸测试验证插件拿不到核心服务的凭证和数据
+    applies: [all]
+    why: 共享权限时，一个恶意或有漏洞的插件就能控制整个系统。
+    see: ["25", "32"]
+
+  # ── 多租户与私有化 ──
+  - id: ARC-030
+    title: 按隔离要求选租户模型（共享表、每租户 schema、每租户库、每租户独立部署或混合），写进 ADR；私有化内网客户先评估每客户一套部署
+    level: soft
+    check: manual
+    how: 评审租户模型的 ADR 是否对比过隔离强度、成本和运维代价
+    applies: [kind:service, kind:onprem]
+    why: 隔离是连续谱，没有一种模型适合所有客户；给私有化客户硬做 SaaS 多租户，是在买用不上的复杂度。
+    detail: 每客户独立部署不代表客户内部的部门、项目权限问题消失，这部分仍要单独建模（见 19）。
+    sources: [S09]
+    see: ["19"]
+  - id: ARC-031
+    title: 共享实例的多租户系统，租户标识必须取自可信的身份上下文，隔离覆盖数据库、缓存键、搜索索引、对象存储、任务载荷、事件和导出，并有跨租户负例测试
+    level: hard
+    check: semi
+    how: 跨租户矩阵测试：用租户 A 的身份访问租户 B 的数据，覆盖接口、后台任务、缓存和导出，全部必须失败
+    applies: [kind:service]
+    why: 只在接口层按 tenant_id 过滤，缓存、索引、后台任务任何一处漏掉都会串租户，后果是数据泄露。
+    detail: |
+      数据库行级安全（RLS）只是防线之一：PostgreSQL 中超级用户和带 BYPASSRLS 属性的角色总能绕过它，表所有者默认也绕过（可以用 `FORCE ROW LEVEL SECURITY` 让所有者也受约束）；连接池复用时租户上下文可能残留。具体做法见 17、19。
+    sources: [S09, S10]
+    see: ["17", "19"]
+  - id: ARC-032
+    title: 承诺离线或内网交付的产品，必须在无外网环境中完成安装、启动、核心功能、升级回滚测试；运行时不依赖在线 CDN、在线许可证验证或在线下载
+    level: hard
+    check: auto
+    how: CI 或发布流程里在断网的环境（如无外网的网络命名空间）跑冒烟测试，并记录外发请求
+    applies: [kind:onprem]
+    why: 隐藏的联网依赖（字体、图标、证书、模型、驱动）在客户内网里会直接导致功能不可用。
+    detail: 远端遥测默认关闭；需要调用外部模型、接口或插件时要管理员授权。技术上断网不等于法律合规，法规见 27；离线安装升级流程见 26。
+    see: ["26", "27"]
+  - id: ARC-033
+    title: 新增依赖或扩展点时写明真实需求、许可证，以及对离线交付的影响
+    level: soft
+    check: semi
+    how: 评审时看依赖清单变化；许可证扫描按 27 的口径
+    applies: [all]
+    why: 每个依赖都是长期的维护、许可和交付成本，私有化场景更明显。
+    see: ["27"]
+
+  # ── 决策与沟通 ──
+  - id: ARC-034
+    title: 引入新的架构模式、服务边界、消息中间件、事件存储、插件机制或租户模型时，必须有已批准的 ADR；不影响结构的小改动不写
+    level: hard
+    check: manual
+    how: 评审时检查 PR 是否属于上述变更，属于则必须链接已接受的 ADR
+    applies: [all]
+    why: 这些决定影响系统结构或质量属性、难以逆转；不记录理由，后来的人只能猜或重复争论。
+    detail: |
+      - 只有影响结构、关键质量属性或难以逆转的决定才写 ADR。
+      - 已接受的 ADR 不改写，决定变了写新的 ADR 替代旧的并互相链接。
+      - 要写明考虑过的备选方案、代价和复核触发条件，以及决定的把握程度。
+      - 模板、目录和状态流转见 05。
+    sources: [S12]
+    see: ["05"]
+  - id: ARC-035
+    title: 架构改动按风险定设计深度：R0–R1 直接做；R2 写简短方案；R3 写 ADR 并由非作者评审
+    level: soft
+    check: manual
+    how: PR 里标出风险级别，评审时抽查
+    applies: [all]
+    why: 所有改动走重流程会拖慢小改动，所有改动都不写方案又会让大改动失控。
+    detail: |
+      R3 的例子：拆服务或合并服务、改变数据所有权、引入消息中间件或工作流引擎、改租户模型、不可逆的数据迁移、改变信任边界。
+      R2 的例子：新增模块、新增跨模块接口、新增异步事件。
+      级别定义与测试要求见 04；改动者只能往高定，拿不准按高一级。
+    see: ["04", "AGT-017"]
+  - id: ARC-036
+    title: 至少维护系统上下文图和容器图，图源放进版本库，标明依赖方向、同步或异步、信任边界
+    level: soft
+    check: semi
+    how: CI 校验文本图源语法；评审时对照模块清单检查图是否过时
+    applies: [kind:service]
+    why: 多数团队上下文图加容器图就够；手改的图片和代码一漂移就没人信了。
+    detail: |
+      - 这里的「容器」是 C4 里可单独运行或部署的单元，不是 Docker 容器。
+      - 组件图只在复杂容器内部需要；时序图只画高风险命令、跨进程长任务、提交和补偿这类关键链路。
+      - 依赖方向和数据流向不要混画；混画时要注明。
+      - 画图工具和写法见 05。
+    sources: [S11]
+    see: ["05"]
+  - id: ARC-037
+    title: 性能、可用性、恢复时间等质量目标写成可测量的指标并有负责人，用测试或监控持续验证
+    level: soft
+    check: semi
+    how: 评审时检查每个质量目标是否有对应的测试或监控项
+    applies: [kind:service]
+    why: 不可测的质量目标没法验收，也就没法用它来判断架构是否还合适。
+    detail: 用发布协调次数、跨边界变更率、回退成本等趋势判断架构是否在退化，不用服务数量、代码行数打分。SLO 的定法见 26。
+    see: ["26"]
+  - id: ARC-038
+    title: 改动模块的公开接口或事件结构时，运行受影响的下游契约测试，并写明兼容窗口
+    level: soft
+    check: auto
+    how: CI 根据改动路径找出下游模块，运行它们的契约测试
+    applies: [kind:service]
+    why: 模块边界的价值在于下游不受内部改动影响；接口一变不测下游，边界就失效了。
+    see: ["04", "16"]
+  - id: ARC-039
+    title: 改代码前先读相关 ADR 和模块公开接口；改动与已接受的 ADR 冲突，或无法用要求的检查验证时，停下并报告
+    level: soft
+    check: manual
+    how: 评审时看 Agent 的交付说明是否引用了相关 ADR，冲突时是否有报告
+    applies: [kind:agent]
+    why: Agent 自己挑一种解释绕过已有决定，出了问题无法追溯。
+    see: ["AGT-019"]
+  - id: ARC-040
+    title: 定期的架构巡检（人或工具）只产出报告或建议 PR，不自动做大规模重构
+    level: soft
+    check: manual
+    how: 巡检工具的权限只到开 PR；评审时检查单个 PR 的改动范围
+    applies: [all]
+    why: 规则会误报、工具缺上下文，自动大改容易引发大面积回归。
+    detail: 建议流程：提出建议 → 评估影响 → 人批准 → 小步、可回退地改。
+    see: ["AGT-031"]
+
+choices:
+  - category: 项目结构起点
+    pick: 业务后端用模块化单体（按业务模块划分，模块内简化分层）
+    when: 有一定复杂度、一个或少数团队维护的业务系统
+    alternatives:
+      - { name: 简单模块 + 显式输入输出边界, when: 小型 CLI、脚本、一次性工具 }
+      - { name: 模块化单体 + 少数独立 worker 或进程, when: 有不同资源曲线的后台任务，或需要隔离不可信代码 }
+      - { name: 少量粗粒度服务, when: 拿得出独立发布、故障隔离或合规隔离的证据（见 ARC-003） }
+    avoid:
+      - { name: 一开始就拆微服务, why: 没有明确收益时白付分布式成本 }
+      - { name: 每个模块一个服务, why: 调用频繁、独立性是假的，成了分布式单体 }
+    sources: [S01, S02, S03]
+  - category: 模块内依赖方向
+    pick: 复杂领域用六边形（端口与适配器）：业务规则不依赖 I/O
+    when: 规则多、外部依赖可能替换、需要不起数据库就能测
+    alternatives:
+      - { name: 传统分层 + 明确的模块边界, when: 规则少的增删改查 }
+    avoid:
+      - { name: 每个函数都抽接口, why: 只有一个实现时只增加映射代码，没有隔离收益 }
+    sources: [S04]
+  - category: 读写模型
+    pick: 单库单模型；读写差异大时同库内把读写代码分开（轻量 CQRS）
+    alternatives:
+      - { name: 独立读存储 + 异步投影, when: 有测量数据证明同库撑不住 }
+    avoid:
+      - { name: 没有指标就上双库, why: 白付最终一致性和投影维护成本 }
+    sources: [S07]
+  - category: 可靠异步集成
+    pick: 事务 outbox + 幂等消费者
+    alternatives:
+      - { name: 数据库变更捕获（CDC）, when: 存储原生支持且不想维护 outbox 表 }
+      - { name: 单库内的可靠任务表, when: 只是本进程内的异步任务 }
+    avoid:
+      - { name: 提交事务后直接发消息, why: 中间崩溃就丢事件 }
+      - { name: 自己写消息中间件或分布式事务引擎, why: 持久化、重试、时序和监控容易出错；选型见 18 }
+    sources: [S06]
+  - category: 跨服务长流程
+    pick: 先收缩边界争取单库事务；做不到再用状态机 + Saga
+    notes: 编排框架和工作流引擎见 18，不要自己写。
+    avoid:
+      - { name: 假设跨服务也有单库事务的保证, why: 没有隔离，中间状态对外可见 }
+    sources: [S13]
+  - category: 需要追溯历史
+    pick: 状态表 + 审计日志 + outbox
+    alternatives:
+      - { name: 事件溯源, when: 仅限事件序列本身就是业务事实来源的子域 }
+    avoid:
+      - { name: 把变更日志当成事件溯源, why: 事实来源和重放能力不一致 }
+    sources: [S08]
+  - category: 多租户模型
+    pick: 按隔离要求选：共享表、每租户 schema、每租户库或独立部署，可混合
+    alternatives:
+      - { name: 每客户一套独立部署, when: 私有化内网客户、监管隔离要求高 }
+    avoid:
+      - { name: 只靠接口层按 tenant_id 过滤, why: 缓存、索引、任务、导出任何一层漏掉就串租户 }
+      - { name: 不做 SaaS 却预建复杂的租户控制面, why: 买用不上的复杂度 }
+    sources: [S09]
+  - category: 架构边界检查
+    pick: 按语言选一个现成的架构检查工具，在 CI 里检查模块依赖环和跨模块引用；具体工具和配置见 10–14
+    alternatives:
+      - { name: dependency-cruiser, when: TypeScript / JavaScript（见 10） }
+      - { name: go-arch-lint 或 arch-go, when: Go（见 11，由 11 二选一） }
+      - { name: Import Linter, when: Python（见 12） }
+      - { name: 可见性控制 + cargo metadata + 定向测试, when: Rust，没有统一工具（见 13） }
+      - { name: ArchUnit；Spring 项目可用 Spring Modulith, when: Java / Kotlin（见 14） }
+      - { name: Packwerk, when: Ruby / Rails }
+      - { name: Deptrac, when: PHP }
+      - { name: ArchUnitNET 或自写架构测试, when: C# / .NET（现状未核实） }
+    avoid:
+      - { name: 自己写脚本解析 import, why: 路径别名、生成代码、条件编译容易漏检，现成工具已处理 }
+      - { name: 只靠评审口头把关, why: 边界会在没人注意时被一点点绕开 }
+    notes: 工具版本、许可证和配置示例由各语言主题维护。
+    sources: [S05]
+
+antipatterns:
+  - { bad: controller/service/repository 横切全项目，所有业务共用一个 service 层, instead: 先按业务模块划分，再在模块内部分层 }
+  - { bad: 模块化单体就是所有代码放一个包里随便互相引用, instead: 公开接口 + 内部实现 + 无环依赖 + CI 检查 }
+  - { bad: 用拆微服务来解决团队没有模块纪律的问题, instead: 先在单体内理清数据和代码所有权 }
+  - { bad: 每个服务各自一个库，却互相写表或联表查询, instead: 数据所有者提供接口或只读模型 }
+  - { bad: 数据库提交成功后立即发消息，没有持久化协调, instead: 事务 outbox 或 CDC }
+  - { bad: 把 outbox 说成恰好一次, instead: 消费者幂等、去重、重试和对账 }
+  - { bad: 简单增删改查用上双库 CQRS + 事件溯源 + Saga, instead: 单库读写，局部读模型 }
+  - { bad: 先做一个万能插件框架, instead: 有两个真实实现后再提炼接口 }
+  - { bad: 数据库里有 tenant_id 或开了 RLS 就以为隔离了, instead: 多层隔离 + 跨租户负例测试 }
+  - { bad: 把超时当成失败直接重做, instead: 超时视为结果未知，用幂等键或查询确认后再处理 }
+  - { bad: 架构图只有一张手改的截图, instead: 文本图源进版本库，和依赖检查互相对照 }
+  - { bad: 用服务数量、代码行数、函数长度给架构打分, instead: 看变更耦合、发布协调成本、故障域和回退成本的趋势 }
+  - { bad: CI 绿了就认为权限和架构都没问题, instead: 负例测试、运行时验证、审计和人工评审补盲区 }
+  - { bad: 为了让 CI 通过而关掉架构检查器, instead: 登记有到期日的豁免，由别人批准 }
+
+sources:
+  - { id: S01, title: Monolith First, url: "https://martinfowler.com/bliki/MonolithFirst.html", publisher: Martin Fowler, date: 2015-06-03, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: Microservice Trade-Offs, url: "https://martinfowler.com/articles/microservice-trade-offs.html", publisher: Martin Fowler, date: 2015-07-01, kind: community, checked: 2026-11-13 }
+  - { id: S03, title: Microservices architecture style, url: "https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/microservices", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S04, title: Hexagonal architecture pattern, url: "https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/hexagonal-architecture.html", publisher: AWS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "Spring Modulith: Verifying application module structure", url: "https://docs.spring.io/spring-modulith/reference/verification.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: Transactional outbox pattern, url: "https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html", publisher: AWS, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: CQRS pattern, url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: Event Sourcing pattern, url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: Tenancy models for a multitenant solution, url: "https://learn.microsoft.com/en-us/azure/architecture/guide/multitenant/considerations/tenancy-models", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "PostgreSQL: Row Security Policies", url: "https://www.postgresql.org/docs/current/ddl-rowsecurity.html", publisher: PostgreSQL, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: C4 model diagrams, url: "https://c4model.com/diagrams", publisher: Simon Brown, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S12, title: Architecture decision record, url: "https://learn.microsoft.com/en-us/azure/well-architected/architect-role/architecture-decision-record", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: Saga patterns, url: "https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/saga-patterns.html", publisher: AWS, date: null, kind: official, checked: 2026-11-13 }
+
+open_questions:
+  - 报告引用的「瑞典金融科技公司单体 + 78 个微服务技术债」案例（标为 Journal of Systems and Software 2026 年第 237 卷）联网未能找到原文，已不作为任何规则的出处；如需引用，先确认论文存在及结论
+  - 重试的退避与抖动目前没有挂官方出处，待补一手资料（如云厂商关于超时、重试与退避的工程文章）
+  - 架构检查工具（dependency-cruiser、Import Linter、go-arch-lint、arch-go、ArchUnit、Spring Modulith、Packwerk、Deptrac）的许可证和维护状态未在本主题核实，由 10–14 各自核实
+  - ArchUnitNET 的维护状态和仓库现状未核实；.NET 暂无语言主题承接
+  - 待补调研：每种语言一份最小的边界检查配置示例（「公开路径之外禁止导入」「核心领域禁止导入数据库包」），放进 10–14
+  - 待补调研：Go 在 go-arch-lint 与 arch-go 之间选哪个及理由（与 11 对齐）
+  - 待补调研：前端（按功能划分的边界检查，如 eslint 边界插件、Nx 模块边界规则）、Kotlin、Swift 的依赖规则工具
+  - 待补调研：模块之间通信方式（同步调用、进程内事件、持久化事件）的选择标准
+  - 待补调研：移动与桌面客户端、数据处理任务、CLI 的架构细则目前只有一行概要
+  - 待补调研：领域驱动设计和架构适应度函数的一手资料（报告中这部分只引了 AWS 六边形指南）
+  - 报告中的中国大陆数据出境、等保相关内容已移交 27，本主题只保留离线可验收的技术要求
