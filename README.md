@@ -47,4 +47,4 @@ pnpm deploy       # 构建并部署到 Cloudflare Workers（静态资源）
 
 ## 授权
 
-规范内容采用 CC BY 4.0 授权，代码采用 MIT 授权。涉及法律、合规和许可证的内容只是工程参考，不构成法律意见。
+规范内容采用 CC BY 4.0 授权（见 [LICENSE-CONTENT.md](LICENSE-CONTENT.md)），代码采用 MIT 授权（见 [LICENSE](LICENSE)）。涉及法律、合规和许可证的内容只是工程参考，不构成法律意见。
