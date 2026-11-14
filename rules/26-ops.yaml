@@ -1,0 +1,659 @@
+id: "26"
+slug: ops
+title: 运维部署与 SRE
+summary: 服务怎么部署（单机、Compose、Kubernetes）、运行镜像怎么选和加固、怎么发布和回退、怎么观测和告警、出了事故怎么处理，以及私有化和断网环境怎么交付、升级和恢复。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 部署形态：单机、Docker Compose、Kubernetes、托管环境，以及什么时候值得上 Kubernetes
+    - 运行时基础镜像的选择与容器运行时加固
+    - 健康探针、资源配置、优雅停机、自动伸缩
+    - 发布策略：分批灰度、回退、功能开关、升级路径与兼容窗口
+    - 可观测性：OpenTelemetry、日志采集与保留、指标、链路追踪
+    - SLO 与告警、值班、事故处理（事故等级用 SEV1–SEV4）、运行手册与复盘
+    - 容量与可观测数据的成本
+    - 私有化与断网交付：离线安装包、内网镜像仓库、预检、诊断包、升级与回退
+    - 备份恢复的运维执行（策略和演练频率引用 17）
+  excludes:
+    - { what: 日志字段约定、错误传播, see: "02" }
+    - { what: Dockerfile 写法、基础镜像固定 digest、非 root 用户、Compose/Helm 等配置文件的 lint, see: "15" }
+    - { what: CI 门禁顺序、发布流程、分支与评审, see: "03" }
+    - { what: 面向用户的变更日志写法, see: "05" }
+    - { what: 镜像漏洞扫描、SBOM、签名与来源证明、密钥管理, see: "25" }
+    - { what: 备份策略、恢复目标、恢复演练频率、数据库迁移原则, see: "17" }
+    - { what: 接口与事件的兼容和版本, see: "16" }
+    - { what: 产品埋点与通用成本账本, see: "22" }
+    - { what: 开源许可口径（AGPL、BUSL、FSL 能否随产品分发）、日志的法定留存, see: "27" }
+    - { what: Agent 权限与提示注入的通用规则, see: "23" }
+    - { what: 在本机运行编码 Agent, see: "32" }
+overview: |
+  1. **按能力选部署形态，不按潮流。** 单机（Compose 或 systemd）可以是正式生产，但不能说成跨机高可用；需要跨主机故障转移、自动多节点伸缩、多团队隔离，且有人能运维集群时，才上 Kubernetes。Kubernetes 不会自动让数据库高可用。
+  2. **部署引用不可变的镜像摘要（digest）。** 不用 `latest`；每个版本出一份制品清单（镜像摘要、Chart、校验和），安装前校验。
+  3. **运行镜像要小、要收紧。** 默认用 distroless 或 Docker Hardened Images 这类不带 shell 和包管理器的镜像；容器以非 root、禁止提权、去掉全部 capabilities 运行。
+  4. **三种探针各管各的。** liveness 只判断进程要不要重启，readiness 判断能不能接流量，慢启动用 startup；下游临时故障不能引发集体重启。收到 SIGTERM 先摘流量再退出。
+  5. **发布要能退。** 分批灰度，事先写好暂停和回退条件；破坏性的数据变更按「扩展 → 迁移 → 收缩」分步走。回滚镜像不等于回滚数据库。
+  6. **可观测性用 OpenTelemetry 做薄契约。** 结构化日志写标准输出、低基数指标、OTel 传播上下文；后端按规模选。先查目标语言各信号的稳定级别：链路和指标多数语言已稳定，日志在不少语言仍未稳定，Profiles 还是 alpha。
+  7. **告警按用户影响呼人。** 关键用户旅程定 SLO，用多窗口燃烧率告警；每条呼人告警有负责人和运行手册；CPU 高不该半夜叫醒人。
+  8. **事故有人指挥、有时间线、有复盘。** 等级用 SEV1–SEV4；复盘对事不对人，行动项跟踪到关闭。
+  9. **备份以恢复成功为准。** 备份作业要监控；恢复演练按 17 的频率在隔离环境做，跑业务冒烟并记录实际恢复时间。
+  10. **离线是验收条件。** 私有化版本在完全断开公网出口的环境里验收安装、升级、回退；默认不外发遥测、不检查更新、不下载未打包的资源。
+rules:
+  # ── 部署形态 ──
+  - id: OPS-001
+    title: 每种受支持的部署形态写清支持的操作系统和 CPU 架构、资源下限、依赖和高可用边界；单机部署（含 Compose）不得承诺跨机高可用
+    level: hard
+    check: manual
+    how: 评审部署文档或交付清单，逐项核对上述栏目；检查对外材料里单机形态没有「高可用」「故障自动转移」字样
+    applies: [kind:service, kind:onprem]
+    why: Compose 只在一台主机上编排容器，机器坏了服务就停；承诺做不到的可用性，出事时就是事故加违约。
+    detail: |
+      - 常见形态：单机（Compose 或 systemd 加本机包）、集群（Kubernetes）、托管（云厂商或客户已有平台）。
+      - 每种形态写清：谁负责操作系统、容器运行时、证书、备份、集群控制面；故障域有多大；升级和备份怎么做。
+      - 单机部署可以是正式生产，前提是业务能接受单机故障期间不可用和维护窗口。
+    sources: [S01]
+  - id: OPS-002
+    title: 只有需要跨主机故障转移、自动多节点伸缩或多团队工作负载隔离，并且有人能负责集群的升级和排障时，才引入 Kubernetes
+    level: soft
+    check: manual
+    how: 引入 Kubernetes 的方案评审里回答四个问题：可用性目标、故障域、扩容方式、谁运维集群
+    applies: [kind:service, kind:onprem]
+    why: Kubernetes 带来网络、存储、准入、升级一整套运维负担；没有对应需求和人手，复杂度只会变成新的故障源。
+    detail: |
+      - 没有「服务数到 N 就上 Kubernetes」的门槛，按真实的可用性目标、维护频率和人员能力判断。
+      - 客户已有 Kubernetes 或合同要求集群部署时，按客户环境走。
+      - Kubernetes 不会自动让数据库、对象存储高可用，有状态组件要单独设计（见 17）。
+      - 上游 Kubernetes 只维护最近三个小版本，每个约 14 个月补丁支持，没有长期支持版；自建集群要排好升级节奏。
+    sources: [S02]
+    see: ["01", "17"]
+  - id: OPS-003
+    title: 云资源和集群配置用基础设施即代码（IaC）声明并入库；控制台上的手工改动不作为最终状态，定期检测漂移
+    level: soft
+    check: semi
+    how: 定时跑 `tofu plan` / `terraform plan` 或 GitOps 控制器的差异检查，有差异就提工单
+    applies: [kind:service]
+    why: 只靠人手在控制台改，环境就无法重建，出了事也说不清改过什么。
+    see: ["15"]
+  # ── 镜像与制品 ──
+  - id: OPS-004
+    title: 生产部署的镜像引用写到不可变的摘要（`@sha256:…`），不用 `latest` 或可移动的标签
+    level: hard
+    check: auto
+    how: CI 扫描 Helm values、渲染后的清单和 Compose 文件，镜像引用不带摘要即失败；集群里可再加准入策略拦截
+    applies: [kind:service, kind:onprem]
+    why: 标签可以被移到别的镜像上，摘要不会；用摘要才能确定跑的是哪个版本、能准确回退。
+    detail: Dockerfile 里 FROM 的固定方式见 15（CFG-028）。
+    sources: [S03]
+    see: ["15"]
+  - id: OPS-005
+    title: 每个发布版本出一份制品清单（各架构镜像摘要、Chart 包、依赖和校验和），安装和升级前先校验
+    level: hard
+    check: auto
+    how: 安装脚本第一步按清单校验每个文件的 SHA-256 和镜像摘要，不一致就停止
+    applies: [kind:service, kind:onprem]
+    why: 离线拷贝和多次中转容易出现文件缺失或被替换，不校验就无法保证装的是发布的那一版。
+    detail: 签名、SBOM、来源证明见 25。
+    sources: [S18]
+    see: ["25"]
+  - id: OPS-006
+    title: 同一 CPU 架构下，云上和私有化使用同一个镜像摘要；多架构用多架构清单（manifest list）发布同一版本，配置和外部依赖通过环境注入
+    level: soft
+    check: semi
+    how: 对比各环境部署记录里的镜像摘要
+    applies: [kind:service, kind:onprem]
+    why: 为私有化单独构建一份，测过的和交付的就不是同一个东西。
+    detail: 同一个镜像不代表有状态组件在两种环境下的可用性相同，可用性承诺要分别写（见 OPS-001）。
+  - id: OPS-007
+    title: 运行阶段的基础镜像优先选不含 shell 和包管理器的最小镜像（如 distroless、Docker Hardened Images）；排障用 debug 变体或临时调试容器，不把调试工具打进生产镜像
+    level: soft
+    check: semi
+    how: 评审时看最终阶段的 FROM；用镜像扫描结果对比包数量和漏洞数
+    applies: [kind:service, kind:onprem]
+    why: 镜像里的东西越少，漏洞越少、被利用的工具越少，扫描结果也越好处理。
+    detail: |
+      - Go、Rust 等静态二进制用 distroless 的 static 镜像；Java、Python、Node 用对应语言的 distroless 或加固镜像。
+      - distroless 的标签带 Debian 大版本后缀（如 `-debian13`），固定后缀，不依赖不带后缀的默认指向。
+      - 需要运行时装系统包的，用官方 slim 镜像，并在多阶段构建里把构建工具留在前面的阶段（见 15 CFG-032）。
+    sources: [S04, S05]
+    see: ["15", "25"]
+  - id: OPS-008
+    title: 容器以非 root 运行，禁止提权，去掉全部 Linux capabilities，seccomp 用运行时默认配置；不用 privileged、hostNetwork、hostPath，确需时写明原因和替代限制
+    level: hard
+    check: auto
+    how: Kubernetes 命名空间开启 Pod Security Admission 的 restricted 级别；Compose 文件用 CI 脚本检查 `user`、`cap_drop`、`security_opt`、`privileged`
+    applies: [kind:service, kind:onprem]
+    why: 容器逃逸和横向移动多数靠 root、多余的 capabilities 和宿主机挂载；这些是 Kubernetes 官方 restricted 基线的要求。
+    detail: |
+      - Kubernetes restricted 基线要求：`runAsNonRoot: true`、`allowPrivilegeEscalation: false`、`capabilities.drop: [ALL]`（只允许加回 `NET_BIND_SERVICE`）、seccomp 为 `RuntimeDefault` 或 `Localhost`。
+      - 只读根文件系统（`readOnlyRootFilesystem: true`）不在官方基线里，但建议默认开启，需要写的目录用 emptyDir 或卷挂载。
+      - 镜像里的非 root 用户怎么设见 15（CFG-029）。
+    sources: [S06]
+    see: ["15", "25"]
+  # ── 运行时 ──
+  - id: OPS-009
+    title: 区分 liveness、readiness、startup 探针：liveness 只检查进程本身是否卡死，不检查数据库等下游；readiness 反映能否接流量；启动慢的服务配 startup 探针
+    level: hard
+    check: semi
+    how: 评审探针实现；集成测试里停掉下游依赖，确认服务变为未就绪而不是被反复重启
+    applies: [kind:service]
+    why: liveness 依赖下游时，数据库一抖，所有实例会同时被重启，小故障变成全面故障。
+    sources: [S07]
+  - id: OPS-010
+    title: Compose 里依赖其他服务就绪的，给被依赖服务配 healthcheck，并用 `depends_on` 的 `condition service_healthy`；应用本身仍要能重试连接
+    level: soft
+    check: auto
+    how: CI 解析 Compose 文件，检查 depends_on 是否用了长格式和健康条件
+    applies: [kind:service, kind:onprem]
+    why: 短格式的 depends_on 只保证启动顺序，不保证对方已经能用。
+    sources: [S01]
+  - id: OPS-011
+    title: 收到 SIGTERM 后先标记未就绪、停止接新请求和新任务，在设定的期限内处理完或交还在途工作，再退出；停机期限不超过平台的强制终止时间
+    level: hard
+    check: semi
+    how: 集成测试在长请求、流式连接、队列任务进行中发送 SIGTERM，检查无请求被截断、任务被重新投递
+    applies: [kind:service]
+    why: 发布、缩容、节点维护都会发 SIGTERM；处理不好，每次发布都会丢请求或做一半的任务。
+    detail: |
+      - Kubernetes 默认在 SIGTERM 后等待 `terminationGracePeriodSeconds` 再强制结束；Compose 用 `stop_grace_period`。
+      - 未处理完的任务靠幂等和重试接管，一致性要求见 16、17。
+    sources: [S08]
+    see: ["16", "17", "18"]
+  - id: OPS-012
+    title: 每个容器显式配置 CPU 和内存的请求与上限（或 Compose 的资源限制），数值来自压测或线上观测，不照抄示例
+    level: hard
+    check: auto
+    how: CI 用 kube-linter 或策略引擎检查清单里每个容器都有 requests 和 limits；评审时看数值依据
+    applies: [kind:service, kind:onprem]
+    why: 不设上限会互相抢资源、触发 OOM；不设请求，按 CPU 利用率的自动伸缩就没有基准。
+    sources: [S09]
+  # ── 发布与回退 ──
+  - id: OPS-013
+    title: 发布说明写清能从哪些版本直接升级、是否需要中转版本、不可逆的变更和回退限制
+    level: hard
+    check: manual
+    how: 发布评审时核对发布说明里这四项都有
+    applies: [kind:service, kind:onprem]
+    why: 私有化客户的版本参差不齐，不写升级路径和不可逆点，客户升级时就会踩坑，坏了也退不回去。
+    detail: 给用户看的变更日志写法见 05；发布流程见 03。
+    sources: [S10]
+    see: ["03", "05"]
+  - id: OPS-014
+    title: 破坏性的数据结构或协议变更按「扩展 → 迁移 → 收缩」分步发布，收缩放在之后的版本；不把回滚镜像当作回滚数据
+    level: hard
+    check: semi
+    how: 评审迁移计划时检查分步；CI 跑新旧版本混跑的兼容测试
+    applies: [kind:service, kind:onprem]
+    why: 滚动发布期间新旧版本同时在跑；一步到位的破坏性变更会让旧实例出错，而且数据改了就回不去。
+    detail: 数据库迁移原则见 17，接口兼容见 16。数据已不可逆地转换时，只能靠备份恢复或向前修复。
+    sources: [S10]
+    see: ["16", "17"]
+  - id: OPS-015
+    title: 线上发布分批进行；切换前记下关键指标基线，事先写好暂停和回退的条件，并确认回退步骤可用
+    level: soft
+    check: manual
+    how: 发布记录里有基线、分批计划、暂停和回退条件；抽查回退是否演练过
+    applies: [kind:service]
+    why: 一次推到全部实例，问题会马上波及所有用户；不事先定条件，出问题时就会犹豫和争论。
+    detail: |
+      - 分批单位可以是实例、流量比例、租户或功能开关。
+      - 判断条件用用户视角的指标（错误率、延迟、关键业务失败数、错误预算消耗），不只看「部署成功」。
+    see: ["03"]
+  - id: OPS-016
+    title: 功能开关通过 OpenFeature 这类标准接口读取；开关服务不可达时返回代码里的默认值继续运行，不阻塞启动和请求
+    level: hard
+    check: semi
+    how: 集成测试里停掉开关服务，确认应用正常启动、按默认值运行
+    applies: [kind:service, kind:onprem]
+    why: OpenFeature 规范要求求值不抛异常、出错时返回默认值；远程开关服务挂掉或私有化断网时，不能拖垮业务。
+    sources: [S11]
+  - id: OPS-017
+    title: 每个功能开关登记负责人、用途、默认值和计划删除的时间或版本，到期清理
+    level: soft
+    check: semi
+    how: 开关清单入库，CI 列出超期未删的开关
+    applies: [kind:service]
+    why: 不清理的开关会越积越多，组合越来越难测，旧分支代码也一直留着。
+  - id: OPS-018
+    title: 写明支持哪些版本同时在维护、是否允许跳版本升级，不无限期兼容历史版本
+    level: soft
+    check: manual
+    how: 支持矩阵入库，发布评审时更新
+    applies: [kind:onprem]
+    why: 不设边界，兼容代码和测试矩阵会越积越大。
+    ref_value: 参考起点：维护当前和上一个小版本（N 和 N-1）；无统一标准，按客户合同和发布频率调整。
+  # ── 可观测性 ──
+  - id: OPS-019
+    title: 应用日志写到标准输出或标准错误，由平台采集；不把日志只留在容器内的文件里
+    level: hard
+    check: auto
+    how: 部署配置检查里没有把日志只写容器内路径的配置；启动后确认采集端能收到日志
+    applies: [kind:service]
+    why: 容器重建后容器内文件就没了，日志也就丢了；写标准输出是容器平台统一采集的前提。
+    detail: 日志格式和必备字段（时间、级别、服务、追踪编号等）见 02（COD-016、COD-017）；运维侧再补充版本和环境两项资源信息。
+    sources: [S12]
+    see: ["02"]
+  - id: OPS-020
+    title: 链路追踪和指标用 OpenTelemetry API 与 OTLP 协议上报，经 Collector 转发；业务代码不直接调用某一家后端的专有 SDK
+    level: soft
+    check: semi
+    how: 依赖扫描查找业务模块里的厂商专有遥测 SDK
+    applies: [kind:service]
+    why: 绑定一家的 SDK，换后端就得改业务代码；走标准接口和 Collector，后端可以按部署规模更换。
+    detail: |
+      - 三类信号用同一套资源属性（至少 `service.name`、`service.version`、`deployment.environment`），以便互相关联。
+      - 跨服务调用传播 W3C Trace Context。
+    sources: [S13, S14]
+  - id: OPS-021
+    title: 采用 OpenTelemetry 前查一下目标语言各信号的稳定级别；日志在该语言未稳定时，用语言自带的成熟日志库输出结构化日志，由 Collector 采集并带上追踪编号
+    level: soft
+    check: manual
+    how: 方案评审时附上 OpenTelemetry 状态页的结论
+    applies: [kind:service]
+    why: 各语言 SDK 的成熟度不同，用了未稳定的信号，升级时接口可能变。
+    detail: |
+      - 核实时（2026-11）的状态：链路追踪在多数语言已稳定；指标在 Go、Java、JavaScript、Python、.NET 等已稳定；日志只在少数语言（如 Java、.NET、C++）稳定，Go 为候选版，JavaScript、Python 仍在开发中。
+      - Profiles（性能剖析）还是 alpha，不要用在关键路径上。
+      - Collector 各组件稳定级别不一，以每个组件 README 为准。
+    sources: [S13, S15]
+  - id: OPS-022
+    title: 可观测组件（Collector、日志采集、后端）故障或变慢时不得阻塞业务请求；Collector 配内存限制和批处理，宁可丢遥测也不拖垮业务
+    level: hard
+    check: semi
+    how: 测试时停掉或限流可观测后端，确认业务请求的延迟和成功率不受影响
+    applies: [kind:service, kind:onprem]
+    why: 为了看清系统而让系统变慢或停掉，是本末倒置；小型私有化环境尤其容易被遥测压垮。
+    detail: Collector 的 memory_limiter、batch、采样和缓冲按部署规模配置，不照抄示例。
+    sources: [S14]
+  - id: OPS-023
+    title: 用户编号、请求编号、追踪编号、订单号这类取值无上限的字段，不做指标标签，也不做日志的索引标签
+    level: hard
+    check: semi
+    how: 定期用 `promtool tsdb analyze` 或后端自带的基数统计找出序列数最多的标签；评审新增指标时检查标签
+    applies: [kind:service]
+    why: 每个不同的标签值都会产生一条新的时间序列或日志流，取值无上限时存储和查询都会失控。
+    detail: 这类字段放在日志内容或结构化元数据里，需要时按内容检索。
+    sources: [S16, S17]
+  - id: OPS-024
+    title: 集中采集日志；按用途（排障、审计、合规）分别写明保留期和存储预算，定期对照实际用量复核
+    level: soft
+    check: manual
+    how: 保留策略写进部署文档；每月或每季度看一次存储增长和费用
+    applies: [kind:service, kind:onprem]
+    why: 不设保留期，小型私有化环境会先被日志写满磁盘；不分用途，审计日志可能被和排障日志一起删掉。
+    detail: 法定留存期限见 27；链路追踪默认采样，不全量保存。可观测数据的费用记入 22 的成本账本。
+    see: ["22", "27"]
+  - id: OPS-025
+    title: 区分本地运维遥测和发往厂商的遥测：发往厂商的默认关闭、由客户显式开启；关闭外发不影响本地的健康检查、指标和审计
+    level: hard
+    check: auto
+    how: 在断网或出口全拒绝的环境里运行，记录对外连接；检查默认配置里外发开关为关
+    applies: [kind:onprem]
+    why: 私有化客户普遍禁止数据外发，默认外发会违反合同和法规；把本地运维能力和外发绑在一起关，又会让客户自己无法排障。
+    sources: [S18]
+    see: ["22", "27"]
+  # ── SLO 与告警 ──
+  - id: OPS-026
+    title: 关键服务按用户旅程定义 SLI（如下单成功率、关键接口延迟）和 SLO，写明统计窗口、排除范围和负责人
+    level: soft
+    check: semi
+    how: SLO 定义文件入库，CI 校验必填字段；每季度对照实际数据复核
+    applies: [kind:service]
+    why: 只看 CPU、内存说不清用户是否受影响；用户视角的目标才能决定什么时候该停下新功能先修稳定性。
+    detail: SLO 是内部目标，不等于对外合同里的 SLA；流量很小的服务，不要用小样本百分比去呼人。
+    ref_value: 常见示例为 30 天滚动窗口、成功率 99.9%；只是示例，目标按业务影响定。
+    sources: [S19]
+  - id: OPS-027
+    title: 呼人告警基于用户影响（如错误预算的多窗口燃烧率），不按单机 CPU、内存阈值呼人；资源类告警发工单或通知
+    level: soft
+    check: semi
+    how: 评审告警规则，列出级别为呼人的规则逐条看触发条件
+    applies: [kind:service]
+    why: 资源指标高不一定有用户受影响，按它呼人会制造大量无效告警，让值班的人麻木。
+    detail: |
+      Google SRE Workbook 对 99.9% 目标给出的起步阈值：1 小时与 5 分钟两个窗口的燃烧率都超过 14.4 倍、或 6 小时与 30 分钟都超过 6 倍时呼人；更慢的消耗发工单。按自己的目标和流量调整。
+    sources: [S19]
+  - id: OPS-028
+    title: 每条呼人告警都带负责人、事故等级和运行手册链接；没有运行手册的告警不得设为呼人
+    level: hard
+    check: auto
+    how: CI 检查告警规则的 labels 和 annotations 里有 owner、severity、runbook_url，且链接可访问
+    applies: [kind:service]
+    why: 半夜被叫起来却不知道该做什么、该找谁，告警就只是噪声。
+    sources: [S19, S20]
+  - id: OPS-029
+    title: 告警路由做分组、抑制和静默，值班有主备和升级链；每月统计告警数量、可处置比例和重复告警，删改无动作的告警
+    level: soft
+    check: manual
+    how: 查看告警路由配置和月度告警复盘记录
+    applies: [kind:service]
+    why: 同一故障触发几十条告警会淹没真正的线索；不定期清理，告警只会越来越多。
+    sources: [S20]
+  # ── 事故与复盘 ──
+  - id: OPS-030
+    title: 事故按 SEV1–SEV4 定级；SEV1、SEV2 指定事故指挥，分开处置和对外沟通的人，并维护一份实时更新的事故记录（时间线、影响面、决定）
+    level: soft
+    check: manual
+    how: 抽查 SEV1、SEV2 事故记录是否有指挥人、时间线、影响范围和关键决定
+    applies: [kind:service]
+    why: 没人统筹时，多个人同时改系统、没人对外同步，故障会被拖长甚至扩大。
+    detail: |
+      - 等级含义见公共词表：SEV1 核心功能不可用或数据受损、影响大多数用户；SEV2 重要功能受损或部分用户不可用；SEV3 次要功能受损有绕过办法；SEV4 轻微、无明显用户影响。客户有自己的等级时写映射表。
+      - 事故期间只有处置的人改系统；记录要能多人同时编辑，事后用于复盘。
+    sources: [S21]
+  - id: OPS-031
+    title: SEV1、SEV2 事故结束后做复盘：对事不对人，写清触发条件、系统性原因、为什么没有提前发现；行动项有负责人、期限和验证方式，并跟踪到关闭
+    level: soft
+    check: semi
+    how: 复盘文档模板固定这些栏目；行动项关联工单，定期列出超期未关的
+    applies: [kind:service]
+    why: 追究个人只会让人隐瞒信息；行动项不落到人和期限，同样的事故会再来。
+    detail: 复盘文档的写法见 05。
+    sources: [S22]
+    see: ["05"]
+  - id: OPS-032
+    title: 运行手册入库并版本化，写明适用的告警、前置检查、操作步骤、结果验证、停止条件和回退；每次事故或演练后更新
+    level: soft
+    check: semi
+    how: CI 检查运行手册包含这些小节；告警的 runbook_url 指向存在的文件
+    applies: [kind:service, kind:onprem]
+    why: 事故时没人有精力现想步骤；没有停止条件，操作者可能在错误方向上越走越远。
+    see: ["05"]
+  # ── 备份与恢复的运维执行 ──
+  - id: OPS-033
+    title: 备份作业纳入监控，失败或超时就告警；恢复演练按 17 定的频率在隔离环境执行，恢复后跑业务冒烟，记录实际恢复时间和数据损失
+    level: hard
+    check: manual
+    how: 检查备份告警规则存在；查看最近一次演练记录的日期、步骤、冒烟结果和实测 RPO/RTO
+    applies: [kind:service, kind:onprem]
+    why: 没人发现的备份失败和没验证过的备份，等到真要恢复时才暴露。
+    detail: |
+      - 备份策略、恢复目标和演练频率只在 17 定（DB-033、DB-036），这里不另定频率。
+      - 系统级恢复除了数据库，还要覆盖配置、证书、对象存储和密钥恢复材料，并按依赖顺序恢复。
+      - 集群部署的演练还要覆盖整机丢失和持久卷丢失。
+    sources: [S23]
+    see: ["17"]
+  # ── 容量与成本 ──
+  - id: OPS-034
+    title: 重要发布或预期流量增长前做容量测试，写清负载模型、p95/p99 延迟、瓶颈所在和剩余余量；用了自动伸缩的，用负载试验验证扩缩结果，不只检查配置存在
+    level: soft
+    check: manual
+    how: 保留压测报告（含自动伸缩在稳态、突增、回落三个阶段的副本数和延迟），发布评审时引用
+    applies: [kind:service]
+    why: 不压测就只能凭感觉配资源，要么浪费，要么在高峰时被打垮；伸缩依赖指标采集和资源请求，配错了平时看不出来。
+    sources: [S09]
+    see: ["04"]
+  # ── 私有化与断网交付 ──
+  - id: OPS-035
+    title: 私有化离线版必须在完全断开公网出口的环境里验收安装、升级、回退和业务冒烟，并确认没有对外连接
+    level: hard
+    check: auto
+    how: 在出口全拒绝的网络里跑安装和升级流水线，记录 DNS 查询和出站连接，非零即失败
+    applies: [kind:onprem]
+    why: 很多外联点藏在默认配置里（更新检查、使用统计、时间同步、插件下载），只在有网的环境测试发现不了。
+    detail: GitLab 官方离线安装指南逐项列出了要处置的默认外联点，可作为检查清单的参考。
+    sources: [S18]
+  - id: OPS-036
+    title: 离线安装包自带全部所需内容：各架构镜像（OCI 归档或内网仓库同步包）、Chart 和依赖、迁移脚本、校验和、安装升级回退恢复手册、预检和冒烟脚本；安装和运行时不下载包外资源
+    level: hard
+    check: auto
+    how: 扫描安装脚本和配置里的外部 URL；断网验收（见 OPS-035）
+    applies: [kind:onprem]
+    why: 少一个镜像或插件，现场就装不上，而断网环境里补发一次往往要几天。
+    detail: 镜像推到客户内网的镜像仓库后，部署配置只从内网仓库拉取。许可证和 NOTICE 文件随包交付（见 27）。
+    sources: [S18]
+    see: ["27"]
+  - id: OPS-037
+    title: 私有化安装前运行预检，检查 CPU、内存、磁盘、端口、DNS、时间同步、证书链、CPU 架构和容器运行时，不满足就给出明确原因并停止；支持导入客户私有 CA 和替换证书，证书到期前告警
+    level: soft
+    check: auto
+    how: 预检脚本输出结构化报告，安装流程在预检失败时退出
+    applies: [kind:onprem]
+    why: 私有化的大部分安装工单来自环境不满足，提前查出来比装到一半失败好处理；企业内网普遍用自建 CA，证书过期是常见又完全可以预防的停服原因。
+  - id: OPS-038
+    title: 给客户的诊断包默认脱敏（不含密钥、令牌、私钥和业务数据），列出采集范围，客户可预览、删选后离线导出
+    level: hard
+    check: semi
+    how: 对诊断包样本跑密钥扫描；评审采集清单
+    applies: [kind:onprem]
+    why: 诊断包会被发给厂商，混进密钥或客户数据就是一次数据泄露。
+    detail: 一般包含：系统和运行时信息、制品与数据结构版本、脱敏后的配置差异、探针结果、限量的近期错误日志、关键指标采样、磁盘容量、证书到期时间（不含私钥）、DNS/时间/端口检查结果、最近一次升级状态。
+    see: ["25", "27"]
+  - id: OPS-039
+    title: 对外声明支持某个国产操作系统或 CPU 架构前，在该系统、内核、容器运行时和 CPU 的组合上实测安装和核心业务流程，并保留记录
+    level: hard
+    check: manual
+    how: 评审兼容声明时核对每个组合都有实测记录
+    applies: [kind:onprem]
+    why: 指令集、动态库、原生扩展和驱动都可能不兼容，「支持 Linux」不等于支持所有国产平台。
+    detail: 一般先覆盖 x86_64 和 aarch64，其他架构按客户需求逐个验证。
+    sources: [S24]
+  # ── Agent 参与运维 ──
+  - id: OPS-040
+    title: Agent 参与生产运维时默认只读；写操作只能调用事先登记的、幂等且可回退的具名动作，经人批准并留审计；恢复数据、删除、改权限和网络边界不交给 Agent 自动执行
+    level: hard
+    check: auto
+    how: 在 Agent 的运行时权限里只开放只读凭据和登记过的动作；审计日志抽查
+    applies: [kind:agent, kind:service]
+    why: 告警内容、日志、聊天消息都可能夹带指令或误导，Agent 直接执行会把小故障放大成事故。
+    detail: 告警描述、日志、工单内容一律当数据，不当指令（见 23 AGT-007、AGT-009）。
+    see: ["23", "25"]
+choices:
+  - category: 单机部署
+    pick: Docker Compose
+    when: 能接受单机故障期间不可用，服务数量少，没有专职平台团队
+    alternatives:
+      - { name: systemd + 本机安装包, when: 客户环境不允许装容器运行时 }
+    avoid:
+      - { name: 为单机客户强制部署 Kubernetes, why: 运维负担远超收益 }
+    license: Apache-2.0
+    sources: [S01]
+  - category: 集群编排
+    pick: Kubernetes（上游、托管版或客户已有发行版）
+    when: 满足 OPS-002 的条件
+    alternatives:
+      - { name: 云厂商托管容器服务, when: 不想自己维护控制面 }
+    avoid:
+      - { name: 自研调度或编排, why: 重复造轮子，维护成本高 }
+    license: Apache-2.0
+    notes: 上游只维护最近三个小版本，每个约 14 个月补丁支持，补丁一般每月发布。
+    sources: [S02]
+  - category: Kubernetes 应用打包
+    pick: Helm（当前主版本）
+    when: 应用有较多可配置参数、要给客户分发
+    alternatives:
+      - { name: Kustomize, when: 只是少量环境差异的叠加 }
+    avoid:
+      - { name: Helm、Kustomize 加自制渲染器层层嵌套, why: 难以排查最终生效的配置 }
+    license: Apache-2.0
+    notes: 旧主版本 Helm 3 官方已延长一次支持期，安全修复截至 2027-02-10，之后不再发任何版本；新项目直接用当前主版本，存量 Chart 在此之前完成迁移评估。
+    sources: [S25]
+  - category: 持续部署（GitOps）
+    pick: 默认不引入；有多集群、需要持续治理漂移或有独立交付团队时用 Argo CD
+    alternatives:
+      - { name: Flux, when: 偏好命令行和 Git 原生、按组件组合 }
+    avoid:
+      - { name: 单机部署也装 GitOps 控制器, why: 多一套要维护的控制面 }
+    license: Apache-2.0
+    notes: 私有化场景下 Git 仓库和 OCI 制品要同步到内网。
+  - category: 基础设施即代码
+    pick: OpenTofu
+    alternatives:
+      - { name: Terraform, when: 已有 Terraform 生态和团队经验；注意许可证为 BUSL-1.1，不是 OSI 开源许可 }
+      - { name: Pulumi, when: 需要用通用编程语言描述基础设施；自管状态后端的运维要自己承担 }
+    avoid:
+      - { name: 控制台手工操作作为唯一真实状态, why: 无法重建、无法审查 }
+    license: OpenTofu 为 MPL-2.0；Terraform 为 BUSL-1.1；Pulumi 核心为 Apache-2.0
+    notes: 断网环境里 Provider、Module 和状态后端都要在内网可用。
+    sources: [S26, S27]
+  - category: 运行时基础镜像
+    pick: distroless（静态二进制用 static，其余用对应语言镜像；固定 Debian 后缀并按 digest 引用）
+    alternatives:
+      - { name: Docker Hardened Images, when: 需要更全的加固镜像目录、随镜像提供的签名 SBOM、VEX 和 SLSA 构建等级 3 来源证明；社区层免费、Apache-2.0 }
+      - { name: Chainguard 付费镜像, when: 需要固定到具体版本、厂商的漏洞修复时限承诺 }
+      - { name: 官方 slim 镜像, when: 运行时必须用包管理器装系统依赖 }
+      - { name: openEuler 等国产系统基础镜像, when: 客户要求信创基础镜像 }
+    avoid:
+      - { name: 完整发行版镜像（如 ubuntu、debian 默认标签）直接作运行镜像, why: 包多、漏洞多、带 shell 和包管理器 }
+      - { name: 生产依赖 Chainguard 免费层, why: 免费层只给少量镜像、只有最新标签，不能固定版本，也没有修复时限承诺 }
+    license: Docker Hardened Images 社区层为 Apache-2.0；distroless 以其仓库 LICENSE 为准（未核实）
+    notes: 漏洞扫描和 SBOM 见 25。
+    sources: [S04, S05, S28]
+  - category: 遥测接口与转发
+    pick: OpenTelemetry API/SDK + OTLP + OpenTelemetry Collector
+    alternatives:
+      - { name: Prometheus 客户端库直接暴露指标, when: 只有指标、单个服务、不需要链路 }
+    avoid:
+      - { name: 业务代码直接用某家后端的专有 SDK, why: 换后端要改业务代码 }
+    license: Apache-2.0
+    notes: 先查目标语言各信号的稳定级别（见 OPS-021）。
+    sources: [S13, S14]
+  - category: 指标存储与告警规则
+    pick: Prometheus + Alertmanager
+    alternatives:
+      - { name: VictoriaMetrics, when: 需要更长保留期或更大基数，且做过容量评测；企业版功能另计 }
+      - { name: Grafana Alerting, when: 已统一用 Grafana 管理告警 }
+    avoid:
+      - { name: 没评估容量就上分布式指标存储, why: 运维成本高，小规模用不上 }
+    license: Apache-2.0
+    sources: [S20]
+  - category: 仪表盘
+    pick: Grafana
+    alternatives:
+      - { name: 一体化平台自带界面（SigNoz、OpenObserve）, when: 已选用一体化方案 }
+    avoid:
+      - { name: 为几张图自建看板或告警系统, why: 重复造轮子 }
+    license: AGPL-3.0-only（部分目录有例外，以仓库 LICENSING.md 为准）
+    notes: 内部自用一般没问题；修改后通过网络提供服务或随产品分发给客户时有额外义务，口径见 27。
+    sources: [S29, S30]
+  - category: 日志存储
+    pick: 小规模用本机轮转 + 集中收集；规模上来后用 Loki
+    alternatives:
+      - { name: OpenObserve, when: 想要日志、指标、链路一体化且接受 AGPL }
+    avoid:
+      - { name: 日志永久留在容器或本机磁盘, why: 容器重建即丢失，磁盘会被写满 }
+      - { name: 高基数字段做索引标签, why: 日志流数量失控（见 OPS-023） }
+    license: Loki 为 AGPL-3.0-only，客户端等部分目录为 Apache-2.0
+    notes: 日志采集器（OpenTelemetry Collector、Fluent Bit、Vector 等）未做对比，见待确认。
+    sources: [S16, S31]
+  - category: 链路追踪后端
+    pick: 已用 Grafana 时选 Tempo
+    when: 确有跨服务排障需求；没有跨服务调用的小部署可以不装
+    alternatives:
+      - { name: SigNoz 或 OpenObserve, when: 选了一体化方案 }
+    avoid:
+      - { name: 没有跨服务需求也必装追踪集群, why: 白增资源和运维负担 }
+    license: AGPL-3.0-only
+    sources: [S30]
+  - category: 一体化可观测平台
+    pick: SigNoz
+    when: 想用一套系统看日志、指标和链路，且已按自己的数据量做过评测
+    alternatives:
+      - { name: OpenObserve, when: 更看重存储成本；社区版为 AGPL }
+    avoid:
+      - { name: 只看演示就承诺大规模生产, why: 容量和离线依赖要实测 }
+    license: SigNoz 核心为 MIT，ee/ 目录另有商业条款；OpenObserve 社区版为 AGPL-3.0
+    sources: [S32]
+  - category: 错误追踪
+    pick: GlitchTip
+    when: 需要轻量的异常收集，重视宽松许可证
+    alternatives:
+      - { name: Sentry 自托管版, when: 需要更完整的功能，能承担较多的依赖服务 }
+    avoid:
+      - { name: 只为收集异常就部署整套 Sentry, why: 资源和运维成本明显更高 }
+    license: GlitchTip 为 MIT；Sentry 服务端为 FSL-1.1-Apache-2.0，SDK 许可不同
+    sources: [S33, S34]
+  - category: 功能开关
+    pick: OpenFeature SDK + flagd（从本地文件或内网 HTTP/gRPC 读取开关）
+    alternatives:
+      - { name: 已有开关平台, when: 组织已采购或自建；通过 OpenFeature 的提供者接入 }
+    avoid:
+      - { name: 私有化环境依赖远程 SaaS 开关服务, why: 断网时不可用，成为启动的单点依赖 }
+      - { name: 在代码里散落自制的 if 开关, why: 无法统一登记、审计和清理 }
+    license: Apache-2.0
+    notes: OpenFeature 是 CNCF 孵化项目（2023 年 12 月进入孵化）。
+    sources: [S11, S35, S36]
+  - category: 灰度发布
+    pick: 入口按流量或实例分批 + 功能开关
+    alternatives:
+      - { name: Argo Rollouts, when: Kubernetes 上需要按指标自动推进或回退 }
+      - { name: 服务网格的流量拆分, when: 已经在用服务网格 }
+    avoid:
+      - { name: 为灰度强制引入服务网格, why: 复杂度远超需求 }
+  - category: 事故与值班
+    pick: 事故记录模板 + 可检索的事故库 + 轮值表，告警经 Alertmanager 路由到组织现有的通知渠道
+    alternatives:
+      - { name: 企业已有的事件管理平台, when: 组织已在用 }
+    avoid:
+      - { name: 只在群里吆喝、没有指挥人和记录, why: 无人统筹，事后无法复盘 }
+      - { name: 自研排班和告警静默引擎, why: 重复造轮子 }
+    notes: 具体的值班和事故工具未做对比，见待确认。
+    sources: [S20, S21]
+antipatterns:
+  - { bad: 认为「生产就必须上 Kubernetes」, instead: 按可用性目标、故障域和人手选部署形态（OPS-002） }
+  - { bad: 认为「Compose 不能用于任何生产」, instead: 只承诺单机能做到的可用性，写清边界 }
+  - { bad: "`image: latest`，安装时再从公网拉", instead: 按摘要引用，离线包自带全部镜像并校验 }
+  - { bad: 只在有网的云环境测试私有化安装包, instead: 在出口全拒绝的环境验收，统计对外连接 }
+  - { bad: liveness 探针检查数据库连通性, instead: liveness 只看进程本身，下游问题让 readiness 失败 }
+  - { bad: 把用户编号、追踪编号做成指标或日志索引标签, instead: 标签保持低基数，这类字段放日志内容 }
+  - { bad: CPU 超过 80% 就呼人, instead: 按用户 SLI 的燃烧率呼人，资源告警发工单 }
+  - { bad: 用 `docker compose down && up` 旧版本当作数据回滚, instead: 写清回退限制，数据变更按扩展、迁移、收缩分步 }
+  - { bad: 新版本一上线就删旧字段, instead: 收缩放到之后的版本，确认没有旧实例和旧客户端在用 }
+  - { bad: 备份文件和数据放在同一块盘上，从没恢复过, instead: 备份放到另一个故障域，按 17 的频率做恢复演练 }
+  - { bad: 小规模部署同时铺好几套全栈可观测平台, instead: 统一走 OpenTelemetry，后端按规模选一套 }
+  - { bad: Agent 直接执行告警里建议的命令, instead: 只读排查，写操作走登记过的动作和人工审批 }
+  - { bad: 「支持国产化」只是验证了 Docker 能启动, instead: 在每个系统、内核、CPU 组合上跑核心业务流程 }
+sources:
+  - { id: S01, title: "Docker Compose: Control startup and shutdown order", url: "https://docs.docker.com/compose/how-tos/startup-order", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S02, title: "Kubernetes: Patch Releases", url: "https://kubernetes.io/releases/patch-releases/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Kubernetes: Images", url: "https://kubernetes.io/docs/concepts/containers/images/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: distroless, url: "https://github.com/GoogleContainerTools/distroless", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: Docker Hardened Images, url: "https://docs.docker.com/dhi/", publisher: Docker, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "Kubernetes: Pod Security Standards", url: "https://kubernetes.io/docs/concepts/security/pod-security-standards/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Kubernetes: Liveness, Readiness, and Startup Probes", url: "https://kubernetes.io/docs/concepts/workloads/pods/probes/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Kubernetes: Pod Lifecycle — Termination of Pods", url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "Kubernetes: Horizontal Pod Autoscaling", url: "https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "GitLab: Multi-version compatibility", url: "https://docs.gitlab.com/development/multi_version_compatibility/", publisher: GitLab, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S11, title: "OpenFeature Specification: Flag Evaluation API", url: "https://openfeature.dev/specification/sections/flag-evaluation", publisher: OpenFeature, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S12, title: "The Twelve-Factor App: Logs", url: "https://12factor.net/logs", publisher: Twelve-Factor, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S13, title: "OpenTelemetry: Status", url: "https://opentelemetry.io/status/", publisher: OpenTelemetry, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "OpenTelemetry Collector: Agent-to-gateway deployment", url: "https://opentelemetry.io/docs/collector/deploy/other/agent-to-gateway/", publisher: OpenTelemetry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: OpenTelemetry Profiles Enters Public Alpha, url: "https://opentelemetry.io/blog/2026/profiles-alpha", publisher: OpenTelemetry, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Loki: Cardinality", url: "https://grafana.com/docs/loki/latest/get-started/labels/cardinality/", publisher: Grafana Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Prometheus: Metric and label naming", url: "https://prometheus.io/docs/practices/naming/", publisher: Prometheus, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: "GitLab: Getting started with an offline GitLab installation", url: "https://docs.gitlab.com/topics/offline/quick_start_guide/", publisher: GitLab, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S19, title: "Google SRE Workbook: Alerting on SLOs", url: "https://sre.google/workbook/alerting-on-slos/", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S20, title: Prometheus Alertmanager, url: "https://prometheus.io/docs/alerting/latest/alertmanager/", publisher: Prometheus, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "Google SRE Book: Managing Incidents", url: "https://sre.google/sre-book/managing-incidents/", publisher: Google, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S22, title: "Google SRE Book: Postmortem Culture", url: "https://sre.google/sre-book/postmortem-culture/", publisher: Google, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S23, title: "AWS Well-Architected REL09-BP04: Perform periodic recovery of the data", url: "https://docs.aws.amazon.com/wellarchitected/latest/framework/rel_backing_up_data_periodic_recovery_testing_data.html", publisher: AWS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: openEuler 下载, url: "https://www.openeuler.org/zh/download/", publisher: openEuler, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Helm 3 End of Life, url: "https://helm.sh/blog/helm-v3-end-of-life", publisher: Helm, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: OpenTofu, url: "https://github.com/opentofu/opentofu", publisher: OpenTofu, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: Terraform LICENSE, url: "https://github.com/hashicorp/terraform/blob/main/LICENSE", publisher: HashiCorp, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: Chainguard Pricing, url: "https://www.chainguard.dev/pricing", publisher: Chainguard, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: Grafana LICENSING, url: "https://github.com/grafana/grafana/blob/main/LICENSING.md", publisher: Grafana Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "Grafana, Loki, and Tempo will be relicensed to AGPLv3", url: "https://grafana.com/blog/2021/04/20/grafana-loki-tempo-relicensing-to-agplv3/", publisher: Grafana Labs, date: "2021-04-20", kind: official, checked: 2026-11-14 }
+  - { id: S31, title: Loki LICENSING, url: "https://github.com/grafana/loki/blob/main/LICENSING.md", publisher: Grafana Labs, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: SigNoz LICENSE, url: "https://github.com/SigNoz/signoz/blob/main/LICENSE", publisher: SigNoz, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: GlitchTip 安装文档, url: "https://glitchtip.com/documentation/install/", publisher: GlitchTip, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: Sentry Licensing, url: "https://open.sentry.io/licensing/", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: OpenFeature becomes a CNCF incubating project, url: "https://www.cncf.io/blog/2023/12/19/openfeature-becomes-a-cncf-incubating-project/", publisher: CNCF, date: "2023-12-19", kind: official, checked: 2026-11-14 }
+  - { id: S36, title: flagd, url: "https://github.com/open-feature/flagd", publisher: OpenFeature, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - 各工具的当前版本未写入规则，需另建版本账本从官方源拉取；原报告的版本号（截至 2026-11-13）均未逐个核实。
+  - Prometheus 3 相对 2.x 的主要变化（如默认行为、UTF-8 指标名、原生直方图）未核实，升级指引待补。
+  - Docker Compose 当前形态（插件方式、Compose 规范）与单机生产的官方表述未核实；原报告「Mattermost 只把 Compose 用于评估测试」的说法无法核实且引用错号，已删去。
+  - Chainguard 免费层范围说法不一（官方定价页写 5 个镜像，第三方写约 50 个），以官方页面为准，采用前再确认。
+  - distroless、Jaeger、Harbor、Fluent Bit、Vector 的许可证未从仓库 LICENSE 核实；Mimir 的许可证只见于第三方说法（AGPL-3.0），未直接核实。
+  - OpenTelemetry Profiles 曾有「2026 年第三季度 GA」的说法，核实时状态页仍无任何语言稳定，按 alpha 处理；下次复核再看。
+  - GlitchTip 新大版本「要求 PostgreSQL 15 及以上、环境变量有破坏性变化」只有一篇发布说明，未核实。
+  - 本地运维遥测与产品分析埋点是否共用 OTel 管道、边界怎么划，需与 22 对齐。
+  - 待补调研：压测工具（如 k6、Locust）的选型。
+  - 待补调研：Kubernetes 备份编排（如 Velero）与系统级备份工具。
+  - 待补调研：值班与事故管理工具（自托管和国内可用的方案）。
+  - 待补调研：日志采集器（OpenTelemetry Collector、Fluent Bit、Vector 等）对比。
+  - 待补调研：内网镜像仓库（如 Harbor）和离线镜像同步工具；国内公共镜像源现状。
+  - 待补调研：私有化预检和诊断包的现成工具（如 Replicated troubleshoot、sosreport），避免自研。
+  - 待补调研：容器运行时（containerd、Docker、Podman）在私有化和信创环境下的选择。
+  - SLO 定义、恢复计划、开关清单没有通用标准格式，是否给出最小字段约定待定。
