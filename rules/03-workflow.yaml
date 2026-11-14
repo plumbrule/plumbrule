@@ -1,0 +1,632 @@
+id: "03"
+slug: workflow
+title: 工程流程与协作
+summary: 代码从任务到上线怎么流转：分支和提交怎么写、PR 怎么开、评审怎么做、CI 门禁怎么排、版本怎么发、依赖怎么升级，并且能在 GitHub、GitLab、Gitea 之间迁移。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 分支策略、分支命名、提交信息
+    - PR（GitLab 叫 MR）的大小、描述、评审与合并
+    - 受保护主干、CODEOWNERS（按路径指定负责人的文件）、必过检查
+    - CI 分层、缓存、合并队列
+    - 版本号、发布记录、回滚
+    - 依赖更新机器人、本地 Git 钩子、仓库模板
+    - issue 与任务的通用字段
+    - 跨代码托管平台的可移植性
+  excludes:
+    - { what: 面向用户的变更日志写法, see: "05" }
+    - { what: README、CONTRIBUTING、ADR 的写法, see: "05" }
+    - { what: 测试分层、覆盖率、验收证据的口径, see: "04" }
+    - { what: 需求、验收标准、优先级与任务状态的定义, see: "06" }
+    - { what: AGENTS.md、Agent 权限、多 Agent 并行的工作树与任务登记, see: "23" }
+    - { what: 签名与来源证明、CI 令牌最小权限、密钥扫描, see: "25" }
+    - { what: 部署、制品库、运行态回滚, see: "26" }
+    - { what: 开源许可口径（如 AGPL 工具的使用义务）, see: "27" }
+    - { what: 各语言的 lint、构建、发布工具细节, see: "10-15" }
+overview: |
+  1. **短分支 + 主干开发。** `main` 随时可合并、可发布；GitFlow 和长期 `develop` 分支不作默认，只有要并行维护多个发布线时才加受限的 release 分支。
+  2. **分支上随便提交，合并时收拾干净。** 默认 squash 合并，只检查最终提交信息（通常就是 PR 标题）符合 Conventional Commits，不要求每个临时提交都合规。
+  3. **提交信息是变更日志的原料，不是成品。** 工具从提交信息生成草稿；给用户看的部分由人改写（写法见 05）。
+  4. **主干只能经由 PR 进入。** 禁止直接推送、强推、删除；必过检查在服务端跑，本地钩子只是提前反馈。
+  5. **检查要对得上最终提交。** 必过检查的结果必须是待合并的那个提交上的；新提交会让旧结果和旧批准失效。
+  6. **至少一个人批准。** 非作者评审，关键路径加负责人。AI 评审只作补充：工具的批准即使能计入规则，也不能是唯一的批准。
+  7. **平台能力不一样，别假装一样。** GitLab 免费版的审批挡不住合并，合并列车要付费版；Gitea 的 CODEOWNERS 用 Go 正则。做不到的门禁要写替代做法，不能当作已强制。
+  8. **CI 逻辑放在仓库脚本里。** 平台 YAML 只做触发和适配，本地和 CI 跑同一条命令，换平台时只改薄的那一层。
+  9. **已发布的不改。** tag 不重写、制品不覆盖，发错了发新版本；代码回滚用 `git revert`。
+  10. **用现成工具。** 依赖更新用 Renovate 或 Dependabot，发布用 release-please 或 Changesets，钩子用 Lefthook，不自己写脚本。
+rules:
+  # ── 分支与提交 ──
+  - id: FLW-001
+    title: 主干必须设为受保护分支：禁止直接推送、强推和删除，改动只能经 PR 合入
+    level: hard
+    check: auto
+    how: 检查平台的分支保护或规则集设置；GitHub 上同时勾选「不允许绕过」，让管理员也受约束
+    applies: [all]
+    why: 只要还有一条绕过 PR 的路，评审和必过检查就都可以被跳过；强推还会让别人手里的历史失效。
+    detail: |
+      - GitHub 默认允许管理员绕过分支保护，要显式打开「Do not allow bypassing the above settings」。
+      - 确需紧急绕过时，由有绕过权限的人操作，并在事后补记录。
+      - 机器人账号（包括 Agent）同样受这条约束，见 23。
+    sources: [S06, S09]
+    see: ["23"]
+  - id: FLW-002
+    title: 默认用短分支的主干开发；长期分支只留给要并行维护的发布线
+    level: soft
+    check: manual
+    how: 评审分支模型时看是否有长期存在、定期同步的功能或 develop 分支
+    applies: [all]
+    why: 分支活得越久，合并冲突和集成风险越大；主干开发要求小步合入、持续集成。
+    detail: |
+      - 主干开发不是不建分支，而是分支短命、合入频繁。
+      - 有多个版本要同时打补丁（如 SDK 的 2.x 和 3.x）时，开 `release/2.x` 这类维护分支，只接受修复。
+    sources: [S02]
+  - id: FLW-003
+    title: 分支名用「类型/任务编号-简述」，如 feat/PROJ-142-export-report
+    level: soft
+    check: auto
+    how: 推送钩子或 CI 用正则检查分支名，不符合时提示
+    applies: [all]
+    why: 一眼能看出分支做什么、对应哪个任务，便于清理和追溯。
+    detail: |
+      - 类型和 Conventional Commits 一致：feat、fix、chore、docs、refactor 等；另有 `release/` 和 `hotfix/`。
+      - 前缀不要细分太多；任务编号以项目统一的编号为准。
+  - id: FLW-004
+    title: 功能分支上可以多次小提交；默认用 squash 合并，要保留提交历史的仓库改用 rebase 或 merge 并写进贡献说明
+    level: soft
+    check: auto
+    how: 检查平台允许的合并方式设置
+    applies: [all]
+    why: 开发中允许临时提交，评审以整个 PR 的 diff 为单位；squash 后主干历史一条 PR 一个提交，便于回滚和生成变更日志。
+    detail: |
+      - 需要逐个提交可追溯的库（如每个提交都要能独立构建、二分查找），可以选 rebase 合并，但这时每个提交都要符合 FLW-005。
+  - id: FLW-005
+    title: 用 squash 合并的仓库，最终提交信息（PR 标题）必须符合 Conventional Commits，破坏性变更必须明确标注
+    level: hard
+    check: auto
+    how: CI 对 PR 标题跑 commitlint；破坏性变更检查标题带 `!` 或正文有 `BREAKING CHANGE:`
+    applies: [all]
+    why: 版本号推断和变更日志草稿都从这条信息来；它写错，后面的自动化全错。
+    detail: |
+      - 例：`feat(api): add export endpoint`；破坏性变更写 `feat(api)!: drop v1 export` 或在正文写 `BREAKING CHANGE: ...`。
+      - 规范只给 `feat`（次版本）、`fix`（修订号）和破坏性变更（主版本）规定了版本含义；`refactor`、`perf` 等不要假定会触发发版。
+      - 只检查最终信息，不强求每个临时提交合规，避免双重负担。
+    sources: [S03]
+  - id: FLW-006
+    title: 提交信息只用来生成变更日志草稿；面向用户的部分由人改写后再发布
+    level: soft
+    check: manual
+    how: 发布评审时检查变更日志里面向用户的条目是否经过改写，而不是原样的提交标题
+    applies: [all]
+    why: 提交信息是写给开发者的，直接贴给用户会充满内部术语和无关条目。
+    detail: |
+      - 工具（release-please、Changesets 等）按提交类型分组生成草稿；人工删掉内部改动、合并同类项、用用户能懂的话重写。
+      - 变更日志的结构和写法见 05。
+    see: ["05"]
+  - id: FLW-007
+    title: 暂存时只 git add 明确的路径，不用 git add -A 或 git add .；提交前核对暂存清单和未跟踪文件
+    level: soft
+    check: semi
+    how: 提交前看 `git status --short` 和 `git diff --cached --name-only`；Agent 的权限设置里禁止 `git add -A` / `git add .`
+    applies: [all, kind:agent]
+    why: 一把全加最容易把个人文件、生成的密钥、别人的改动一起提交上去。
+    detail: |
+      - 仓库根目录常有不该提交的本地文件（调试脚本、截图、环境变量备份），`.gitignore` 兜不全。
+      - 有多个 Agent 同时工作时尤其重要，见 23。
+    see: ["23"]
+  - id: FLW-008
+    title: 必过检查必须在服务端 CI 上运行并作为合并条件；本地钩子只做提前反馈，不能替代 CI
+    level: hard
+    check: auto
+    how: 分支保护里配置必过检查；核对每项本地钩子检查在 CI 里都有对应项
+    applies: [all]
+    why: 本地钩子可以被 `--no-verify` 跳过，环境也各不相同，只有服务端检查拦得住。
+    detail: |
+      - 不得用 `--no-verify`、忽略 CI 失败、临时取消必过检查等方式绕过；确需例外的，走负责人审批并留记录。
+    sources: [S06]
+  - id: FLW-009
+    title: 是否强制签名提交按审计要求决定；开启前先实测机器人提交和 squash 合并
+    level: soft
+    check: manual
+    how: 在测试仓库开启签名要求，跑一遍机器人提交、squash 合并、本地合并，确认都能通过
+    applies: [all]
+    why: 签名只证明提交来自谁的密钥，不证明代码可信；而且贸然开启会卡住现有流程。
+    detail: |
+      - GitHub：开启「Require signed commits」后，PR 头分支上只要有未签名提交，就可能挡住 squash 合并，即使最终的 squash 提交会由 GitHub 签名；解决办法是重写并签名这些提交。本地 squash 再推送的，结果提交必须自己签名。
+      - 签名与来源证明的整体要求见 25。
+    sources: [S06]
+    see: ["25"]
+  # ── PR ──
+  - id: FLW-010
+    title: 一个可独立评审、可独立验收的改动一个 PR；大功能拆成多个 PR
+    level: soft
+    check: semi
+    how: CI 统计改动行数和文件数（排除生成代码、锁文件、纯格式化），超过参考值时提示作者说明为什么不拆
+    applies: [all]
+    why: 小 PR 评审得更仔细、合得更快、出问题更好回滚。
+    ref_value: Google 的经验是约 100 行通常合适、1000 行通常偏大；这不是统一阈值，各团队按自己的评审数据校准，只提示不阻断。
+    detail: |
+      - 「一个功能一个 PR」不是指一个月的功能只准开一个巨型 PR。
+      - 有依赖关系的切片可以用堆叠 PR（下一个 PR 基于上一个的分支）。
+    sources: [S01]
+  - id: FLW-011
+    title: PR 关联任务编号和验收标准；错别字、例行依赖更新这类小改动可以免关联
+    level: soft
+    check: semi
+    how: CI 检查 PR 描述里有任务链接，或带有约定的豁免标签
+    applies: [all]
+    why: 评审者要知道改动为了什么、做到什么程度算完；但给错字修复也补 issue 是无谓负担。
+    detail: |
+      - 豁免范围要在贡献说明里写清，豁免的 PR 仍要走评审和必过检查。
+    see: ["06"]
+  - id: FLW-012
+    title: PR 描述写清目标、改动、不在范围内的内容、风险、验证结果、没验证的项、回滚或修复办法
+    level: soft
+    check: auto
+    how: 用平台的 PR 模板固定这些栏目，CI 检查栏目非空
+    applies: [all]
+    why: 评审者靠这些信息判断能不能合、出了问题怎么退；不写就只能靠猜。
+    detail: |
+      - 栏目建议：任务、目标与验收标准、改动、明确不做的、验证（只写实际运行过的）、兼容性与风险、回滚或向前修复、希望评审重点看的地方。
+      - GitHub 放 `.github/pull_request_template.md`，GitLab 放 `.gitlab/merge_request_templates/`，Gitea 放 `.gitea/`；内容保持一致。
+      - Agent 提交的 PR 要求更严，见 AGT-015。
+    sources: [S24]
+    see: ["AGT-015", "05"]
+  - id: FLW-013
+    title: 验证结果必须如实记录：每项检查标「通过、失败、未运行、已跳过」并附命令和证据位置；没跑的写原因，写了原因也不能豁免必过检查
+    level: hard
+    check: semi
+    how: 评审时把 PR 里写的结果和 CI 在最终提交上的记录对照；抽查命令和证据链接
+    applies: [all]
+    why: 虚报的「通过」会让评审失去依据，问题直接进主干。
+    detail: |
+      - 状态名用词表的证据状态：「未运行」是该跑但没能跑（写原因），「已跳过」是不适用（写为什么不适用）。
+      - 证据写准确的命令、退出码、CI 运行链接；不拿别人的或旧提交上的结果冒充。
+    see: ["04", "AGT-013"]
+  - id: FLW-014
+    title: 还没准备好评审的 PR 用草稿状态（Draft）打开
+    level: soft
+    check: manual
+    how: 评审者只处理已标记为可评审的 PR
+    applies: [all]
+    why: 早开草稿能让 CI 先跑、让别人知道有人在改；又不会过早占用评审者。
+  # ── 评审 ──
+  - id: FLW-015
+    title: 合并到主干前必须有至少一名非作者批准；平台不能强制审批时，把合并权限只给评审人并人工核对
+    level: hard
+    check: semi
+    how: 支持的平台在分支保护里设必需批准数并禁止作者自批；GitLab 免费版等不支持强制审批的，在受保护分支里把「允许合并」限定给维护者角色，定期抽查合并记录
+    applies: [all]
+    why: 作者自己看不出的问题，换个人一眼就能发现；自审自合等于没有评审。
+    detail: |
+      - GitLab 免费版的审批是可选的，挡不住无批准合并；强制的必需审批要 Premium 或 Ultimate。不要在免费版上写「必须审批」却没有任何强制手段。
+      - 同一个机器人令牌不能既当作者又当批准人；不同的机器人账号也不一定真独立，要看背后是谁在控制。
+    sources: [S06, S10]
+    see: ["AGT-014", "AGT-029"]
+  - id: FLW-016
+    title: 人工评审看需求是否达成、数据和状态语义、接口兼容、异常流程和回滚可行性；格式、lint、类型检查交给工具
+    level: soft
+    check: manual
+    how: 评审清单列出这些看点；CI 里有对应的格式和 lint 检查
+    applies: [all]
+    why: 人的注意力有限，花在工具能查的东西上，真正的问题就会漏掉。
+    sources: [S04]
+    see: ["02"]
+  - id: FLW-017
+    title: AI 评审的批准不能作为合并的唯一批准；必需批准里至少有一名承担责任的人
+    level: hard
+    check: semi
+    how: 检查 AI 评审工具的「允许批准」设置；开启时，分支保护的必需批准数要多出一名人工，或对关键路径要求 CODEOWNERS 里的人批准
+    applies: [all]
+    why: AI 评审会误判正确的实现、和写代码的 AI 有共同盲点；能计入规则不等于应该单独放行。
+    detail: |
+      - GitHub Copilot 代码评审默认只留「评论」，不计入必需批准；管理员可以在企业、组织或仓库级开启批准，开启后它的批准和同事的批准一样能满足必需审批规则。新提交推上来后它的批准会失效。
+      - AI 评审适合找风险线索、给可验证的修改建议。研究显示开发者拒绝的 AI 评审意见多于接受的，不能拿「AI 评审通过」当质量保证。
+      - 用云端 AI 评审意味着代码出域，内网项目要先确认是否允许，见 27。
+    sources: [S11, S30, S31]
+    see: ["AGT-014", "27"]
+  - id: FLW-018
+    title: 阻断性评审意见必须解决后才能合并；有新提交时旧批准失效，受影响的检查重跑
+    level: hard
+    check: auto
+    how: 分支保护里开启「合并前需解决所有讨论」和「新提交后撤销旧批准」
+    applies: [all]
+    why: 不解决的阻断意见等于没提；批准后又偷偷改的代码没人看过。
+    detail: |
+      - 非阻断的建议可以开 issue 后续跟进，在评论里注明链接。
+    sources: [S04, S06]
+  - id: FLW-019
+    title: 评审及时给出首次有效回应，并把时效作为团队目标统计；超时不能自动批准
+    level: soft
+    check: semi
+    how: 统计从「可评审」到首次有效评审的时间
+    applies: [all]
+    why: 评审拖得越久，作者切换上下文的成本越高，PR 越容易变大。
+    ref_value: 参考 Google 的做法，首次回应最长不超过一个工作日。
+    sources: [S05]
+  - id: FLW-020
+    title: 用 CODEOWNERS 指定路径负责人，并在分支保护里要求负责人批准；CODEOWNERS、CI 配置、发布配置本身也要有负责人
+    level: hard
+    check: auto
+    how: 检查分支保护开启了「需要代码负责人批准」；检查 CODEOWNERS 覆盖自身、CI 目录和发布配置
+    applies: [all]
+    why: CODEOWNERS 文件本身只负责自动指派评审人，不开强制就不算门禁；门禁配置没人管，作者就能改门禁给自己放行。
+    detail: |
+      - 三个平台语法不同：GitHub 和 GitLab 用各自的通配模式，Gitea 用 Go 正则。不要把同一份文件直接拷到另一个平台；可以维护一份中立的负责人清单，用小脚本分别生成。
+      - Gitea 从 28 起支持「所有匹配的 CODEOWNERS 规则都获得负责人批准前禁止合并」。
+      - Agent 不得修改这些文件，见 AGT-011。
+    sources: [S07, S08, S09]
+    see: ["AGT-011"]
+  - id: FLW-021
+    title: 涉及权限、凭据、计费、客户数据、数据库迁移、发布和门禁配置的改动，必须由对应负责人额外批准
+    level: hard
+    check: auto
+    how: 把这些路径写进 CODEOWNERS 并要求负责人批准；无法按路径识别的，用风险标签触发额外审批
+    applies: [all]
+    why: 这类改动影响不可逆或跨系统，出错的代价远大于多等一个批准。
+    detail: |
+      - 可以按风险分级定合并权限（示意）：
+        - 低：文档错字、自动生成的低风险文件，CI 通过后可以试行自动合并，但要留记录、可撤销。
+        - 一般：普通功能和修复，一名独立评审人。
+        - 较高：公共接口、共享依赖、数据库结构、跨模块，负责人批准并在最新主干上验证兼容。
+        - 高：本条列出的范围，承担实际责任的人批准；发布和门禁修改单独授权。
+    see: ["25", "AGT-029"]
+  # ── CI ──
+  - id: FLW-022
+    title: 必过检查清单写在仓库里，检查名唯一且固定，并限定由哪个 CI 应用上报
+    level: hard
+    check: auto
+    how: 脚本比对仓库声明的检查清单和分支保护里的必过检查；GitHub 上为每项必过检查指定来源应用
+    applies: [all]
+    why: 检查名重复或来源不限，任何能写状态的集成都能伪造一个「通过」。
+    detail: |
+      - 检查名跨平台保持一致，如 `ci/lint`、`ci/build`、`ci/tests`、`ci/policy`，各平台再做映射。
+      - GitHub 上指定了来源应用后，其他人或集成上报的同名状态不会被接受。
+    sources: [S06]
+  - id: FLW-023
+    title: 必过检查的结果必须对应待合并的最新提交；用接口合并时带上 head 提交编号作为条件
+    level: hard
+    check: auto
+    how: 分支保护要求分支与主干同步或启用合并队列；合并接口传入期望的 head SHA，不一致就失败
+    applies: [all]
+    why: 检查跑完后又有新提交或主干变了，旧的「通过」就不再说明问题。
+    detail: |
+      - GitHub 合并 PR 的接口可以传 `sha`，head 不匹配时拒绝合并；其他平台用类似的条件参数，或在合并前重新读取状态。
+      - 低吞吐的仓库，「合并前要求与主干同步 + 串行合并」就够用，不必上合并队列。
+    sources: [S14, S06]
+    see: ["AGT-013"]
+  - id: FLW-024
+    title: CI 的检查逻辑写在仓库内的脚本里，平台 YAML 只负责触发、权限和运行环境；本地能跑同一条命令
+    level: soft
+    check: semi
+    how: 评审时看 CI 配置是否只调用 `scripts/ci/*` 这类脚本，没有大段内联逻辑
+    applies: [all]
+    why: 检查逻辑绑死在某个平台的 YAML 里，本地复现不了，换平台要重写；Gitea Actions 也只是大体兼容 GitHub Actions。
+    detail: |
+      - 推荐结构：`scripts/ci/check-format`、`check-build`、`check-tests`、`check-policy`；`.github/workflows/`、`.gitlab-ci.yml`、`.gitea/workflows/` 各自薄适配。
+      - 只抽象稳定的命令行脚本，不要自己发明一套跨平台工作流语言。
+    sources: [S18]
+  - id: FLW-025
+    title: CI 分层：PR 上跑决定能否合并的快速检查，合并后或定时跑耗时长的回归，发版时再跑发布门禁
+    level: soft
+    check: manual
+    how: 评审 CI 配置时核对每层的触发条件和是否为必过
+    applies: [all]
+    why: 把所有检查都压在 PR 上会拖慢每次合并；只在发版时检查又发现得太晚。
+    detail: |
+      - 分层示意：本地预检 → PR 必过检查 → 合并候选（启用合并队列时）→ 合并后或定时 → 打 tag 发版。
+      - 合并后才跑的检查，只有当它是发布门槛时才阻断发版。测试怎么分层见 04。
+    see: ["04"]
+  - id: FLW-026
+    title: 启用合并队列（或合并列车）时，必过检查必须在队列生成的合并候选上运行
+    level: hard
+    check: auto
+    how: GitHub 的工作流要监听 `merge_group` 事件；第三方 CI 要对 `gh-readonly-queue/` 开头的分支运行；GitLab 合并列车按官方配置开启合并结果流水线
+    applies: [all]
+    why: 两个 PR 各自通过、合在一起坏掉，正是合并队列要防的；检查不在合并候选上跑，队列就白开了。
+    detail: |
+      - GitHub 的工作流不监听 `merge_group` 时，PR 进队列后必过检查不会触发，合并会失败。
+      - GitLab 合并列车只在 Premium 和 Ultimate 提供；Gitea 不要假定有同等能力。
+      - 合并队列只在主干繁忙、经常出现「各自绿、合起来红」时才上；平时用 FLW-023 的做法。
+    sources: [S12, S13]
+  - id: FLW-027
+    title: CI 缓存只放能重新生成的依赖和中间结果，不放密钥，不当正式制品用；要传给后续步骤的产物用制品（artifact）机制
+    level: hard
+    check: semi
+    how: 评审 CI 配置的缓存路径，确认不含凭据文件和发布产物；缓存键包含锁文件哈希和运行环境版本
+    applies: [all]
+    why: 缓存可能被其他分支的流水线读写，内容不可信；放了密钥会泄露，拿来当制品无法追溯。
+    sources: [S15, S16]
+    see: ["25"]
+  - id: FLW-028
+    title: 同一分支上过期的 PR 流水线可以自动取消；发布、数据库迁移、共享集成环境的任务要串行，且取消不能留下半成品
+    level: soft
+    check: auto
+    how: "检查 CI 配置的并发设置：GitHub 用 `concurrency`，GitLab 用 `workflow: rules` 去重和资源组"
+    applies: [all]
+    why: 取消过期流水线能省资源；但发布和迁移被并发或中途取消，可能产出损坏的制品或数据。
+    sources: [S17]
+  # ── 版本、发布与回滚 ──
+  - id: FLW-029
+    title: 有对外接口、SDK 或库的项目用语义化版本（SemVer）；按时间交付、没有公共接口的产品可以用日历版本（CalVer）
+    level: soft
+    check: manual
+    how: 评审版本策略时看项目是否有被别人依赖的接口
+    applies: [all]
+    why: SemVer 的价值在于向依赖方表达兼容性；没有依赖方的内部应用硬套 SemVer，主版本号就失去意义。
+    detail: |
+      - 接口本身的版本策略（URL 版本、OpenAPI 版本）见 16。
+    sources: [S19, S20]
+    see: ["16"]
+  - id: FLW-030
+    title: 每次发布绑定固定的源提交、版本号和制品摘要；发布记录写明兼容性变化、批准人和回滚或修复办法
+    level: soft
+    check: auto
+    how: 发布流水线生成发布清单（版本、源提交、构建记录、制品名、sha256、渠道、说明、回滚办法），缺项时失败
+    applies: [all]
+    why: 出了问题要能回答「用户装的到底是哪份代码构建出来的」，并且知道怎么退。
+    detail: |
+      - 部署、制品库和运行态回滚见 26；签名与来源证明见 25。
+      - 数据库回滚不承诺一键完成，原则见 17。
+    see: ["25", "26"]
+  - id: FLW-031
+    title: 已发布的版本不得改内容：不重写或删除已发布的 tag，不覆盖同名制品；有问题发新版本
+    level: hard
+    check: auto
+    how: 平台上开启 tag 保护；制品库关闭同版本覆盖
+    applies: [all]
+    why: 同一个版本号对应不同内容，就没人能确定外面装的是哪一份。
+    detail: |
+      - SemVer 明确规定：版本发布后内容不得修改，任何修改都要发新版本。
+    sources: [S19]
+  - id: FLW-032
+    title: 回滚代码用 git revert 生成新提交，不强推主干；回滚合并提交时明确指定主线
+    level: soft
+    check: semi
+    how: 主干禁止强推（FLW-001）；评审回滚 PR 时看是否为 revert 提交
+    applies: [all]
+    why: revert 保留了「做过什么、又撤了什么」的记录；强推会让别人基于旧历史的工作出错。
+    detail: |
+      - 回滚合并提交要加 `-m 1` 之类的参数指定主线。
+    sources: [S21]
+  # ── 依赖、钩子与模板 ──
+  - id: FLW-033
+    title: 依赖更新用机器人自动开 PR 并跑必过检查，按更新级别分级处理；默认不自动合并主版本升级
+    level: soft
+    check: auto
+    how: 检查依赖机器人的配置：主版本更新不开自动合并；对配置文件跑官方的配置校验
+    applies: [all]
+    why: 手工升级容易漏、容易拖；主版本升级常有不兼容改动，要人看。
+    detail: |
+      - 补丁版本和开发依赖可以在 CI 通过后自动合并；主版本升级逐个评审。
+      - 断网环境里机器人需要内网的包仓库和元数据源，否则只能看到已知版本。
+    sources: [S22, S23]
+    see: ["25"]
+  - id: FLW-034
+    title: 一个仓库只用一个本地 Git 钩子管理工具，钩子里跑的命令和 CI 一致
+    level: soft
+    check: semi
+    how: 检查仓库里是否同时存在多个钩子配置（如 lefthook.yml 和 .pre-commit-config.yaml）
+    applies: [all]
+    why: 两套钩子工具会重复执行、互相覆盖安装；钩子和 CI 跑的命令不同，本地通过 CI 照样失败。
+    sources: [S28, S29]
+  - id: FLW-035
+    title: 仓库模板的更新走版本化的 PR；已有项目按版本主动升级，不悄悄改动它们的规则
+    level: soft
+    check: semi
+    how: 模板仓库打版本 tag；项目里记录所用模板版本，CI 提示有新版本
+    applies: [all]
+    why: 静默修改会让旧项目突然多出失败的检查，也说不清规则是什么时候变的。
+  # ── 任务、平台与离线 ──
+  - id: FLW-036
+    title: issue 用统一的核心字段：负责人、优先级、状态、验收标准、风险；优先级和工作量分开记
+    level: soft
+    check: semi
+    how: issue 模板固定这些字段；定期统计缺字段的 issue
+    applies: [all]
+    why: 字段统一才能跨平台迁移不丢信息；把「小」当成「急」会让优先级失真。
+    detail: |
+      - 优先级用 P0–P3，状态用「待澄清、就绪、进行中、待评审、待验收、已完成、已取消」，定义见 06 和公共词表。
+      - 关键语义写在 issue 正文或通用字段里，不只依赖某个平台的专属字段类型。
+      - 任务状态以任务系统为准；PR 合并是触发状态变化的事件，不是状态本身。
+    see: ["06"]
+  - id: FLW-037
+    title: 流程要求能由平台或 CI 强制的就配置强制；平台不支持的能力要写明替代做法，不能当作已强制
+    level: soft
+    check: manual
+    how: 列出贡献说明里的每条「必须」，逐项对应到分支保护、CI 检查或人工审查点；对不上的标出来
+    applies: [all]
+    why: 只写在文档里的规则没人兜底；把做不到的门禁写成「必须」，会让人误以为已经有保护。
+    detail: |
+      - 各平台差异举例：GitLab 免费版审批不强制、合并列车要付费版；Gitea 的 CODEOWNERS 用 Go 正则；Gitea Actions 与 GitHub Actions 不完全一致。
+      - 自动化脚本遇到平台不支持的功能，要明确报「不支持」并阻断或降级，不能静默当作通过。
+    sources: [S10, S08, S18]
+    see: ["AGT-010"]
+  - id: FLW-038
+    title: 要在内网或断网环境交付的项目，交付前必须在断网条件下跑通构建、CI 和发布
+    level: hard
+    check: auto
+    how: 定期在禁止外网的 runner 上跑完整流水线，依赖只从内部镜像拉取
+    applies: [kind:onprem]
+    why: 外网能跑不代表断网能跑；Actions、包仓库、钩子依赖、证书任何一项没镜像都会在现场失败。
+    detail: |
+      - 要准备的：内部 Git 服务、runner、包仓库镜像、CI 动作镜像、内部 CA、钩子和发布工具的安装包。
+      - 引入云端 AI 评审或代码助手前，确认代码和上下文是否允许出域，见 27。
+    see: ["26", "27"]
+  - id: FLW-039
+    title: 按变更边界选单仓或多仓：经常一起改、一起发布的放一个仓库；权限、生命周期、客户隔离不同的分开
+    level: soft
+    check: manual
+    how: 架构评审时看跨仓的原子改动频率和权限边界
+    applies: [all]
+    why: 拆错了要么频繁跨仓协调，要么权限和发布互相牵连；不能只因为 Agent 多就拆仓。
+    detail: |
+      - 多个包共享版本和发布节奏的，用 monorepo 加工作区（如 pnpm workspace）和 Changesets。
+      - 多仓共享的协议要显式发布成版本化的包，不跨仓引用未发布的源码。
+    sources: [S32]
+    see: ["01"]
+  - id: FLW-040
+    title: 并行任务要改同一个高争用文件（迁移、锁文件、接口契约、CI 配置）时，先约定负责人和合并顺序，或先合入契约 PR
+    level: soft
+    check: manual
+    how: 开工前在任务里写明会改的高争用文件；评审时看是否有两个进行中的 PR 改了同一个
+    applies: [all]
+    why: 这些文件冲突了很难自动合并，合错了会在运行时才出问题。
+    detail: |
+      - 多 Agent 并行时的工作树隔离和任务登记见 23；迁移文件的约定见 17。
+    see: ["23", "17"]
+choices:
+  - category: 分支策略
+    pick: 主干开发 + 短分支
+    alternatives:
+      - { name: 主干 + 受限的 release 维护分支, when: 需要同时给多个已发布版本打补丁 }
+    avoid:
+      - { name: 所有项目强制 GitFlow, why: 长期分支的同步和集成成本高，不适合持续交付 }
+    sources: [S02]
+  - category: 提交信息规范与检查
+    pick: Conventional Commits，用 commitlint 只检查 PR 标题或 squash 后的提交
+    alternatives:
+      - { name: 团队自定的格式, when: 不从提交信息生成版本和变更日志 }
+    avoid:
+      - { name: 完全自由文本却又想自动推断版本, why: 自动化无从判断兼容性 }
+    license: commitlint 为 MIT
+    sources: [S03, S25]
+  - category: 合并方式
+    pick: squash 合并
+    alternatives:
+      - { name: rebase 合并, when: 库要保留每个提交、每个提交都要能独立构建 }
+      - { name: merge 提交, when: 要保留分支结构，如合并长期维护分支 }
+    avoid:
+      - { name: 直接推送主干, why: 绕过评审和必过检查 }
+  - category: 本地 Git 钩子
+    pick: Lefthook
+    when: 默认，尤其是多语言仓库
+    alternatives:
+      - { name: pre-commit, when: 以 Python 为主的仓库，或要直接用 pre-commit 生态里的现成钩子（它会为每个钩子管理独立的运行环境） }
+    avoid:
+      - { name: 同一个仓库两个都装, why: 重复执行、互相覆盖钩子安装 }
+      - { name: 手写 .git/hooks 脚本, why: 不进版本库、没法统一安装 }
+      - { name: 只靠本地钩子没有 CI 兜底, why: 可以被 --no-verify 跳过 }
+    license: Lefthook、pre-commit 均为 MIT（待核实）
+    notes: Lefthook 是单个二进制，不依赖 Python 或 Node 运行时，并行执行命令；pre-commit 需要 Python。断网项目要预先镜像钩子及其依赖。
+    sources: [S28, S29]
+  - category: 依赖更新机器人
+    pick: 自托管 Renovate
+    when: 跨 GitHub、GitLab、Gitea 等平台，或需要内网运行
+    alternatives:
+      - { name: Dependabot, when: 只用 GitHub，接受它的生态和配置能力 }
+    avoid:
+      - { name: 每个项目手写升级脚本, why: 重复造轮子，容易漏生态边界 }
+      - { name: 默认自动合并主版本升级, why: 主版本常有不兼容改动 }
+    license: Renovate 为 AGPL-3.0，作为独立运行的工具使用；修改后对外提供网络服务时的义务见 27
+    notes: Dependabot 原生只在 GitHub 上运行。
+    sources: [S22, S23]
+  - category: 变更日志草稿与发布自动化
+    pick: 单个包、以 Conventional Commits 为输入：release-please
+    alternatives:
+      - { name: Changesets, when: JS/TS monorepo，多个包独立发版 }
+      - { name: semantic-release, when: 想要全自动发布，团队提交纪律成熟 }
+      - { name: GoReleaser, when: Go 命令行工具，要多平台二进制、校验和和打包（见 11） }
+    avoid:
+      - { name: 一套巨大的跨语言发布框架包打天下, why: 配置复杂，各语言生态的边界都照顾不好 }
+    license: release-please 为 Apache-2.0；Changesets、semantic-release、GoReleaser 开源版为 MIT（待核实）
+    notes: 这些工具生成的是草稿，面向用户的内容按 05 人工改写。
+    sources: [S26, S27, S33, S34]
+  - category: 版本号方案
+    pick: SemVer
+    when: 有对外接口、SDK、库或命令行兼容约定
+    alternatives:
+      - { name: CalVer, when: 按时间交付、没有被依赖的公共接口 }
+    avoid:
+      - { name: 所有项目统一用日历版本, why: 丢掉了对依赖方的兼容性信号 }
+    sources: [S19, S20]
+  - category: 代码托管平台
+    pick: 按场景选：私有化、多团队用 GitLab 自托管版；轻量、断网用 Gitea；公网开源协作用 GitHub
+    avoid:
+      - { name: 假定三个平台的高级功能完全一样, why: 强制审批、合并队列、CODEOWNERS 语法都有差异 }
+    license: Gitea 为 MIT；GitLab 分开源的社区版和商业的企业版
+    notes: GitHub.com 不能私有化，GitHub Enterprise Server 能否完全断网要单独核实。
+    sources: [S09, S10]
+  - category: 主干串行验证
+    pick: 合并前要求与主干同步 + 带 head 提交编号条件合并
+    alternatives:
+      - { name: GitHub 合并队列 / GitLab 合并列车, when: 主干繁忙，经常出现各自通过、合起来失败 }
+    avoid:
+      - { name: 偶发冲突就自己写分布式合并队列, why: 运维成本远大于收益 }
+    sources: [S12, S13, S14]
+  - category: 跨平台路径负责人
+    pick: 各平台原生 CODEOWNERS + 分支保护里的负责人批准
+    alternatives:
+      - { name: 一份中立的负责人清单，用小脚本生成各平台的 CODEOWNERS, when: 同一套规则要在多个平台上维护 }
+    avoid:
+      - { name: 同一份 CODEOWNERS 直接拷到另一个平台, why: Gitea 用 Go 正则，语法不同 }
+      - { name: 以为有 CODEOWNERS 文件就等于强制了, why: 要在分支保护里开启负责人批准 }
+    sources: [S07, S08]
+  - category: 仓库模板
+    pick: 轻量的模板仓库 + 版本化的初始化清单
+    alternatives:
+      - { name: Copier 或 Cookiecutter, when: 有明确的变量替换需求，或要把模板更新同步回已有项目 }
+    avoid:
+      - { name: 为十几个文件先造一套脚手架服务, why: 过度设计 }
+antipatterns:
+  - { bad: 把「一个功能一个 PR」理解成一个月的功能只开一个巨型 PR, instead: 一个可评审、可验收的切片一个 PR，大功能拆多个 }
+  - { bad: AI 写的代码交给另一个 AI 评审通过就合并, instead: AI 评审作补充，加上可执行的检查和承担责任的人工批准 }
+  - { bad: 只在 AGENTS.md 或贡献说明里写「禁止直接推 main」, instead: 在平台上开分支保护并禁止绕过 }
+  - { bad: 本地钩子全绿就当作 CI 全绿, instead: 必过检查在服务端 CI 上跑 }
+  - { bad: 拿旧提交上的绿灯合并新代码, instead: 合并时校验 head 提交编号；主干繁忙时用合并队列 }
+  - { bad: 每个临时提交都要求精美的提交信息，同时又用 squash 合并, instead: 只严格检查最终的 PR 标题 }
+  - { bad: 在 GitLab 免费版上写「必须审批才能合并」却没有任何强制, instead: 列出部署版本的能力清单，做不到的写替代做法或升级平台 }
+  - { bad: 发布出错就删 tag 重发, instead: 发一个新版本修正，保留旧版本 }
+  - { bad: 把构建缓存当正式交付物, instead: 用制品机制传递，带摘要 }
+  - { bad: 全靠公网的 Actions 和包仓库，却承诺断网交付, instead: 内部镜像 + 断网演练 }
+  - { bad: 把提交日志原样贴成给用户看的更新说明, instead: 提交信息生成草稿，人工改写面向用户的部分 }
+  - { bad: 自己写一套跨平台工作流语言替代 GitHub、GitLab、Gitea 的 CI, instead: 只抽象稳定的命令行脚本，平台 YAML 做薄适配 }
+sources:
+  - { id: S01, title: "Google Engineering Practices: Small CLs", url: "https://google.github.io/eng-practices/review/developer/small-cls.html", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: "Trunk Based Development: Short-Lived Feature Branches", url: "https://trunkbaseddevelopment.com/short-lived-feature-branches/", publisher: trunkbaseddevelopment.com, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S03, title: Conventional Commits 1.0.0, url: "https://www.conventionalcommits.org/en/v1.0.0/", publisher: Conventional Commits, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: "Google Engineering Practices: The Standard of Code Review", url: "https://google.github.io/eng-practices/review/reviewer/standard.html", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S05, title: "Google Engineering Practices: Speed of Code Reviews", url: "https://google.github.io/eng-practices/review/reviewer/speed.html", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S06, title: "GitHub: About protected branches", url: "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "GitHub: About code owners", url: "https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Gitea: Code Owners", url: "https://docs.gitea.com/usage/repository/code-owners/", publisher: Gitea, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: Gitea 28.0.0 is released, url: "https://blog.gitea.com/release-of-28.0.0/", publisher: Gitea, date: 2026-09-30, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: "GitLab: Merge request approvals", url: "https://docs.gitlab.com/user/project/merge_requests/approvals/", publisher: GitLab, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "GitHub: Using GitHub Copilot code review", url: "https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-code-review", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "GitHub: Managing a merge queue", url: "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "GitLab: Merge trains", url: "https://docs.gitlab.com/ci/pipelines/merge_trains/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "GitHub: REST API endpoints for pull requests", url: "https://docs.github.com/en/rest/pulls/pulls", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "GitHub: Dependency caching", url: "https://docs.github.com/en/actions/concepts/workflows-and-actions/dependency-caching", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "GitLab: Caching in GitLab CI/CD", url: "https://docs.gitlab.com/ci/caching/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "GitHub: Control the concurrency of workflows and jobs", url: "https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Gitea: Compared to GitHub Actions", url: "https://docs.gitea.com/usage/actions/comparison/", publisher: Gitea, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: Semantic Versioning 2.0.0, url: "https://semver.org/spec/v2.0.0.html", publisher: semver.org, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S20, title: Calendar Versioning, url: "https://calver.org/", publisher: calver.org, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S21, title: git-revert, url: "https://git-scm.com/docs/git-revert", publisher: Git, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: Renovate（仓库与 LICENSE）, url: "https://github.com/renovatebot/renovate", publisher: Mend, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "Renovate: Supported platforms", url: "https://docs.renovatebot.com/modules/platform/", publisher: Mend, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "GitHub: Using templates to encourage useful issues and pull requests", url: "https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: commitlint, url: "https://github.com/conventional-changelog/commitlint", publisher: conventional-changelog, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: release-please, url: "https://github.com/googleapis/release-please", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: Changesets, url: "https://github.com/changesets/changesets", publisher: Changesets, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: Lefthook, url: "https://github.com/evilmartians/lefthook", publisher: Evil Martians, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: pre-commit, url: "https://pre-commit.com/", publisher: pre-commit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "Is Agentic Code Review Helpful? Mining Developers' Feedback to CodeRabbit Reviews in the Wild", url: "https://arxiv.org/abs/2607.03316", publisher: arXiv, date: 2026-07-03, kind: case, checked: 2026-11-13 }
+  - { id: S31, title: "Are LLMs reliable code reviewers? Systematic overcorrection in requirement conformance judgement", url: "https://link.springer.com/article/10.1007/s10515-026-00638-5", publisher: Automated Software Engineering, date: 2026-06-26, kind: community, checked: 2026-11-13 }
+  - { id: S32, title: "pnpm: Workspace", url: "https://pnpm.io/workspaces/", publisher: pnpm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: semantic-release, url: "https://github.com/semantic-release/semantic-release", publisher: semantic-release, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: GoReleaser, url: "https://github.com/goreleaser/goreleaser", publisher: GoReleaser, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - GitHub 合并队列对哪些仓库和套餐开放：官方页面未写明，启用前按所用套餐核实
+  - GitHub Enterprise Server 能否在完全断网下使用 Actions、缓存和包仓库，需单独核实
+  - Lefthook、pre-commit、commitlint、Changesets、semantic-release、GoReleaser 的许可证沿用原调研，未逐一对照官方 LICENSE 核实；GoReleaser 商业版与开源版的功能边界未核实
+  - Renovate 许可证是 AGPL-3.0-only 还是 or-later：LICENSE 文件为 AGPL v3 全文，需对照 package.json 的声明确认
+  - Gitea 稳定版文档中受保护分支的签名提交、批准规则细节，原调研引用的是开发版文档，需对照实际部署版本核实
+  - GitLab 各套餐（免费版、Premium、Ultimate）与社区版、企业版许可证的对应关系，原调研说法较简化
+  - 待补调研：monorepo 构建与任务工具（Nx、Turborepo、Bazel、Pants）的选型，或明确交给 10
+  - 待补调研：堆叠 PR 的工具与做法（如 Graphite、ghstack、git-town）
+  - 待补调研：各平台角色与权限级别的对应关系（GitHub 的 write/maintain、GitLab 的 Developer/Maintainer、Gitea 的权限）
+  - 待补调研：Forgejo 与 Gitea 的能力差异
+  - 待补调研：流程质量指标（首次评审响应时间、PR 周期、返工率、合并后回滚率）的统计口径，需与 22 对齐
+  - 待补调研：Lefthook 与 pre-commit 的默认选择需与 02、12 统一口径

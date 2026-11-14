@@ -1,0 +1,538 @@
+id: "02"
+slug: coding
+title: 通用编码规范
+summary: 不分语言都适用的编码约定：命名、注释、错误处理与传播、日志字段与级别、配置、复杂度，时间、金额、编码、并发这些容易出错的地方，以及格式化和 lint 的通用原则。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 标识符命名、术语、单位、魔法数字
+    - 注释与公共接口的文档注释
+    - 错误分类、捕获与传播、在边界转换错误
+    - 应用日志的字段、级别和不该记录的内容
+    - 配置加载与校验
+    - 复杂度、可读性、复用
+    - 时间、金额、浮点、文本编码、大整数
+    - 超时、重试、并发任务与共享状态
+    - 格式化与 lint 的通用原则（单一格式器、例外要有理由和到期日）
+  excludes:
+    - { what: 各语言具体的格式化器、lint、复杂度工具和它们的配置, see: "10-15" }
+    - { what: 对外错误响应格式（RFC 9457）、JSON 字段大小写、事件命名、接口兼容与幂等语义, see: "16" }
+    - { what: 数据库字段命名与迁移兼容, see: "17" }
+    - { what: 密钥管理、密钥扫描、SAST, see: "25" }
+    - { what: 日志采集、保留期、链路追踪（OTel）、告警, see: "26" }
+    - { what: 提交钩子、评审流程、CI 门禁顺序, see: "03" }
+    - { what: 分层、依赖方向、抽象边界, see: "01" }
+    - { what: README、术语表文档、注释用什么语言写, see: "05" }
+    - { what: 限流、分布式锁、任务调度, see: "18" }
+overview: |
+  1. **跨语言只统一语义，不统一表层风格。** 命名要清楚、一致；大小写和后缀按各语言惯例，空白和导入顺序交给格式器。
+  2. **注释写为什么。** 原因、约束、边界、风险；公共接口写清输入输出、错误和副作用。
+  3. **错误不吞、不丢原因。** 传播时保留原错误并补上下文；只在能处理或要转换的地方捕获；在边界转成稳定的错误码，不把栈和 SQL 交给调用方。
+  4. **日志是结构化数据。** 固定的基本字段、统一的级别含义；不记密钥、令牌和不必要的个人信息；同一错误只完整记一次。
+  5. **配置集中加载、启动即校验。** 缺了或错了就启动失败，报键名不报值。
+  6. **复杂度看趋势，不设跨语言行数红线。** 阈值继承各语言工具默认值，只卡新增代码；不为凑行数机械拆分。
+  7. **容易错的地方按标准来。** 时间点用 RFC 3339，本地时间另存 IANA 时区；金额不用二进制浮点，带 ISO 4217 币种；文本默认 UTF-8；超过 2^53 的整数在 JSON 里用字符串。
+  8. **外部调用都有超时，重试有上限和退避。** 非幂等写操作没有幂等设计就不自动重试；每个后台任务都有停止方式。
+  9. **格式器只有一个，lint 例外要说理由。** 抑制精确到规则、写明原因；长期例外登记负责人和到期日。
+rules:
+  # ── 命名 ──
+  - id: COD-001
+    title: 同一个概念全项目用同一个名称，不同概念不共用名称；领域术语记进术语表
+    level: soft
+    check: manual
+    how: 评审时对照术语表检查新出现的名称；术语表本身随代码一起评审
+    applies: [all]
+    why: 一个概念几个叫法、一个叫法几个意思，是读错代码和接错字段的常见原因。
+    detail: |
+      - 类型用名词，函数用动词短语，布尔值读起来像判断（`is_active`、`has_children`）。
+      - 集合用复数或明确的集合名，和单个对象区分开。
+    sources: [S03]
+    see: ["05"]
+  - id: COD-002
+    title: 标识符的大小写、前后缀遵循所用语言的惯例，不跨语言强行统一一种写法
+    level: hard
+    check: auto
+    how: 用各语言的命名 lint 规则检查（工具见 10–15）
+    applies: [all]
+    why: 每种语言的工具链、标准库和社区代码都按自己的惯例写，强行统一会和生态打架。
+    detail: |
+      对外字段（JSON、数据库、事件）是契约，大小写在 16、17 里定，不随后端语言变化。
+    sources: [S02]
+    see: ["10-15", "16", "17"]
+  - id: COD-003
+    title: 新的公共名称用通用英文词和业内公认的缩写，不用随意的拼音、中英混拼和自造缩写
+    level: soft
+    check: manual
+    how: 评审新增的公共接口、字段和模块名；专有名词（如地名、法规名）登记在术语表里作为例外
+    applies: [all]
+    why: 拼音和自造缩写换个人就看不懂，也没法可靠地自动识别，只能靠评审。
+    detail: |
+      - 已经公开的旧名称，不为改风格而直接改名，按 16、17 的兼容规则处理。
+      - 公认缩写如 `id`、`url`、`config` 可以用；不认识的缩写在第一次出现处解释或换全称。
+    sources: [S03]
+    see: ["16", "17"]
+  - id: COD-004
+    title: 带单位的数量把单位写进名称或类型里，如 `timeout_ms`、`size_bytes`，或用语言自带的时长类型
+    level: soft
+    check: semi
+    how: 评审时检查新增的时长、大小、比例类字段和参数；能用强类型（如时长类型）的优先用类型
+    applies: [all]
+    why: 没写单位的 `1000`，有人当毫秒有人当秒，这类错误测试很难发现。
+    sources: [S04, S05]
+  - id: COD-005
+    title: 有业务含义的数字和字符串定义成具名常量，写清含义、单位和来源
+    level: soft
+    check: semi
+    how: 开启各语言的魔法数字规则提示候选（如 ESLint `no-magic-numbers`、Ruff `PLR2004`），评审确认
+    applies: [all]
+    why: 散落在代码里的 `86400`、`0.06`、`"VIP2"` 看不出含义，改的时候也找不全。
+    detail: |
+      - 不需要处理：`0`、`1`、`-1`、数组下标、测试里的样例数据、一看就懂的数学常量。
+      - 来自外部规定的值（费率、上限、协议常量），在常量旁注明出处。
+      - 可能随部署变化的值做成配置（见 COD-022），不要做成常量。
+    sources: [S06, S07]
+  # ── 注释 ──
+  - id: COD-006
+    title: 注释写原因、取舍、约束和风险，不逐行复述代码；改行为时同步改注释
+    level: soft
+    check: manual
+    how: 评审时检查注释是否解释了「为什么」，以及改动处的注释是否还和代码一致
+    applies: [all]
+    why: 复述代码的注释没有信息量；过期的注释比没有注释更误导人。
+    sources: [S01]
+  - id: COD-007
+    title: 供别人调用的库，公开接口必须有文档注释，写清用途、参数和返回值、可能的错误、前置条件和副作用
+    level: hard
+    check: semi
+    how: 用各语言的文档缺失检查找出没写的公开接口（工具见 10–15），内容是否完整靠评审
+    applies: [kind:library]
+    why: 调用方看不到实现，文档注释就是接口说明的一部分。
+    detail: 文档注释的格式（Go Doc、TSDoc、docstring、rustdoc、Javadoc/KDoc）按各语言规范。
+    sources: [S02]
+    see: ["05", "10-15"]
+  - id: COD-008
+    title: TODO、FIXME 要写原因并关联任务编号或负责人；不留占位实现冒充完成
+    level: soft
+    check: auto
+    how: lint 或脚本检查 TODO 是否带任务编号（如 Ruff 的 TD 规则、ESLint `no-warning-comments`）；评审时检查空实现和写死的返回值
+    applies: [all]
+    why: 没人认领的 TODO 永远不会被处理；占位实现上线后就是缺陷。
+  - id: COD-009
+    title: 生成的代码在文件头标明由什么工具生成、不要手改；手写代码不放在生成目录里
+    level: soft
+    check: auto
+    how: 检查生成文件头部的标记（如 Go 约定的 `// Code generated ... DO NOT EDIT.`），格式器和 lint 跳过这些文件
+    applies: [all]
+    why: 手改生成代码，下次重新生成时改动就丢了。
+    sources: [S08]
+  # ── 错误处理与传播 ──
+  - id: COD-010
+    title: 不吞错：禁止空的 catch、捕获后什么都不做，或只打印一下就当成功继续
+    level: hard
+    check: semi
+    how: 开启各语言的相关 lint（如空 catch、裸 except、未检查的返回错误），评审有意忽略的地方是否写了原因
+    applies: [all]
+    why: 被吞掉的错误会以数据错乱、状态不一致的形式在别处出现，很难追到源头。
+    detail: 确实要忽略的错误（如关闭只读文件失败），在代码里写明为什么可以忽略。
+    see: ["10-15"]
+  - id: COD-011
+    title: 向上传递错误时保留原始错误，并补上操作、对象标识、所处阶段等上下文；不用新错误覆盖掉原错误
+    level: hard
+    check: semi
+    how: 用语言自带的错误链（Go `%w` 和 `errors.Is/As`、Python `raise ... from`、JS `new Error(msg, { cause })`、Java/Kotlin 构造异常时传入 cause、Rust `source()`），评审检查是否丢了原错误
+    applies: [all]
+    why: 只剩一句「保存失败」而丢了底层原因，排查时只能靠猜。
+    detail: 上下文里只放安全的标识（订单号、阶段名），不放密码、令牌、完整请求体。
+    sources: [S09, S10, S11]
+  - id: COD-012
+    title: 只在能处理或恢复、要转换错误类型、要补有用上下文的地方捕获错误；其余情况向上传
+    level: soft
+    check: manual
+    how: 评审时检查每个捕获点属于哪一种情况
+    applies: [all]
+    why: 到处捕获会让错误被重复处理、重复记录，或在半路被改得面目全非。
+  - id: COD-013
+    title: 区分三类错误：调用方能纠正的（输入非法、无权限、冲突）、临时故障（超时、限流、下游不可用）、程序缺陷；是否可重试单独标记
+    level: soft
+    check: manual
+    how: 评审错误类型的定义和映射表
+    applies: [all]
+    why: 分清类别才知道该提示用户、该重试还是该报警；「可预期」不等于「可以忽略」。
+    see: ["16"]
+  - id: COD-014
+    title: 调用方按错误类型或错误码判断，不靠匹配错误消息文本
+    level: soft
+    check: semi
+    how: 搜索代码里对错误消息做字符串比较或正则匹配的地方，评审确认
+    applies: [all]
+    why: 错误消息是给人看的，随时会改措辞或翻译，按文本判断一改就坏。
+    sources: [S09]
+  - id: COD-015
+    title: 在服务或进程的边界把内部错误转成稳定的错误码和安全的说明，不把栈、SQL、内部路径、密钥返回给调用方
+    level: hard
+    check: semi
+    how: 评审边界处的错误映射；用安全扫描找出直接返回异常信息的地方；对错误响应做样例测试
+    applies: [kind:service, kind:library, kind:cli]
+    why: 栈和 SQL 会暴露内部结构，给攻击者提供线索；调用方也没法依赖这些内容做判断。
+    detail: 对外错误响应的具体格式（如 RFC 9457）见 16。
+    sources: [S12]
+    see: ["16", "25"]
+  # ── 日志 ──
+  - id: COD-016
+    title: 生产环境的应用日志用结构化格式（如每行一个 JSON 对象），不拼接成只有人能读的句子
+    level: hard
+    check: auto
+    how: 在测试或预发环境采样日志，检查每行都能被解析成字段
+    applies: [kind:service, kind:cli]
+    why: 结构化日志才能可靠地检索、聚合和告警，也更难被注入伪造。
+    sources: [S13, S14]
+    see: ["26"]
+  - id: COD-017
+    title: 每条日志都有时间戳、级别、服务名、事件名和消息；处理请求时带上追踪编号和请求编号，出错时带错误码
+    level: hard
+    check: auto
+    how: 定义日志字段清单，用日志样本校验必备字段
+    applies: [kind:service]
+    why: 缺了这几个字段，日志就没法按时间、服务、请求串起来看。
+    detail: |
+      - 时间戳用 UTC 的 RFC 3339 格式（见 COD-026）。
+      - 事件名用稳定的标识（如 `order.payment_failed`），消息可以是给人读的句子。
+      - 字段名全项目统一一套；没有追踪编号时不要编造。
+      - 示例：`{"timestamp":"2026-11-13T09:00:00Z","level":"ERROR","service":"order-api","event":"order.persistence_failed","trace_id":"…","request_id":"req_123","error_code":"STORAGE_UNAVAILABLE","duration_ms":42}`
+    sources: [S14]
+    see: ["26"]
+  - id: COD-018
+    title: 全项目统一日志级别的含义：DEBUG 诊断细节，INFO 正常的重要事件，WARN 异常但已恢复或已降级，ERROR 本次操作失败，FATAL 进程无法继续
+    level: soft
+    check: manual
+    how: 评审新增日志的级别；抽查生产日志里 ERROR 是否都对应真实失败
+    applies: [all]
+    why: 级别乱用会让告警失灵：到处是 ERROR 就没人看 ERROR。
+    detail: |
+      这套含义是行业通行的惯例，不是某个标准规定的。syslog（RFC 5424）只定义了级别名称和数值，OpenTelemetry 日志数据模型只定义了级别的数值区间，用于不同日志库之间对齐。
+      不要用 ERROR 记录调用方的输入错误（那是正常业务结果，用 INFO 或 WARN）。
+    sources: [S15, S14]
+  - id: COD-019
+    title: 日志里不记录密码、令牌、密钥、Cookie、完整连接串、银行卡号和没有正当用途的个人信息；按字段白名单记录，不整个打印请求体
+    level: hard
+    check: semi
+    how: 用密钥和个人信息检测扫描日志样本（工具见 25）；评审新增日志的字段
+    applies: [all]
+    why: 日志的访问范围通常比业务数据宽，保存时间也长，泄露在日志里等于泄露给所有能看日志的人。
+    detail: 用户编号这类标识也可能算个人信息，记录前确认有用途且访问受控。
+    sources: [S13]
+    see: ["25", "27"]
+  - id: COD-020
+    title: 写入日志的外部输入要经过编码，去掉或转义换行等控制字符，并限制长度
+    level: hard
+    check: semi
+    how: 优先用结构化日志库自动编码字段；安全扫描找出把外部输入直接拼进日志消息的地方
+    applies: [all]
+    why: 不处理换行就能伪造日志行，不限长度就能撑爆存储。
+    sources: [S13]
+  - id: COD-021
+    title: 同一个错误只在处理它的那一层完整记录一次，中间层只传递不重复打印
+    level: soft
+    check: manual
+    how: 评审时检查一条错误路径上有几处记录日志；对照日志样本看是否同一错误出现多条
+    applies: [all]
+    why: 层层记录会让一次失败变成五条 ERROR，告警和统计都会失真。
+  # ── 配置 ──
+  - id: COD-022
+    title: 随部署变化的配置不写死在代码里；在一处集中加载并按类型校验，缺失或非法时启动失败，报键名和原因，不输出值
+    level: hard
+    check: semi
+    how: 配置加载代码有单元测试覆盖缺失和非法值的情况；评审时搜索业务代码里散落的读取环境变量的地方
+    applies: [kind:service, kind:cli]
+    why: 带着错误配置启动，往往在半夜才以奇怪的方式失败；集中校验能把问题挡在启动时。
+    detail: |
+      - 密钥和普通配置分开处理，密钥不写进代码、示例、日志和命令行参数，具体做法见 25。
+      - 「配置与代码分离」来自 Twelve-Factor App，是业界方法论，不是标准。
+    sources: [S16]
+    see: ["25"]
+  - id: COD-023
+    title: 每个配置项写明类型、单位、取值范围、默认值、是否必填、是否敏感；写清多个来源的覆盖顺序和是否支持热更新
+    level: soft
+    check: semi
+    how: 用配置结构定义（schema）生成说明文档和校验代码；评审新增配置项
+    applies: [kind:service, kind:cli]
+    why: 不写清楚，同一个配置在不同环境里被理解成不同的意思。
+    detail: 覆盖顺序常见做法是「命令行 > 环境变量 > 配置文件 > 默认值」，这是惯例不是标准；项目选定后写进文档。
+  # ── 复杂度与可读性 ──
+  - id: COD-024
+    title: 复杂度阈值沿用各语言工具的默认值，只对新增和改动的代码执行；存量代码用基线记录，不一次性全仓阻断
+    level: soft
+    check: auto
+    how: 在 CI 里只对改动部分运行复杂度检查，超出时要求说明或简化（工具见 10–15）
+    applies: [all]
+    why: 阈值是经验值，不是科学定律；对存量一刀切只会催生大量无意义的例外。
+    ref_value: 参考值：Sonar 认知复杂度默认 15（C、C++、Objective-C 为 25），其维护者说明这是调出来的经验值；Google Python 风格指南建议函数超过约 40 行时考虑能否拆分，并明确不设硬上限。
+    sources: [S17, S02]
+    see: ["10-15"]
+  - id: COD-025
+    title: 不设跨语言统一的函数或文件行数上限；不为凑行数机械拆出没有意义的小函数
+    level: soft
+    check: manual
+    how: 评审时看函数是否只做一件事，而不是只看行数
+    applies: [all]
+    why: 同样的行数，在状态机、声明式配置、生成代码里阅读成本完全不同；机械拆分反而增加跳转。
+    detail: |
+      - 用提前返回减少嵌套；嵌套深度可由 lint 提示。
+      - 不写为省几行而难懂的表达式、隐式副作用和晦涩的元编程。
+    sources: [S02, S01]
+  # ── 时间、金额、编码、数值 ──
+  - id: COD-026
+    title: 跨系统传递的时间点用 RFC 3339 格式并带时区偏移；存储和比较用 UTC
+    level: hard
+    check: auto
+    how: 接口结构定义里时间字段声明为 date-time 格式并做校验；评审时检查不带偏移的时间字符串
+    applies: [all]
+    why: 不带偏移的「2026-11-13 10:00」在不同机器上代表不同的时刻。
+    detail: |
+      - `2026-11-13` 是日历日期，不是时间点，用单独的日期类型。
+      - RFC 9557 更新了 RFC 3339：`Z` 现在只表示「UTC 时间已知、当地偏移未知」。需要表达当地偏移时写实际偏移（如 `+08:00`）。
+    sources: [S18, S19]
+  - id: COD-027
+    title: 有本地时间含义的数据（排班、每天当地 9 点、未来某天的预约）另存 IANA 时区名，不只存一个偏移量
+    level: hard
+    check: semi
+    how: 评审这类字段是否同时保存了时区名；时区计算用标准库或成熟时间库，不自己算夏令时
+    applies: [all]
+    why: 偏移量会随夏令时和政策变化，只存偏移，未来的本地时间会算错一小时甚至更多。
+    detail: |
+      - 时区名用 IANA 时区数据库的名称，如 `Asia/Shanghai`、`Europe/Paris`；需要和时间写在一起时，可用 RFC 9557 的后缀写法 `2026-01-01T09:00+01:00[Europe/Paris]`。
+      - 时区数据库会更新，运行环境要能随之更新。
+    sources: [S19, S20]
+  - id: COD-028
+    title: 时长和超时写明单位；计算耗时用单调时钟，不用系统墙上时间相减
+    level: hard
+    check: semi
+    how: 评审耗时计算用的时钟接口；部分语言有 lint 可提示（工具见 10–15）
+    applies: [all]
+    why: 系统时间会被校时、手动修改而跳变，用它算耗时可能得到负数或巨大的值。
+    detail: 单调时钟对应 POSIX 的 `CLOCK_MONOTONIC`，各语言都有对应接口（如 Go 的 `time.Since`、Python 的 `time.monotonic`、JS 的 `performance.now`）。
+    sources: [S21, S04, S05]
+  - id: COD-029
+    title: 金额不用二进制浮点数计算和存储；用十进制类型或最小货币单位的整数，同时带 ISO 4217 币种代码和明确的舍入规则
+    level: hard
+    check: semi
+    how: 评审金额字段和计算代码的类型；接口结构定义里金额字段不用 number/float
+    applies: [all]
+    why: 二进制浮点无法精确表示 0.1 这类十进制小数，累加和舍入后会差一分钱，对账时就对不上。
+    detail: |
+      - 各币种的小数位数不同（如日元 0 位、人民币 2 位、科威特第纳尔 3 位），按 ISO 4217 的「minor unit」取，不要写死 2 位。
+      - 只有数字没有币种的 `amount=19.99` 不能用于结算。
+    sources: [S22, S23, S24, S25]
+  - id: COD-030
+    title: 浮点数比较按业务的误差要求判断，不用 `==` 直接比较，也不套一个全局通用的误差值
+    level: soft
+    check: semi
+    how: 开启各语言的浮点相等比较提示（如 Rust Clippy `float_cmp`），评审确认误差来源
+    applies: [all]
+    why: 浮点运算有舍入误差，直接比较结果不稳定；合理的误差范围取决于数据的量级和用途。
+    sources: [S24, S25]
+  - id: COD-031
+    title: 源文件和交换的文本数据默认用 UTF-8；截断、计长度、比较时按字符处理，不按字节
+    level: hard
+    check: auto
+    how: 在 `.editorconfig` 里设置 `charset = utf-8`，CI 检查文件编码；评审字符串截断和长度校验的实现
+    applies: [all]
+    why: 混用编码会产生乱码；按字节截断会把一个汉字切成两半。
+    detail: |
+      - 在系统之间交换的 JSON 必须用 UTF-8（RFC 8259 的要求）。
+      - 比较用户输入的文本（如用户名）前先做 Unicode 规范化（通常用 NFC 或 NFKC），否则看起来一样的字符串可能不相等。
+    sources: [S26, S27, S28, S29]
+  - id: COD-032
+    title: 在 JSON 里传递可能超过 2^53 的整数（如长整型编号）时用字符串；接口里写清整数范围，以及「字段为空」和「字段不存在」是否有区别
+    level: hard
+    check: semi
+    how: 评审接口结构定义里的整数字段类型和范围；用超大值做契约测试
+    applies: [all]
+    why: 很多 JSON 解析器（包括浏览器里的 JavaScript）把数字当双精度浮点处理，超过 2^53 就会悄悄丢精度。
+    detail: 接口契约的其他细则见 16。
+    sources: [S26, S30]
+    see: ["16"]
+  # ── 超时、重试、并发 ──
+  - id: COD-033
+    title: 每个网络调用和外部调用都设置超时或截止时间，并把剩余时间传给下游
+    level: hard
+    check: semi
+    how: 评审外部调用的客户端配置；搜索没有设置超时的客户端构造（部分语言有 lint 可提示）
+    applies: [all]
+    why: 没有超时的调用遇到下游卡死时会无限期占着连接和线程，一个慢依赖就能拖垮整个服务。
+    sources: [S31, S32]
+  - id: COD-034
+    title: 重试只针对临时故障，必须有次数上限和带随机抖动的指数退避；非幂等的写操作没有幂等设计时不自动重试
+    level: hard
+    check: semi
+    how: 评审重试配置（上限、退避、可重试的错误类型）；用现成的重试库或客户端自带的重试，不手写循环
+    applies: [all]
+    why: 无限重试会把短暂故障放大成雪崩；重试非幂等的写操作会造成重复扣款、重复下单。
+    detail: |
+      - HTTP 标准（RFC 9110）规定：除非确知请求实际是幂等的，或能确认原请求没有生效，否则客户端不应自动重试非幂等方法的请求。
+      - 幂等键等接口层的幂等设计见 16；限流见 18。
+    sources: [S33, S32]
+    see: ["16", "18"]
+  - id: COD-035
+    title: 启动的每个后台任务、线程或协程都有明确的负责方和停止方式（取消或截止时间），退出时回收资源
+    level: soft
+    check: semi
+    how: 评审任务的启动和停止路径；测试里检查泄漏（如 Go 的 goleak）
+    applies: [all]
+    why: 没人负责停止的任务会在进程里越积越多，造成内存和连接泄漏，关闭时还会丢数据。
+    sources: [S31]
+  - id: COD-036
+    title: 多个执行单元共享的可变数据必须有明确的同步方式；支持竞态检测的语言在测试中开启它
+    level: hard
+    check: semi
+    how: 测试时开启竞态检测（如 Go 的 `-race`、C/C++/Rust 的 ThreadSanitizer）；评审共享状态的访问方式
+    applies: [all]
+    why: 数据竞争的结果不确定，平时测不出来，线上偶发且难以复现。
+    detail: 能用不可变数据或消息传递的，就不共享可变状态。
+    sources: [S34, S35]
+  # ── 复用与依赖 ──
+  - id: COD-037
+    title: 时间、金额、JSON、UUID、加密、重试这类有大量边角情况的功能，用标准库或成熟的库，不自己写；新增依赖写明理由
+    level: soft
+    check: manual
+    how: 评审依赖清单的变化和新增的工具函数
+    applies: [all]
+    why: 这些领域的坑早有人踩过，自己写往往在时区、精度、安全上出问题。
+    detail: 两段代码相似不一定要抽成共享；只有复制的是同一条业务规则时才提取，避免把不同流程硬凑成一个抽象（见 01）。
+    see: ["01", "25"]
+  # ── 格式化与 lint ──
+  - id: COD-038
+    title: 每种语言只用一个格式器，配置文件入库，CI 用检查模式验证；评审不再讨论空白和导入顺序
+    level: hard
+    check: auto
+    how: CI 运行格式器的检查模式（如 `--check`），有差异即失败（工具见 10–15）
+    applies: [all]
+    why: 格式交给工具后，评审精力才能放在设计、正确性和安全上；两个格式器并存会互相改来改去。
+    detail: 仓库根目录放 `.editorconfig`，统一编码、换行符、缩进和文件末尾换行，让各编辑器行为一致。
+    sources: [S29, S01]
+    see: ["10-15"]
+  - id: COD-039
+    title: 在代码里关闭 lint 时必须指明具体规则并写理由，不允许整文件或不指明规则地关闭
+    level: hard
+    check: auto
+    how: 用 lint 自带的检查强制执行（如 ESLint 的未使用禁用指令报告和禁用注释说明、Ruff `PGH004`、golangci-lint 的 nolintlint 要求写说明）
+    applies: [all]
+    why: 不指明规则的关闭会把以后出现的新问题一起盖住；不写理由，后人不知道能不能删。
+    sources: [S36, S37]
+  - id: COD-040
+    title: 长期的 lint 例外（基线文件、整条规则关闭）登记理由、负责人和到期日，到期复查
+    level: soft
+    check: semi
+    how: 脚本检查例外清单里每项都有负责人和到期日，到期时提醒
+    applies: [all]
+    why: 没有到期日的例外会永久存在，规则名义上开着，实际上已经失效。
+choices:
+  - category: 格式化
+    pick: 每种语言一个官方或主流格式器 + 仓库根目录 .editorconfig
+    alternatives:
+      - { name: 沿用项目已有的格式器, when: 存量项目已经统一使用某个格式器 }
+    avoid:
+      - { name: 靠人工评审统一空格和引号, why: 浪费评审精力且不一致 }
+      - { name: 同一语言并用两个格式器, why: 互相改写，产生无意义的改动 }
+    notes: 具体工具见 10–15。
+    sources: [S29]
+  - category: lint 例外
+    pick: 行内关闭精确到规则并写理由；存量问题用工具自带的基线文件
+    avoid:
+      - { name: 整文件或不指明规则地关闭, why: 会盖住以后的新问题 }
+      - { name: 在 CI 里调低阈值让检查通过, why: 规则名义上开着，实际上失效 }
+    sources: [S36, S37]
+  - category: 错误传播
+    pick: 语言自带的错误链（cause）+ 边界处的错误码映射
+    avoid:
+      - { name: 把原错误转成字符串再拼进新错误, why: 丢失原错误类型，调用方无法判断 }
+      - { name: 靠匹配错误消息文本判断错误类型, why: 措辞一改就坏 }
+    sources: [S09, S10, S11]
+  - category: 应用日志
+    pick: 语言主流的结构化日志库，输出 JSON 行
+    alternatives:
+      - { name: 键值对格式的文本日志, when: 只在本地开发查看时 }
+    avoid:
+      - { name: 随手 print 或拼接字符串, why: 无法检索，容易被注入 }
+    notes: 日志采集和链路追踪见 26。
+    sources: [S13, S14]
+  - category: 时间
+    pick: 标准库或成熟时间库，时区用 IANA 时区数据库；传输用 RFC 3339
+    avoid:
+      - { name: 自己解析时间字符串或计算夏令时, why: 边角情况太多 }
+      - { name: 用不带偏移的本地时间字符串跨系统传递, why: 在不同机器上代表不同时刻 }
+    sources: [S18, S20]
+  - category: 金额
+    pick: 十进制类型（如各语言的 Decimal/BigDecimal）或最小货币单位的整数，配 ISO 4217 币种代码
+    avoid:
+      - { name: float/double, why: 无法精确表示十进制小数 }
+    sources: [S22, S24]
+  - category: 重试
+    pick: 现成的重试库或客户端自带的重试机制，配上限、指数退避和随机抖动
+    avoid:
+      - { name: 手写 while 循环重试, why: 容易漏掉上限、退避和可重试判断 }
+    sources: [S32, S33]
+antipatterns:
+  - { bad: 所有语言统一用 camelCase 或 snake_case, instead: 统一语义，大小写按各语言惯例；对外字段按 16 定 }
+  - { bad: 用拼音或无意义的名字（`yonghuId`、`tmp2`）, instead: 用术语表里的英文词（`userId`、`user_id`） }
+  - { bad: 代码里散落 `86400`、`0.06` 这样的数字, instead: 定义成具名常量并写清单位和来源 }
+  - { bad: "`catch {}` 或 `except: pass`", instead: 处理、转换或向上传递，确需忽略时写明原因 }
+  - { bad: 每一层都捕获并打印同一个错误, instead: 中间层带上下文传递，在处理边界记录一次 }
+  - { bad: 把异常栈、SQL 错误直接返回给调用方, instead: 返回稳定错误码和安全说明，细节记在内部日志 }
+  - { bad: 把整个请求体交给日志, instead: 按白名单记录需要的字段 }
+  - { bad: 业务代码里到处读取环境变量并自己解析, instead: 集中加载、按类型校验配置 }
+  - { bad: 「函数超过 30 行必须拆」「文件超过 300 行必须拆」, instead: 行数只作提醒，评审看职责是否单一 }
+  - { bad: 两段相似的代码就抽成公共库, instead: 只有同一条业务规则被复制时才提取 }
+  - { bad: 用 double 存金额, instead: 用十进制类型或最小单位整数，带币种和舍入规则 }
+  - { bad: 用系统时间相减计算耗时, instead: 用单调时钟 }
+  - { bad: 无上限、无退避地重试，或自动重试下单、扣款请求, instead: 设上限和带抖动的退避，非幂等写操作先有幂等设计 }
+  - { bad: 用 `// eslint-disable` 或 `# noqa` 整片关闭检查, instead: 精确到规则并写理由，长期例外登记到期日 }
+sources:
+  - { id: S01, title: "Google Engineering Practices: What to look for in a code review", url: "https://google.github.io/eng-practices/review/reviewer/looking-for.html", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S02, title: "Google Python Style Guide", url: "https://google.github.io/styleguide/pyguide.html", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "AIP-140: Field names", url: "https://google.aip.dev/140", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "AIP-141: Quantities", url: "https://google.aip.dev/141", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "AIP-142: Time and duration", url: "https://google.aip.dev/142", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "ESLint: no-magic-numbers", url: "https://eslint.org/docs/latest/rules/no-magic-numbers", publisher: ESLint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Ruff: magic-value-comparison (PLR2004)", url: "https://docs.astral.sh/ruff/rules/magic-value-comparison/", publisher: Astral, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "go command: Generate Go files by processing source", url: "https://pkg.go.dev/cmd/go#hdr-Generate_Go_files_by_processing_source", publisher: Go, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "Working with Errors in Go 1.13", url: "https://go.dev/blog/go1.13-errors", publisher: Go, date: 2019-10-17, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: "Python Tutorial: Exception Chaining", url: "https://docs.python.org/3/tutorial/errors.html#exception-chaining", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "MDN: Error.prototype.cause", url: "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/cause", publisher: MDN, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "OWASP Error Handling Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S13, title: "OWASP Logging Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S14, title: "OpenTelemetry: Logs Data Model", url: "https://opentelemetry.io/docs/specs/otel/logs/data-model/", publisher: OpenTelemetry, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S15, title: "RFC 5424: The Syslog Protocol", url: "https://www.rfc-editor.org/rfc/rfc5424.html", publisher: IETF, date: 2009-03, kind: standard, checked: 2026-11-14 }
+  - { id: S16, title: "The Twelve-Factor App: Config", url: "https://12factor.net/config", publisher: Heroku, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S17, title: "S3676: Reason for the current default value of 15", url: "https://community.sonarsource.com/t/s3776-reason-for-the-current-default-value-of-15/127103", publisher: Sonar Community, date: "2024", kind: community, checked: 2026-11-14 }
+  - { id: S18, title: "RFC 3339: Date and Time on the Internet: Timestamps", url: "https://www.rfc-editor.org/rfc/rfc3339.html", publisher: IETF, date: 2002-07, kind: standard, checked: 2026-11-14 }
+  - { id: S19, title: "RFC 9557: Date and Time on the Internet: Timestamps with Additional Information", url: "https://www.rfc-editor.org/rfc/rfc9557.html", publisher: IETF, date: 2024-04, kind: standard, checked: 2026-11-14 }
+  - { id: S20, title: "IANA Time Zone Database", url: "https://www.iana.org/time-zones", publisher: IANA, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S21, title: "POSIX: clock_getres, clock_gettime, clock_settime", url: "https://pubs.opengroup.org/onlinepubs/9699919799/functions/clock_gettime.html", publisher: The Open Group, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S22, title: "ISO 4217: Currency codes", url: "https://www.iso.org/iso-4217-currency-codes.html", publisher: ISO, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S23, title: "SIX: ISO 4217 currency code lists (maintenance agency)", url: "https://www.six-group.com/en/products-services/financial-information/market-reference-data/data-standards.html", publisher: SIX, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: "IEEE 754-2019: Standard for Floating-Point Arithmetic", url: "https://standards.ieee.org/ieee/754/6210/", publisher: IEEE, date: 2019-07, kind: standard, checked: 2026-11-14 }
+  - { id: S25, title: "Python Tutorial: Floating-Point Arithmetic: Issues and Limitations", url: "https://docs.python.org/3/tutorial/floatingpoint.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: "RFC 8259: The JavaScript Object Notation (JSON) Data Interchange Format", url: "https://www.rfc-editor.org/rfc/rfc8259.html", publisher: IETF, date: 2017-12, kind: standard, checked: 2026-11-14 }
+  - { id: S27, title: "RFC 3629: UTF-8, a transformation format of ISO 10646", url: "https://www.rfc-editor.org/rfc/rfc3629.html", publisher: IETF, date: 2003-11, kind: standard, checked: 2026-11-14 }
+  - { id: S28, title: "Unicode Standard Annex #15: Unicode Normalization Forms", url: "https://unicode.org/reports/tr15/", publisher: Unicode Consortium, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S29, title: "EditorConfig Specification", url: "https://spec.editorconfig.org/", publisher: EditorConfig, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S30, title: "RFC 7493: The I-JSON Message Format", url: "https://www.rfc-editor.org/rfc/rfc7493.html", publisher: IETF, date: 2015-03, kind: standard, checked: 2026-11-14 }
+  - { id: S31, title: "gRPC: Deadlines", url: "https://grpc.io/docs/guides/deadlines/", publisher: gRPC, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: "Timeouts, retries, and backoff with jitter", url: "https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/", publisher: Amazon Web Services, date: null, kind: case, checked: 2026-11-14 }
+  - { id: S33, title: "RFC 9110: HTTP Semantics", url: "https://www.rfc-editor.org/rfc/rfc9110.html", publisher: IETF, date: 2022-06, kind: standard, checked: 2026-11-14 }
+  - { id: S34, title: "Go: Data Race Detector", url: "https://go.dev/doc/articles/race_detector", publisher: Go, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: "Clang: ThreadSanitizer", url: "https://clang.llvm.org/docs/ThreadSanitizer.html", publisher: LLVM, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: "ESLint: Configure Rules (disable comments and descriptions)", url: "https://eslint.org/docs/latest/use/configure/rules", publisher: ESLint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: "Ruff: blanket-noqa (PGH004)", url: "https://docs.astral.sh/ruff/rules/blanket-noqa/", publisher: Astral, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - 待补调研：魔法数字的业界做法（哪些值可以豁免、各语言 lint 规则的误报率）；COD-005 目前按通用做法写成软指导
+  - 待补调研：文件和目录命名、导入分组的跨语言约定
+  - 待补调研：复杂度和重复代码检测有没有值得推荐的跨语言工具；目前只沿用各语言工具
+  - 待补调研：日志字段名用 OpenTelemetry 语义约定的名称，还是项目自定的 snake_case 名称
+  - 跨语言自定义规则引擎（如 Semgrep）是否推荐、许可证口径，交 25 和 27 统一定
+  - 内部注释能否用中文、公开 SDK 文档是否必须英文，交 05 定
+  - RFC 9557 把 `Z` 的含义改成「当地偏移未知」后，各语言时间库的输出是否需要调整，未逐一核实
+  - golangci-lint nolintlint 的配置项名称未核实

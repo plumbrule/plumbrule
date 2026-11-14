@@ -1,0 +1,539 @@
+id: "32"
+slug: local-agent-runtime
+title: 在本机安全运行编码 Agent
+summary: 给在自己电脑、服务器或机房里运行 Claude Code、Codex 这类编码 Agent 的人：各系统怎么隔离、网络怎么断、密钥怎么不给 Agent、进程怎么收干净、本机 HTTP 服务怎么防，以及上线前要跑哪些攻击测试。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - macOS、Windows、Linux 上运行编码 Agent 的隔离方案选择
+    - WSL2 加固
+    - 默认断网加出口代理
+    - 凭证不进 Agent 所在环境
+    - 取消、超时时整组回收子进程
+    - 本机 HTTP 服务（控制接口、开发服务器、本机 MCP 服务）的防护
+    - 隔离效果的攻击测试清单
+  excludes:
+    - { what: AGENTS.md、Agent 权限边界、交付证据、Agent 不得自我验收, see: "23" }
+    - { what: 密钥管理与扫描、TLS、SSRF、SBOM、签名与来源证明等通用安全条款, see: "25" }
+    - { what: 登录、令牌、授权模型, see: "19" }
+    - { what: 依赖镜像仓库、Vault 等中间件选型, see: "18" }
+    - { what: 服务部署、容器镜像发布、可观测性、告警, see: "26" }
+    - { what: 桌面应用的打包、签名、自启动与更新, see: "31" }
+    - { what: Docker Desktop、OrbStack 等商用许可的合规口径, see: "27" }
+    - { what: 模型网关、模型接入与数据分级, see: "24" }
+overview: |
+  1. **命令要在外层隔离里跑。** 无人值守、跳过审批或处理来路不明的仓库时，Agent 和它生成的命令放进容器或虚拟机，不在宿主上直接跑。
+  2. **自带沙箱只是第二道防线。** Claude Code 的沙箱只管 shell 命令，文件工具、hooks、MCP 服务都在沙箱外；原生 Windows 上它不进沙箱。Codex 在 macOS 用 Seatbelt，Linux 和 WSL2 用 bubblewrap 加 seccomp，原生 Windows 优先用 MXC。
+  3. **各系统的推荐做法：** Linux 用 rootless 容器（Podman）；macOS 用 Linux 虚拟机（Lima），不单靠 `sandbox-exec`，它已有弃用提示；Windows 用专用 WSL2 发行版，关掉自动挂载 Windows 盘和 Windows 互操作。
+  4. **默认断网，联网只走出口代理。** 只设 `HTTP_PROXY` 或域名白名单不算隔离；直连 IP、IPv6、UDP、本机回环、局域网、云元数据地址都要实测封住。
+  5. **长期密钥不进 Agent 的环境。** 不挂家目录、`~/.ssh`、钥匙串、`docker.sock`；模型密钥在宿主侧代理注入；默认不给推送权限。
+  6. **取消要收干净。** 回收整个容器、虚拟机、cgroup 或 Job Object，确认进程数为零；只杀父进程不够。
+  7. **隔离不可用就拒绝运行**，不降级到裸机重试，也不让用户关杀毒软件。
+  8. **本机 HTTP 服务只监听回环地址，并且要鉴权、校验 Host 和 Origin。** 监听回环地址不等于有了身份认证。
+  9. **用攻击测试证明边界。** 每种运行方式上线前跑一遍清单，系统、运行时或 Agent 升级后重跑。
+rules:
+  # ── 总原则 ──
+  - id: RUN-001
+    title: 无人值守、跳过逐条审批或处理不可信仓库时，Agent 和它生成的命令必须在容器或虚拟机里运行，不在宿主上直接运行
+    level: hard
+    check: semi
+    how: 启动脚本检查自身运行在容器或虚拟机中（如 `systemd-detect-virt`、容器运行时标记），检查不通过就退出；评审时核对启动方式
+    applies: [kind:agent]
+    why: Agent 的命令来自模型输出，可能被提示注入操纵；在宿主上跑，一条错命令就能读走密钥或删掉用户文件。
+    detail: |
+      - 交互使用、逐条审批命令时，可以在宿主上运行并开启引擎自带沙箱，但要清楚它的覆盖范围（见 RUN-002）。
+      - 外层隔离指容器或虚拟机；专用系统用户、`child_process` 加 `kill` 都不算隔离。
+    sources: [S01, S03]
+    see: ["23"]
+  - id: RUN-002
+    title: 不把引擎自带的沙箱当唯一防线；按它实际覆盖的范围补外层隔离
+    level: hard
+    check: manual
+    how: 评审时对照引擎官方文档，逐项列出沙箱覆盖和不覆盖的工具（shell、文件工具、hooks、MCP、联网工具），不覆盖的部分要有外层隔离或权限设置兜底
+    applies: [kind:agent]
+    why: Claude Code 官方说明其沙箱只管 shell 命令，文件读写工具、联网工具、hooks、本机 MCP 服务都在沙箱外，原生 Windows 上命令完全不进沙箱。
+    detail: |
+      - Claude Code：macOS 用 Seatbelt，Linux 和 WSL2 用 bubblewrap（不支持 WSL1），原生 Windows 不支持沙箱。沙箱里的 `denyRead` 挡不住 Read 工具，`allowedDomains` 也管不住 WebFetch。
+      - Codex：macOS 用 `sandbox-exec`，Linux 和 WSL2 默认用 bubblewrap 加 seccomp（不支持 WSL1），原生 Windows 优先 MXC，其次 elevated、unelevated。
+      - 这些实现变化快，升级后重新核对文档并重跑攻击测试。
+    sources: [S01, S03, S04]
+  - id: RUN-003
+    title: 沙箱、容器运行时或出口代理不可用时拒绝运行，不自动降级到裸机重试
+    level: hard
+    check: auto
+    how: 故障注入测试：停掉容器运行时、关闭 user namespace、停掉代理，断言任务报错退出而不是在宿主上执行；Claude Code 设置 `allowUnsandboxedCommands` 为 false
+    applies: [kind:agent]
+    why: 「隔离失败就裸跑」等于没有隔离；攻击者只要让隔离失败一次就能拿到宿主权限。
+    detail: |
+      Claude Code 默认允许命令在沙箱里失败后带 `dangerouslyDisableSandbox` 重试；关闭 `allowUnsandboxedCommands` 后才会忽略这个参数。`excludedCommands` 里的命令不受沙箱限制，按完整权限看待。
+    sources: [S01]
+  - id: RUN-004
+    title: 跳过权限审批的开关（`--dangerously-skip-permissions`、`--yolo`、`danger-full-access`）只能在断网或出口受控的一次性隔离环境里使用
+    level: hard
+    check: auto
+    how: CI 或启动脚本扫描 Agent 启动参数和配置，在非隔离环境出现这些开关时拒绝启动
+    applies: [kind:agent]
+    why: 这些开关同时去掉审批和沙箱，外层再有一个漏洞就是宿主被完全控制。
+    sources: [S01, S03]
+    see: ["23"]
+  - id: RUN-005
+    title: 非交互运行 Codex 需要写文件时，显式指定 `--sandbox workspace-write`，并保持默认关网
+    level: soft
+    check: auto
+    how: 扫描启动脚本参数；检查配置里 `network_access` 是否被打开并有理由
+    applies: [kind:agent]
+    why: 官方建议非交互运行用 workspace-write；这个模式默认不联网，只有在配置里打开才联网。
+    sources: [S03, S05]
+  - id: RUN-006
+    title: 处理外部或不可信仓库时，不自动加载仓库里的 Agent 配置（如 `.claude/settings.json`、`.mcp.json`、`.codex/`、hooks）
+    level: hard
+    check: semi
+    how: 启动前扫描工作区里的 Agent 配置文件并列出来；Codex 把该项目设为 `trust_level = "untrusted"`；Claude Code 不对该目录确认信任
+    applies: [kind:agent]
+    why: 仓库里的 hooks 和 MCP 配置会在 Agent 启动时自动执行命令，等于克隆即执行。
+    sources: [S02, S03]
+    see: ["23", "25"]
+  # ── 文件与挂载 ──
+  - id: RUN-007
+    title: 隔离环境不得挂载宿主家目录、`~/.ssh`、SSH agent 套接字、钥匙串或凭据库、云凭据目录、浏览器配置和容器管理套接字（`docker.sock`、Podman 套接字）
+    level: hard
+    check: auto
+    how: 启动前用 `podman inspect` / `docker inspect` / 虚拟机配置检查挂载列表，命中禁止清单就拒绝；在宿主放诱饵文件，测试隔离环境内读不到
+    applies: [kind:agent]
+    why: 挂进去的密钥 Agent 就能读；能访问容器管理套接字基本等于拿到宿主 root。
+    sources: [S16, S17]
+  - id: RUN-008
+    title: 每个任务用独立工作区，优先把仓库克隆到隔离环境内部；必须共享时只挂用户批准的单个项目目录
+    level: soft
+    check: semi
+    how: 启动脚本记录挂载源路径，评审时检查是否只有一个项目目录
+    applies: [kind:agent]
+    why: 原地改用户的工作目录，出错时连同未提交的改动一起毁掉；共享目录越大，可读的东西越多。
+    detail: 成果用补丁、提交或产物目录导出，再由人或宿主侧脚本合入。
+  - id: RUN-009
+    title: 挂载和导出前解析真实路径，拒绝 `..`、绝对路径、符号链接、硬链接和 Windows junction 越出工作区
+    level: hard
+    check: auto
+    how: 用包含符号链接、硬链接、junction 的测试样例跑导出流程，断言工作区外文件没有变化
+    applies: [kind:agent]
+    why: 仓库里放一个指向 `~/.ssh` 的符号链接，就能把挂载或导出变成读写宿主文件。
+  # ── Linux ──
+  - id: RUN-010
+    title: Linux 容器必须 rootless 运行、不用 `--privileged`，丢弃全部 capability、开启 no-new-privileges、保留默认 seccomp，并以非 root 用户运行
+    level: hard
+    check: auto
+    how: 用 `podman inspect` / `docker inspect` 检查 Privileged、CapDrop、SecurityOpt、User；在容器内探测 capability 和 seccomp 状态
+    applies: [kind:agent]
+    why: 容器和宿主共用内核，权限给得越多，逃逸面越大。
+    detail: |
+      概念示例（按实际版本测过再用）：
+      `podman run --rm --network none --cap-drop=ALL --security-opt no-new-privileges --read-only --tmpfs /tmp --user 10001:10001 --mount type=bind,src=<任务目录>,dst=/work <固定 digest 的镜像>`
+    sources: [S16, S17]
+  - id: RUN-011
+    title: 给每个任务设 CPU、内存、进程数、磁盘和运行时长上限
+    level: hard
+    check: auto
+    how: 检查容器或 cgroup 的 `pids.max`、`memory.max`、`cpu.max` 和超时设置；跑进程炸弹、内存打满、磁盘写满测试，断言宿主不受影响
+    applies: [kind:agent]
+    why: 不设上限，一个失控的构建或进程炸弹就能拖垮整台机器。
+    ref_value: 示例里的进程数 256、内存 6 GB、4 核是参考值，按任务类型和机器配置实测后定。
+    sources: [S21]
+  - id: RUN-012
+    title: bubblewrap、Landlock、seccomp 只作辅助层，不单独当高风险任务的边界
+    level: soft
+    check: manual
+    how: 评审隔离方案时确认还有容器或虚拟机、出口代理和资源限制
+    applies: [kind:agent]
+    why: 这些机制只管文件或系统调用的一部分，不管出口审计、资源上限和进程回收。
+    sources: [S18, S20]
+  - id: RUN-013
+    title: 不同信任域（不同客户、不同组织）的代码不在同一宿主的容器里跑，改用独立虚拟机或独立机器
+    level: soft
+    check: manual
+    how: 部署评审时列出每台宿主承载的项目和所属组织
+    applies: [kind:agent, kind:onprem]
+    why: 容器共用宿主内核，内核漏洞就能跨任务；虚拟机才有独立内核边界。
+    sources: [S19]
+  - id: RUN-014
+    title: 把 Agent 跑成 Linux 服务时，个人机用 systemd 用户服务，服务器用专用无登录账号的系统服务，并开启服务加固选项
+    level: soft
+    check: auto
+    how: 用 `systemd-analyze security <服务名>` 检查评分；确认设置了 `NoNewPrivileges`、`ProtectSystem`、`KillMode=control-group`、`TasksMax`、`MemoryMax`
+    applies: [kind:agent, kind:onprem]
+    why: 个人机要由用户自己开关，服务器要无人值守，两者权限和开机策略不同；部分加固选项在用户服务里不生效，要逐项验证。
+    detail: 服务加固和容器隔离是两层，不能互相替代。
+    sources: [S22]
+  # ── macOS ──
+  - id: RUN-015
+    title: macOS 上无人值守运行时，外层用 Linux 虚拟机（如 Lima），不单靠 Seatbelt（`sandbox-exec`）
+    level: soft
+    check: manual
+    how: 评审运行方式，确认 Agent 命令跑在虚拟机里
+    applies: [kind:agent]
+    why: '`sandbox-exec` 运行时会提示已弃用，苹果没有公布移除时间或替代路线；虚拟机能把 Agent 和宿主的钥匙串、家目录、桌面整个隔开。'
+    detail: |
+      - `sandbox-exec` 目前仍可用，Claude Code 和 Codex 都在 macOS 上用它做内层沙箱；它适合当第二道防线。
+      - Apple Silicon 上的新系统可以试用苹果自己的 `container` 工具，先在目标系统上测过。
+    sources: [S06, S01, S03, S07]
+  - id: RUN-016
+    title: 虚拟机和桌面容器工具不得共享整个家目录；检查并关掉默认的宿主目录共享
+    level: hard
+    check: auto
+    how: 检查 Lima 实例配置的 `mounts`、Docker Desktop 的文件共享列表、OrbStack 的宿主集成设置，命中家目录或 `~/Library` 就拒绝启动
+    applies: [kind:agent]
+    why: 不少工具默认把家目录共享进虚拟机，隔离环境里就能读到宿主的密钥和文件。
+    sources: [S07, S10, S09]
+  # ── Windows ──
+  - id: RUN-017
+    title: Windows 上用 Agent 专用的 WSL2 发行版，在 `/etc/wsl.conf` 关闭自动挂载和 Windows 互操作，并实测生效
+    level: hard
+    check: auto
+    how: 检查 `[automount] enabled=false`、`[interop] enabled=false`、`appendWindowsPath=false`；在发行版里执行 `ls /mnt/c`、`cmd.exe`、`powershell.exe`，断言都失败
+    applies: [kind:agent]
+    why: WSL2 默认能读写整个 Windows 盘、直接启动 Windows 程序，不加固就不算隔离。
+    detail: 不借用用户日常用的发行版；在专用发行版里再套 rootless 容器。还要检查 `\\wsl$` 访问、9P 挂载和宿主回环通路。
+    sources: [S11, S13]
+  - id: RUN-018
+    title: WSL 里的工作区放在 Linux 文件系统（ext4），不放 `/mnt/c`
+    level: soft
+    check: auto
+    how: 启动脚本检查工作区路径不以 `/mnt/` 开头
+    applies: [kind:agent]
+    why: 微软说明跨系统访问文件明显更慢，对 node_modules、git、文件监听影响最大；放在 Linux 侧也减少对 Windows 盘的暴露。
+    sources: [S13]
+  - id: RUN-019
+    title: WSL 的 mirrored 网络、DNS 隧道、自动代理只用来改善连通，不当作隔离；出口限制在 WSL 内或代理层另做并实测
+    level: soft
+    check: semi
+    how: 在 NAT 和 mirrored 两种模式、开关 VPN 时分别跑出口负向测试
+    applies: [kind:agent]
+    why: 这些选项让 WSL 更容易连上企业网络，并不限制它能连哪里。
+    sources: [S12]
+  - id: RUN-020
+    title: 需要原生 Windows 命令时，Claude Code 改在 WSL2 里运行；Codex 优先用 MXC，其次 elevated，不把 unelevated 当网络边界
+    level: soft
+    check: manual
+    how: 评审时确认原生 Windows 上的引擎和沙箱模式
+    applies: [kind:agent]
+    why: Claude Code 原生 Windows 命令不进沙箱；Codex 官方说明 unelevated 只做环境层面的断网、不支持禁止读取路径，隔离较弱；MXC 的受控网络允许访问宿主回环服务，要单独测。
+    sources: [S01, S04]
+  - id: RUN-021
+    title: Windows Sandbox 只用于人工短时试验，不当常驻运行环境；使用时在配置文件里关掉网络
+    level: soft
+    check: semi
+    how: 检查 `.wsb` 配置里的网络项
+    applies: [kind:agent]
+    why: Windows Sandbox 关窗即丢状态，并且默认联网。
+    sources: [S14]
+  # ── 网络 ──
+  - id: RUN-022
+    title: 隔离环境默认断网；需要联网时只能经过独立的出口代理，不只靠 `HTTP_PROXY` 环境变量或域名白名单
+    level: hard
+    check: auto
+    how: 在隔离环境内用不走代理的方式（直接 socket、忽略代理变量的工具）连外网，断言连接失败
+    applies: [kind:agent]
+    why: 程序可以无视代理环境变量；只有网络层断开、代理是唯一出口，限制才真正生效。
+    detail: Linux 用 `--network none` 或只通代理的内部网络；虚拟机用虚拟网卡加宿主侧过滤。Claude Code 沙箱也是这个思路：Linux 上单独的网络命名空间，所有连接经本机代理按域名检查。
+    sources: [S01, S03]
+    see: ["25"]
+  - id: RUN-023
+    title: 出口代理必须拦住直连 IP、IPv6、UDP 和自行发起的 DNS、本机回环、局域网、云元数据地址、DNS 重绑定，以及重定向到内网
+    level: hard
+    check: auto
+    how: 攻击测试清单中的网络项（见 RUN-033）全部断言被阻止，并保留代理日志
+    applies: [kind:agent]
+    why: 只按域名放行时，这些都是常见绕过方式；访问云元数据地址能直接拿到云凭据。
+    see: ["25"]
+  - id: RUN-024
+    title: 依赖下载和编码分两个阶段：准备阶段只连内网镜像仓库，编码阶段断网；安装脚本同样在隔离环境里运行
+    level: soft
+    check: semi
+    how: 检查两个阶段的网络配置；在编码阶段跑联网负向测试
+    applies: [kind:agent, kind:onprem]
+    why: 编码阶段网络越少越安全、越稳定；`postinstall` 一类的安装脚本也是不可信代码。
+    detail: 完全离线时，除了语言依赖，还要准备镜像、模型、证书、工具链和代码仓库。
+    see: ["18", "25"]
+  - id: RUN-025
+    title: 不为跑通任务关闭 TLS 校验（如 `NODE_TLS_REJECT_UNAUTHORIZED=0`、`curl -k`、关掉 git 的 sslVerify）；企业根证书以只读方式放进隔离环境
+    level: hard
+    check: auto
+    how: 静态扫描脚本、配置和 Agent 生成的命令，命中这些写法就拒绝
+    applies: [kind:agent]
+    why: 关掉校验后流量可被中间人篡改，也会掩盖代理配置问题。
+    sources: [S23]
+    see: ["25"]
+  - id: RUN-026
+    title: 在企业电脑或机房部署前，先自检代理、私有根证书、虚拟化是否可用和离线镜像；被策略禁止时报告「不支持」，不要求用户关闭杀毒或安全软件
+    level: soft
+    check: manual
+    how: 部署清单里有自检步骤和结果记录
+    applies: [kind:agent, kind:onprem]
+    why: 企业环境常禁用虚拟化、做 TLS 拦截；没有自检就只会得到说不清原因的失败。
+    sources: [S12, S23]
+  # ── 凭证 ──
+  - id: RUN-027
+    title: 长期密钥（模型 API 密钥、代码仓库令牌、云凭据）不进 Agent 所在的隔离环境，不放环境变量、命令行参数和文件
+    level: hard
+    check: auto
+    how: 在宿主侧放诱饵令牌，测试隔离环境内的 `/proc/*/environ`、进程参数、挂载和日志里都找不到；对日志跑密钥扫描
+    applies: [kind:agent]
+    why: 进了环境的密钥 Agent 就能读、能外发，也会出现在进程列表和日志里。
+    detail: 模型请求需要密钥时，由宿主侧代理注入；必须下发时只给短期、限范围的令牌。
+    sources: [S24]
+    see: ["25", "19"]
+  - id: RUN-028
+    title: 默认不给 Agent 推送权限；必须推送时用限定仓库和分支的短期令牌，并配合分支保护
+    level: hard
+    check: semi
+    how: 检查给 Agent 的令牌权限范围；分支保护禁止直接推送受保护分支
+    applies: [kind:agent]
+    why: 「短期」不等于「低权限」，一个全仓库写令牌在有效期内就能推敏感分支、删标签。
+    sources: [S25]
+    see: ["23", "03"]
+  - id: RUN-029
+    title: 宿主侧的长期凭据放系统凭据库（钥匙串、Windows 凭据管理器或 DPAPI、Secret Service）或机房的密钥服务，不放 `~/.env` 等明文文件
+    level: soft
+    check: semi
+    how: 密钥扫描检查家目录和项目目录的明文凭据文件
+    applies: [kind:agent]
+    why: 明文文件一旦被挂载或被别的程序读到就泄露了。
+    sources: [S24]
+    see: ["25"]
+  - id: RUN-030
+    title: 控制 Agent 能读的文件范围；拿不到密钥，Agent 也能把读到的敏感文件当提示词发给模型
+    level: soft
+    check: manual
+    how: 评审时列出隔离环境里可读的目录，确认没有与任务无关的敏感数据
+    applies: [kind:agent]
+    why: 模型通道本身就是合法出口，只有限制可读范围才挡得住这条路。
+    see: ["24", "25"]
+  # ── 进程与清理 ──
+  - id: RUN-031
+    title: 取消或超时时回收整个隔离单元（容器、虚拟机、cgroup 或 Job Object），并确认进程数为零；不能只杀父进程
+    level: hard
+    check: auto
+    how: 测试里用 `setsid`、`nohup`、后台子进程、父进程崩溃等方式留下后代进程，取消后断言容器已删除、cgroup 的 `pids.current` 为 0 或 Job Object 已空
+    applies: [kind:agent]
+    why: Agent 起的后台进程在父进程被杀后会继续运行，继续占资源甚至继续外发数据。
+    detail: |
+      - Linux：删除容器，或用 cgroup / systemd scope（`KillMode=control-group`）。
+      - Windows 原生进程：Job Object 加 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，禁止子进程脱离；Job Object 不隔离文件和网络。
+      - macOS：在虚拟机里终止，超时后停止或销毁虚拟机；宿主上的进程组只用来回收启动器。
+    sources: [S15, S21]
+  - id: RUN-032
+    title: 任务结束后清理工作区、缓存和临时文件；日志设大小上限和保留期
+    level: soft
+    check: auto
+    how: 任务结束后检查工作区目录和磁盘占用回到基线
+    applies: [kind:agent]
+    why: 个人电脑磁盘有限，残留的工作区和缓存还可能留着敏感数据。
+  # ── 攻击测试 ──
+  - id: RUN-033
+    title: 每种运行方式上线前跑一遍攻击测试清单，并在系统、内核、容器运行时或 Agent 升级后重跑
+    level: hard
+    check: semi
+    how: 测试用假密钥、假仓库、内网假服务，断言「被阻止」；记录系统版本、内核、运行时和 Agent 版本、期望与实际结果
+    applies: [kind:agent]
+    why: 隔离配置写对了不等于生效；没有阻断证据，就不能说是隔离的。
+    detail: |
+      通用项（每个系统都要过）：
+      - 读宿主 `~/.ssh` 和家目录里的诱饵文件
+      - 在 `/proc/*/environ`、进程参数里找诱饵令牌
+      - 访问公网域名、直连公网 IP、IPv6、UDP、DNS over HTTPS
+      - 访问本机回环、宿主网关、其他任务的服务、169.254.169.254
+      - 代理返回 302 到内网、DNS 重绑定、IPv4/IPv6 回退
+      - 通过符号链接、`..`、硬链接、junction 访问工作区外
+      - `setsid`、`nohup`、后台子进程后取消；父进程崩溃后的回收
+      - 依赖安装脚本静默联网、读密钥
+      - 访问容器管理套接字、SSH agent
+      - 进程数、内存、文件句柄、磁盘打满
+      - Agent 改自己的隔离配置、出口规则、证书文件
+      - 升级后 hooks、MCP、插件自动运行时是否仍在隔离内
+
+      macOS：虚拟机内读宿主钥匙串、`~/.ssh`、剪贴板、浏览器 Cookie；检查无意共享的家目录。
+
+      Windows：WSL 内 `ls /mnt/c`、`cmd.exe`、`powershell.exe`；NAT 与 mirrored 模式、开关 VPN 下的出口；junction 和 UNC 路径；企业策略禁用 WSL 时报「不支持」而不是回退裸机。
+
+      Linux：capability、宿主 PID、`/proc/1/root`、挂载传播探测；关闭 AppArmor/SELinux/seccomp 或 user namespace 不可用时拒绝运行；`/run/user/<uid>`、宿主凭据服务套接字没有被挂入。
+  - id: RUN-034
+    title: Agent 不能修改自己的隔离配置、出口规则、镜像和更新程序；这些文件只读挂载或放在隔离环境之外
+    level: hard
+    check: auto
+    how: 测试在隔离环境里写这些文件，断言失败且宿主侧没有变化
+    applies: [kind:agent]
+    why: 能改自己笼子的 Agent 等于没有笼子。
+    see: ["23"]
+  - id: RUN-035
+    title: 固定隔离环境的镜像（按 digest）和 Agent 版本；升级前先过兼容和攻击测试
+    level: soft
+    check: auto
+    how: 启动脚本只接受按 digest 指定的镜像；检查 Agent 版本是否在已测试列表里
+    applies: [kind:agent]
+    why: 引擎的沙箱实现和参数变化快，没测过的新版本可能悄悄改变边界。
+    see: ["25"]
+  - id: RUN-036
+    title: 需要图形界面、GPU、Docker 构建或平台签名的任务用单独的受限配置并人工批准，不抬高默认环境的权限
+    level: soft
+    check: manual
+    how: 列出每种特殊配置及其批准记录
+    applies: [kind:agent]
+    why: 为个别任务放开的权限，一旦进默认配置，所有任务都带上了。
+    detail: 需要 `docker build` 时用独立的构建环境，不把容器管理套接字给 Agent；浏览器测试的沙箱冲突用单独配置解决，不对所有环境关沙箱。
+  - id: RUN-037
+    title: 在个人电脑上，无人值守运行要用户明确开启，可以随时一键停止，重启或睡眠唤醒后不自动恢复
+    level: soft
+    check: manual
+    how: 安装后检查默认状态为关闭；重启后检查没有自动开始执行
+    applies: [kind:agent]
+    why: 用户的电脑归用户控制；悄悄恢复的无人值守执行会在用户不知情时动文件和网络。
+  # ── 本机 HTTP 服务 ──
+  - id: RUN-038
+    title: 本机 HTTP 服务（Agent 控制接口、本机 MCP 服务、开发服务器）只监听 127.0.0.1 或 ::1，不监听 0.0.0.0
+    level: hard
+    check: auto
+    how: 用 `ss -ltnp`（Linux）、`lsof -iTCP -sTCP:LISTEN`（macOS）、`netstat -ano`（Windows）检查监听地址
+    applies: [kind:agent, platform:desktop]
+    why: 监听所有网卡，同一网络里的任何机器都能连上来。
+    sources: [S26]
+    see: ["31"]
+  - id: RUN-039
+    title: 本机 HTTP 控制接口必须用不可预测的令牌鉴权，并校验 Host 和 Origin，防 DNS 重绑定和跨站请求；不用 `Access-Control-Allow-Origin *`
+    level: hard
+    check: auto
+    how: 测试无令牌、错误 Host、外部 Origin、跨域预检的请求都被拒绝
+    applies: [kind:agent, platform:desktop]
+    why: 只监听回环地址不等于有身份认证；任何网页都能通过 DNS 重绑定或跨站请求打到本机端口。MCP 规范要求本机 HTTP 服务校验 Origin。
+    sources: [S26]
+    see: ["31", "19"]
+  - id: RUN-040
+    title: 能不开端口就不开：优先用标准输入输出、框架自带的进程间通信或 Unix 套接字；开了端口的，GET 请求不得有副作用，危险操作要用户确认
+    level: soft
+    check: semi
+    how: 评审时列出所有监听端口及理由；测试 GET 请求不改变状态
+    applies: [kind:agent, platform:desktop]
+    why: 少一个端口就少一个攻击面；GET 有副作用时，一个图片链接就能触发操作。
+    sources: [S26]
+    see: ["31"]
+choices:
+  - category: Linux 隔离
+    pick: rootless Podman 容器
+    alternatives:
+      - { name: Docker Engine rootless 模式, when: 团队已经用 Docker 工具链 }
+      - { name: gVisor, when: 风险更高、要减少内核暴露面，且已测过兼容（浏览器、ptrace 等可能冲突） }
+      - { name: KVM 虚拟机, when: 跑不同信任域的代码，需要独立内核 }
+    avoid:
+      - { name: 把 rootful Docker 套接字给 Agent, why: 能控制容器运行时基本等于宿主 root }
+      - { name: "--privileged 容器", why: 去掉了几乎所有隔离 }
+    license: Podman、gVisor 为 Apache-2.0（未逐一核实官方 LICENSE）
+    sources: [S16, S17, S19]
+  - category: Linux 轻量辅助沙箱
+    pick: bubblewrap，作为容器内或宿主上的第二层
+    alternatives:
+      - { name: Landlock + seccomp, when: 只需限制文件访问和系统调用，且内核版本支持 }
+    avoid:
+      - { name: 单靠 bubblewrap 当完整隔离, why: 不管出口审计、资源上限和进程回收 }
+    sources: [S18, S20]
+  - category: macOS 隔离
+    pick: Lima Linux 虚拟机，仓库克隆到虚拟机内部
+    alternatives:
+      - { name: 苹果 container 工具, when: Apple Silicon 加新系统，且已在目标机器上测过 }
+      - { name: OrbStack, when: 个人使用；商业使用要购买授权，关掉不需要的宿主集成 }
+      - { name: Docker Desktop, when: 公司已有订阅；员工超过 250 人或年收入超过 1000 万美元的组织要付费订阅 }
+    avoid:
+      - { name: 单靠 sandbox-exec（Seatbelt）, why: 有弃用提示且无公开替代路线，只适合当第二道防线 }
+      - { name: 把整个家目录共享进虚拟机, why: 隔离环境里能读到宿主的密钥和文件 }
+    license: Lima 为 Apache-2.0（未核实官方 LICENSE）；OrbStack 闭源，商业使用付费；Docker Desktop 大企业须订阅。合规口径见 27。
+    notes: 不要把 Docker Desktop 或 OrbStack 当机房里无人值守的服务。
+    sources: [S07, S08, S09, S10, S06]
+  - category: Windows 隔离
+    pick: 专用 WSL2 发行版（关自动挂载和互操作）+ 发行版内 rootless 容器
+    alternatives:
+      - { name: Hyper-V 专用虚拟机, when: 企业策略不允许 WSL，或要更强的隔离 }
+      - { name: Codex 原生 MXC 沙箱, when: 必须跑原生 Windows 工具链，系统版本支持 }
+      - { name: Windows Sandbox, when: 人工短时试验，关掉网络 }
+    avoid:
+      - { name: 用户日常用的、默认挂着 /mnt/c 的发行版, why: 能读写整个 Windows 盘、启动 Windows 程序 }
+      - { name: Codex unelevated 模式当网络边界, why: 官方说明它只做环境层面的断网，隔离较弱 }
+    license: WSL 开源部分为 MIT（未核实），系统组件按 Windows 许可
+    sources: [S11, S13, S04, S14]
+  - category: 网络出口
+    pick: 网络层断开（容器 `--network none`、只通代理的内部网络或虚拟机虚拟网卡）+ 独立出口代理
+    alternatives:
+      - { name: Linux nftables 加策略路由, when: 需要按网段或端口精细控制 }
+      - { name: Anthropic sandbox-runtime, when: 参考它的实现，或给引擎内层沙箱用 }
+    avoid:
+      - { name: 只设 HTTP_PROXY, why: 程序可以无视代理变量直连 }
+      - { name: 只做域名白名单, why: 直连 IP、IPv6、DNS 重绑定、重定向都能绕过 }
+    notes: 具体代理软件的选型待补调研。
+    sources: [S01, S27]
+  - category: 进程回收
+    pick: Linux 用容器运行时或 cgroup v2；Windows 原生进程用 Job Object；macOS 终止虚拟机
+    alternatives:
+      - { name: POSIX 进程组, when: 只回收宿主上的启动器进程 }
+    avoid:
+      - { name: 只 kill 父进程 PID 或只调 child.kill(), why: 后台和脱离的子进程会继续运行 }
+    sources: [S15, S21]
+  - category: 引擎内层沙箱
+    pick: Claude Code 开启沙箱并把 allowUnsandboxedCommands 设为 false；Codex 用 workspace-write 且默认关网
+    avoid:
+      - { name: "--dangerously-skip-permissions、--yolo 在宿主上使用", why: 同时去掉审批和沙箱 }
+    sources: [S01, S03]
+  - category: 宿主侧凭据存储
+    pick: macOS 钥匙串；Windows 凭据管理器或 DPAPI；Linux 桌面用 Secret Service，服务器用集中的密钥服务（见 18、25）
+    avoid:
+      - { name: "~/.env 等明文文件放长期密钥", why: 被挂载或被其他程序读到就泄露 }
+    sources: [S24]
+antipatterns:
+  - { bad: 用 child_process.spawn 加 kill(pid) 当沙箱, instead: 用容器、虚拟机、cgroup 或 Job Object 隔离并整组回收 }
+  - { bad: 给 Agent 建个专用系统用户就当隔离好了, instead: 专用用户之外再加容器或虚拟机，以及文件和网络限制 }
+  - { bad: 配了 HTTP_PROXY 就认为 Agent 不能直接联网, instead: 网络层断开，代理是唯一出口，并实测直连被拒 }
+  - { bad: 为了支持 docker build 把 docker.sock 挂给 Agent, instead: 用独立的构建环境 }
+  - { bad: WSL 里在 /mnt/c 下编译，并保留 Windows 互操作, instead: 专用发行版，工作区放 ext4，关自动挂载和互操作 }
+  - { bad: 沙箱启动失败就自动在宿主上重试, instead: 报错退出，修好隔离再跑 }
+  - { bad: 企业电脑上隔离跑不起来，就让用户关杀毒或关 SELinux, instead: 报告不支持，交给管理员处理 }
+  - { bad: 本机控制接口只监听 127.0.0.1 就不做鉴权, instead: 令牌鉴权加 Host、Origin 校验 }
+  - { bad: 为了「完全离线」只缓存了 npm 包, instead: 同时准备镜像、模型、证书、工具链和代码仓库的内网来源 }
+  - { bad: 自己从零写三套系统沙箱, instead: 复用 Podman、Lima、WSL2 等现成方案，只写薄的适配层 }
+sources:
+  - { id: S01, title: "Claude Code: Sandboxing", url: "https://code.claude.com/docs/en/sandboxing", publisher: Anthropic, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Claude Code: Settings", url: "https://code.claude.com/docs/en/settings", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "Codex: Agent approvals & security", url: "https://learn.chatgpt.com/docs/agent-approvals-security", publisher: OpenAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Codex: Windows sandbox", url: "https://learn.chatgpt.com/docs/windows/windows-sandbox", publisher: OpenAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "Codex: Non-interactive mode", url: "https://learn.chatgpt.com/docs/non-interactive-mode", publisher: OpenAI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "apple/containerization issue #737: sandbox-exec deprecation", url: "https://github.com/apple/containerization/issues/737", publisher: GitHub 社区, date: 2026-05-12, kind: community, checked: 2026-11-14 }
+  - { id: S07, title: Lima, url: "https://github.com/lima-vm/lima", publisher: Lima, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: Apple container, url: "https://github.com/apple/container", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: OrbStack FAQ, url: "https://docs.orbstack.dev/faq", publisher: OrbStack, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: Docker pricing FAQ, url: "https://www.docker.com/pricing/faq/", publisher: Docker, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "WSL: Advanced settings configuration", url: "https://learn.microsoft.com/en-us/windows/wsl/wsl-config", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "WSL: Networking", url: "https://learn.microsoft.com/en-us/windows/wsl/networking", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "WSL: Working across file systems", url: "https://learn.microsoft.com/en-us/windows/wsl/filesystems", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: Windows Sandbox overview, url: "https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Job Objects, url: "https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: podman-run, url: "https://docs.podman.io/en/latest/markdown/podman-run.1.html", publisher: Podman, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Docker: Rootless mode", url: "https://docs.docker.com/engine/security/rootless/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: bubblewrap, url: "https://github.com/containers/bubblewrap", publisher: containers, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: gVisor, url: "https://github.com/google/gvisor", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Linux kernel: Landlock", url: "https://docs.kernel.org/userspace-api/landlock.html", publisher: Linux kernel, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "Linux kernel: Control Group v2", url: "https://docs.kernel.org/admin-guide/cgroup-v2.html", publisher: Linux kernel, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: systemd.exec, url: "https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html", publisher: systemd, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Claude Code: Enterprise network configuration", url: "https://code.claude.com/docs/en/network-config", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Microsoft: Handling passwords", url: "https://learn.microsoft.com/en-us/windows/win32/SecBP/handling-passwords", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "GitHub: About protected branches", url: "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "MCP: Transports — security warning", url: "https://modelcontextprotocol.io/specification/2025-06-18/basic/transports", publisher: Model Context Protocol, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S27, title: anthropics/sandbox-runtime, url: "https://github.com/anthropics/sandbox-runtime", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - macOS sandbox-exec：运行时提示已弃用，但只有社区 issue 记录，苹果没有公开的移除时间或替代路线；Claude Code 和 Codex 仍在用。每次 macOS 大版本发布时复核。
+  - 「WSL 容器（wslc）已正式发布」只有发布列表页作为来源，未核实；是否作为 Windows 上的备选待验证。
+  - 苹果 container 工具的系统和芯片要求（报告称仅 Apple Silicon 加 macOS 26 及以后）未核实。
+  - Podman、gVisor、Lima、bubblewrap、sandbox-runtime、WSL 的许可证未逐一按官方 LICENSE 核实（报告称 bubblewrap 为 LGPL-2.1+，待查）。
+  - Lima 默认把家目录只读共享进虚拟机、Docker Desktop 默认共享目录的现状未逐一核实，RUN-016 的检查项需按当前版本确认。
+  - Claude Code 的 --bare 是否跳过钥匙串和 OAuth 登录、仓库配置的信任机制细节未核实。
+  - 待补调研：国内网络环境——国内镜像源、企业代理和 TLS 拦截、访问境外模型服务受限时的模型网关接入。
+  - 待补调研：国产化——麒麟、统信等国产系统和国产 CPU 上 rootless 容器、user namespace 是否默认可用，WSL 之外的替代方案。
+  - 待补调研：出口代理的具体软件选型（含许可证、离线部署）。
+  - 待补调研：原生 Windows 的出口限制机制（WFP）和 macOS 的 pf / Network Extension 做法。
+  - 待补调研：Claude Code、Codex 的遥测外连如何关闭，接入内网兼容模型网关时的功能兼容（工具调用、流式输出、鉴权）。
+  - 隔离方案的启动速度、文件读写和编译性能没有实测数据；报告里的性能门槛（热启动、取消耗时、编译变慢比例）是建议值，未写进规则。
