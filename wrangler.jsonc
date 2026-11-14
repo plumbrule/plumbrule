@@ -10,6 +10,9 @@
     "not_found_handling": "404-page"
   },
 
+  // 绑定自定义域名（域名在同一 Cloudflare 账号下），部署时自动建 DNS 记录和证书。
+  "routes": [{ "pattern": "plumbrule.dev", "custom_domain": true }],
+
   // 站点只有一个公开域名，不再从 workers.dev 和预览地址提供重复内容。
   "workers_dev": false,
   "preview_urls": false
