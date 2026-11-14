@@ -1,0 +1,674 @@
+id: "14"
+slug: jvm
+title: Java 与 Kotlin（服务端）
+summary: JVM 服务端项目的 JDK 版本与发行版、Maven / Gradle 构建基线、依赖锁定、格式化与静态检查、架构测试、测试、日志、Spring Boot、虚拟线程、数据库访问与迁移工具、依赖漏洞扫描怎么做。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - JDK 版本策略（LTS）、发行版选择与许可
+    - Maven / Gradle 的服务端基线：Wrapper、BOM、版本目录、依赖锁定与校验、仓库白名单
+    - Spring Boot 版本线、BOM 与兼容矩阵；Kotlin 与 Gradle 的兼容组合
+    - Spotless、google-java-format、Checkstyle、Error Prone、SpotBugs、ktlint、detekt 的用法
+    - ArchUnit 架构测试
+    - JUnit、AssertJ、Mockito / MockK、Testcontainers 的 Java / Kotlin 用法
+    - SLF4J 日志与异常处理的 JVM 写法
+    - 虚拟线程、原生镜像的启用前提
+    - JDBC / JPA / jOOQ / MyBatis 的写法与选型；Flyway / Liquibase 选型与许可
+    - OWASP Dependency-Check、OSV-Scanner、CycloneDX 插件在 JVM 构建里的接法
+  excludes:
+    - { what: 格式化与 lint 的通用原则、日志字段、错误传播、超时与重试的跨语言约定, see: "02" }
+    - { what: 模块划分、依赖方向、outbox、幂等消费等架构原则, see: "01" }
+    - { what: 测试分层、接真实组件、覆盖率口径、断网验收, see: "04" }
+    - { what: 接口风格、OpenAPI、错误响应格式（RFC 9457）、接口兼容检查, see: "16" }
+    - { what: 数据建模、迁移原则、事务与隔离级别、备份恢复, see: "17" }
+    - { what: 消息队列、缓存、任务调度与工作流（Quartz、XXL-JOB、Camunda 等）选型, see: "18" }
+    - { what: 登录、JWT 校验、密码哈希、授权与多租户隔离, see: "19" }
+    - { what: POI、PDFBox、Tika 等不可信文件的解析, see: "20" }
+    - { what: 安全扫描工具总体选型、SBOM、签名、密钥管理, see: "25" }
+    - { what: 容器镜像、健康检查、停机编排、可观测性（OTel）, see: "26" }
+    - { what: 开源许可证口径与许可扫描工具, see: "27" }
+    - { what: Android 的 Gradle / AGP 基线与 Kotlin 移动端写法, see: "29" }
+overview: |
+  1. **JDK 用仍在支持期的 LTS。** 非 LTS 版本只用于试验；发布构建不开 preview。编译目标用 `--release` 或 toolchain 固定，部署清单写明发行版、大版本和 CPU 架构。
+  2. **发行版默认 Eclipse Temurin，Oracle JDK 先看许可。** Oracle JDK 的免费条款（NFTC）有期限：旧 LTS 的后续更新会转回需要付费订阅的 OTN 许可，不能默认当成免费。
+  3. **构建可复现。** Wrapper 入库并校验；Maven 用 BOM 和固定插件版本，Gradle 用版本目录加锁文件；不用 SNAPSHOT、`+`、版本范围；依赖只从批准的仓库来。断网交付的项目要真的断网构建一次。
+  4. **版本组合按官方矩阵走。** Spring Boot 的 BOM 管它管的依赖，不逐个追最新；Spring Cloud（含 Spring Cloud Alibaba）、Kotlin 插件和 Gradle 的组合都要在官方兼容表内。Spring Boot 版本线停止开源支持前要升级。
+  5. **格式和检查交给工具。** Java：Spotless + google-java-format，加 Error Prone（或 SpotBugs）查缺陷；Kotlin：ktlint + detekt。存量问题用基线文件记账。
+  6. **架构规则写成 ArchUnit 测试。** 依赖方向和「领域代码不依赖框架」在 CI 里跑，不只写在文档里。
+  7. **测试用真库。** JUnit + AssertJ，集成测试用 Testcontainers 起同款数据库，不拿 H2 冒充 PostgreSQL 或国产库；Mockito / MockK 只替代不可控的外部边界。
+  8. **日志只依赖 SLF4J。** 不用 `System.out` 和 `printStackTrace`；不吞异常，不吞中断。
+  9. **默认 Spring MVC。** 虚拟线程和原生镜像要先在真实负载下对比并准备回滚；连接池和下游容量照样要限。
+  10. **数据库：一个服务一套访问方式，SQL 全部参数化，生产不让 Hibernate 改表。** 迁移默认 Flyway 社区版；Liquibase 从 5.0 起改为 FSL 许可（不是 OSI 开源），选用前核对。
+  11. **依赖漏洞扫描进 CI。** OWASP Dependency-Check 或 OSV-Scanner；断网环境要同步漏洞库并记录更新日期。
+rules:
+  # ── JDK 版本与发行版 ──
+  - id: JVM-001
+    title: 生产构建和运行用的 JDK 必须是仍在支持期内的 LTS 版本；非 LTS 版本不作服务端默认
+    level: hard
+    check: auto
+    how: 构建插件检查 JDK 版本（Maven Enforcer 的 `requireJavaVersion`，Gradle toolchain 的 `languageVersion`）；CI 打印 `java -version`，与发行版的支持路线图比对
+    applies: [lang:jvm]
+    why: 非 LTS 版本只维护到下一个版本发布，大约半年后就收不到安全补丁；LTS 有多年的更新。
+    detail: |
+      - 新服务默认用最新的 LTS；客户环境或厂商组件只认证了上一个 LTS 时，可以用上一个，但要在它停止支持前排期升级。
+      - Java 的 LTS 大约每两年一个，支持期以所用发行版的路线图为准，不同厂商的期限不同。
+    sources: [S01, S03]
+  - id: JVM-002
+    title: 发布构建不得启用 JDK 的预览特性（`--enable-preview`）和孵化模块（`jdk.incubator.*`）
+    level: hard
+    check: auto
+    how: CI 扫描构建文件、启动脚本和容器 entrypoint 中的 `--enable-preview` 和 `jdk.incubator`；发现即失败
+    applies: [lang:jvm]
+    why: 预览和孵化特性在后续版本里可能改变或删除；用了预览特性编译的类文件只能在同一个 JDK 大版本上运行，升级 JDK 时会直接启动失败。
+    detail: 想试用新特性，放在不发布的实验分支或独立的试验项目里。
+  - id: JVM-003
+    title: 编译目标版本用 `--release` 或构建工具的 toolchain 固定，不依赖开发机上恰好装了哪个 JDK
+    level: hard
+    check: auto
+    how: 检查 Maven 的 `maven.compiler.release` 或 Toolchains 配置、Gradle 的 `java.toolchain.languageVersion`（Kotlin 用 `jvmToolchain`）；CI 在没有预装其他 JDK 的镜像里构建
+    applies: [lang:jvm]
+    why: 只设 `-source` / `-target` 时，高版本 JDK 编译出的代码仍可能调用低版本里没有的 API，部署后才报 `NoSuchMethodError`。
+    detail: |
+      - Gradle 自身运行用的 JDK（daemon JDK）和编译代码用的 toolchain 是两回事，分别配置。
+      - 断网环境里关闭 toolchain 的自动下载，所需 JDK 预置在构建镜像中。
+    sources: [S08, S09]
+  - id: JVM-004
+    title: 部署清单写明 JDK 的发行版、大版本和 CPU 架构；同一产品的构建、测试、生产用同一发行版
+    level: soft
+    check: semi
+    how: 评审部署清单或镜像元数据；CI 从运行镜像中读出 `java -version` 的厂商和版本，与清单比对
+    applies: [lang:jvm, kind:service]
+    why: 不同发行版的补丁节奏、支持期和许可不同；只写「Java 21」时，出了问题查不到实际运行的是谁家的哪一版。
+    detail: 要交付到 ARM 服务器或国产操作系统的，JNI 原生库、字体和监控 Agent 也要在目标架构上实际跑过，「Java 跨平台」不等于原生库跨平台。
+    see: ["26"]
+  - id: JVM-005
+    title: 使用 Oracle JDK 前必须核对所用版本当前适用的许可条款；条款要求付费订阅时，要有订阅或换用其他 OpenJDK 发行版
+    level: hard
+    check: semi
+    how: 构建镜像和部署清单里扫描 Oracle JDK（`java -version` 输出的厂商）；出现时要求附上许可依据
+    applies: [lang:jvm]
+    why: Oracle JDK 的免费条款（NFTC）只覆盖一段时间；官方路线图写明，上一个 LTS 的后续更新改用 OTN 许可，生产使用需要付费订阅。
+    detail: |
+      - 默认用 Eclipse Temurin 等以 GPLv2 + Classpath Exception 发布的 OpenJDK 发行版，没有这类期限问题。
+      - 已经在用 Oracle JDK 的，记录每台机器的版本，在免费期结束前升级到仍免费的版本或切换发行版。
+    sources: [S01, S10]
+    see: ["27"]
+  # ── 构建与依赖 ──
+  - id: JVM-006
+    title: 使用 Maven Wrapper 或 Gradle Wrapper 并入库，CI 和开发者都通过 Wrapper 构建；Gradle Wrapper 设 `distributionSha256Sum`，CI 校验 wrapper jar
+    level: hard
+    check: auto
+    how: 检查仓库里有 `mvnw` / `.mvn/wrapper/` 或 `gradlew` / `gradle/wrapper/`；CI 只调用 Wrapper；Gradle 项目在 CI 里跑 wrapper 校验（如 gradle/actions 的 wrapper-validation）
+    applies: [lang:jvm]
+    why: 不用 Wrapper 时每台机器的构建工具版本不同；wrapper jar 是会被执行的二进制，被替换了就能在构建机上运行任意代码。
+    sources: [S11, S12, S13]
+  - id: JVM-007
+    title: 发布构建不得依赖 SNAPSHOT、动态版本（`+`、`latest.release`）或版本范围
+    level: hard
+    check: auto
+    how: Maven 用 Enforcer 的 `requireReleaseDeps` 等规则；Gradle 用 `resolutionStrategy.failOnDynamicVersions()` 和 `failOnChangingVersions()`
+    applies: [lang:jvm]
+    why: 这些版本每次解析结果可能不同，同一个提交今天和明天构建出的产物不一样，也给仓库投毒留了口子。
+    sources: [S14]
+  - id: JVM-008
+    title: Maven 项目的依赖版本集中在 BOM 或 `dependencyManagement`，所有插件显式写死版本
+    level: hard
+    check: auto
+    how: Maven Enforcer 的 `requirePluginVersions`；评审子模块中直接写版本号的依赖
+    applies: [lang:jvm]
+    why: 不写插件版本时，Maven 会用自带的默认版本，换一个 Maven 版本构建行为就变了；版本散落在各模块里，升级时总会漏掉几处。
+    detail: BOM 只协调版本，不锁定传递依赖的解析结果；发布时另外输出 `mvn dependency:tree` 和 SBOM 留档。
+    sources: [S14]
+  - id: JVM-009
+    title: Gradle 项目的依赖和插件版本集中写在版本目录（`gradle/libs.versions.toml`）里，构建脚本只引用别名
+    level: soft
+    check: semi
+    how: 评审构建脚本里直接写版本字符串的依赖声明
+    applies: [lang:jvm]
+    why: 多模块项目版本集中一处才好升级和评审；但版本目录只管声明，不锁住传递依赖，锁定见 JVM-010。
+    sources: [S15]
+  - id: JVM-010
+    title: Gradle 构建的应用开启依赖锁定（`dependencyLocking`）并提交锁文件；锁文件变化在 PR 里评审
+    level: hard
+    check: auto
+    how: 检查构建脚本有 `lockAllConfigurations()`、仓库有 `gradle.lockfile`；CI 构建时锁文件与解析结果不一致即失败
+    applies: [lang:jvm, kind:service]
+    why: 不锁定时，传递依赖会随上游发布悄悄变化，线上出了问题也复现不出当时的依赖组合。
+    detail: |
+      - 用 `./gradlew dependencies --write-locks` 更新锁文件，更新单独成一个 PR。
+      - 供别人引用的库通常不锁定（让使用方决定版本），但 CI 至少用锁定的组合测一遍。
+      - 需要防篡改时再开依赖校验（`gradle/verification-metadata.xml`）；首次生成的校验和要人工核对来源，不是生成了就算可信。
+    sources: [S16, S17]
+  - id: JVM-011
+    title: 依赖和插件只能从批准的仓库（通常是内部镜像）获取；Gradle 设 `repositoriesMode` 为 `FAIL_ON_PROJECT_REPOS`，Maven 在 `settings.xml` 用 `mirrorOf` 统一指向内部镜像
+    level: hard
+    check: auto
+    how: CI 检查 `settings.gradle(.kts)` 的 `dependencyResolutionManagement` 与 `pluginManagement`；CI 的 Maven `settings.xml` 由流水线提供，仓库里的 pom 不得自行添加 `<repositories>`
+    applies: [lang:jvm]
+    why: 任何一个模块随手加的第三方仓库，都会成为全项目的依赖来源，被投毒或下线时整个构建受影响。
+    detail: 仓库凭据从 CI 的密钥注入，不写进 `settings.xml` 或 `gradle.properties` 入库（见 25）。
+    see: ["25"]
+  - id: JVM-012
+    title: 要求断网交付的项目，必须在无外网的 CI 环境里，从空的本地缓存出发、只用内部镜像完成构建和测试
+    level: hard
+    check: auto
+    how: 隔离网络的 CI 任务：清空 `~/.m2` 或 `~/.gradle` 缓存，只能访问内部仓库和镜像仓库，运行构建、测试和镜像打包
+    applies: [lang:jvm, kind:onprem]
+    why: 开发机上 `mvn -o` 或 `gradle --offline` 能过，只说明本机缓存里恰好有；离线参数不会补齐缺失的依赖、JDK 和容器镜像。
+    see: ["TST-035", "ARC-032"]
+  # ── 版本组合与 Spring Boot ──
+  - id: JVM-013
+    title: 使用 Spring Boot 时，它的 BOM 管理的依赖不单独指定版本；确需覆盖的，写明原因并在升级 Spring Boot 时复查
+    level: soft
+    check: semi
+    how: 评审 pom 或构建脚本里覆盖受管依赖版本的写法（Maven 的 `<version>`、属性覆盖，Gradle 的强制版本）
+    applies: [lang:jvm]
+    why: BOM 里的版本组合经过框架一起测试；逐个追最新，等于用了一个没人测过的组合。
+    detail: 修安全漏洞需要提前升级某个受管依赖时，用属性覆盖（如 Maven 的版本属性）而不是直接写版本，并在下一次 Spring Boot 升级后删掉覆盖。
+    sources: [S04, S05]
+  - id: JVM-014
+    title: Spring Boot、Spring Cloud（含 Spring Cloud Alibaba 等第三方套件）的版本组合必须在官方兼容表内，不自行搭配
+    level: hard
+    check: semi
+    how: 仓库里记录所用组合和对应的官方兼容表链接；升级 PR 对照兼容表评审，并跑完整集成测试
+    applies: [lang:jvm]
+    why: 这些套件按 Spring Boot 的版本线发布，官方表没覆盖的组合常在运行时才出现类找不到或配置不生效。
+    detail: 第三方套件（如 Spring Cloud Alibaba）跟进 Spring Boot 新版本往往滞后；它的兼容表没列出的 Spring Boot 版本，就先停在表里的版本上。
+    sources: [S06]
+  - id: JVM-015
+    title: Kotlin 项目使用的 Gradle 版本必须在所用 Kotlin Gradle 插件官方声明的兼容范围内，升级任何一方前先查兼容表
+    level: hard
+    check: semi
+    how: 升级 Kotlin 或 Gradle 的 PR 附上兼容表链接；CI 打印 `./gradlew --version` 和 Kotlin 插件版本
+    applies: [lang:jvm]
+    why: Kotlin 插件只对一段 Gradle 版本给出完整支持；超出上限时可能出现弃用警告甚至构建失败。
+    detail: 因此 Kotlin 服务端项目不一定能用最新的 Gradle 大版本。Android 项目还受 AGP 约束，见 29。
+    sources: [S07]
+    see: ["29"]
+  - id: JVM-016
+    title: 生产使用的 Spring Boot 版本线必须在开源支持期内，或者有商业支持；停止支持前完成升级
+    level: hard
+    check: auto
+    how: CI 读取所用 Spring Boot 版本，与官方支持版本表比对；离开开源支持期仍无商业支持时失败
+    applies: [lang:jvm]
+    why: 版本线停止支持后不再发布安全修复，而 Spring Boot 管理着大量传递依赖的版本。
+    ref_value: 官方政策写明每个小版本线至少有 13 个月开源支持，大版本最后一个小版本线另有更长的商业支持；具体日期以官方支持表为准。
+    sources: [S02, S04]
+  - id: JVM-017
+    title: 新的 Web 服务默认用 Spring MVC（阻塞模型）；只有端到端都是非阻塞的场景才用 WebFlux
+    level: soft
+    check: manual
+    how: 评审技术选型说明
+    applies: [lang:jvm, kind:service]
+    why: 用了 JDBC 等阻塞调用的 WebFlux 服务，会把事件循环线程卡住，比 MVC 更慢也更难排查。
+  - id: JVM-018
+    title: 使用 Spring Boot 当前大版本时，JSON 用它默认的 Jackson 大版本；需要引入另一个 Jackson 大版本的，写明原因并加序列化契约测试
+    level: soft
+    check: semi
+    how: 依赖树检查同时出现两个 Jackson 大版本；评审对应的契约测试
+    applies: [lang:jvm]
+    why: 两个 Jackson 大版本的包名和默认行为不同，混用时注解和模块可能只对其中一个生效，序列化结果悄悄变化。
+    sources: [S18]
+  - id: JVM-019
+    title: 生产环境不得把 Actuator 管理端点暴露到公网；只暴露需要的端点，健康检查分开 liveness 和 readiness
+    level: hard
+    check: semi
+    how: 检查 `management.endpoints.web.exposure.include` 和管理端口配置；部署层确认管理端口不对外
+    applies: [lang:jvm, kind:service]
+    why: '`env`、`heapdump` 等端点会泄露配置、密钥和内存内容；把数据库故障算进 liveness 会让下游一抖就全部重启。'
+    sources: [S19]
+    see: ["26"]
+  - id: JVM-020
+    title: 服务开启优雅停机，并设置每个停机阶段的最长等待时间，小于编排平台给的终止宽限期
+    level: soft
+    check: semi
+    how: 检查 `server.shutdown` 和 `spring.lifecycle.timeout-per-shutdown-phase`；集成测试发送 SIGTERM，断言进行中的请求完成
+    applies: [lang:jvm, kind:service]
+    why: 直接退出会中断进行中的请求和事务；等待时间超过平台宽限期，进程会被强杀，等于没设。
+    sources: [S20]
+    see: ["26"]
+  - id: JVM-021
+    title: 启用虚拟线程或 GraalVM 原生镜像前，用真实负载和默认方案做对比，记录结果和回滚开关；连接池、并发数等上限照常设置
+    level: soft
+    check: manual
+    how: 评审启用说明：对比数据（吞吐、延迟分位、内存）、已知不兼容项、回滚方式
+    applies: [lang:jvm, kind:service]
+    why: 虚拟线程只对阻塞 I/O 为主的负载有帮助，数据库连接池和下游容量仍是瓶颈；原生镜像对反射、动态代理、JDBC 驱动和监控 Agent 都有兼容代价。
+    detail: Kotlin 协程或 Reactor 的代码不要再叠加虚拟线程就宣称性能提升；排查时看线程转储和 JFR。
+    sources: [S21, S22]
+  # ── 格式化与静态检查 ──
+  - id: JVM-022
+    title: Java 代码用一个格式器（默认 google-java-format）统一格式，通过 Spotless 在 CI 里检查
+    level: hard
+    check: auto
+    how: CI 运行 `spotlessCheck`（Gradle）或 `spotless:check`（Maven），有差异即失败
+    applies: [lang:jvm]
+    why: 格式交给工具后评审不再讨论空白和导入顺序；Agent 和人写出的代码格式一致。
+    detail: Checkstyle 若与格式器同时使用，只开格式器管不到的规则（命名、禁止的 API 等），不重复检查缩进和换行，否则两者会互相打架。
+    sources: [S23, S24, S25]
+    see: ["COD-038"]
+  - id: JVM-023
+    title: Kotlin 代码用 ktlint 格式化和检查（可通过 Spotless 调用），用 detekt 做静态检查；两者都在 CI 里运行
+    level: hard
+    check: auto
+    how: CI 运行 `ktlintCheck` 或 `spotlessCheck`，以及 `detekt`；有新增问题即失败
+    applies: [lang:jvm]
+    why: ktlint 管格式，detekt 管代码异味和潜在错误，两者分工不重叠。
+    detail: |
+      - 存量项目用 detekt 的基线文件记录已有问题，只拦新增的；不要一上来就把全部规则设成错误。
+      - 只用工具的稳定版，不把预发布版放进基线。
+    sources: [S26, S27]
+    see: ["COD-040"]
+  - id: JVM-024
+    title: Java 项目在格式器之外，至少启用一种查缺陷的静态检查（Error Prone 或 SpotBugs），并在 CI 里阻断新增的错误级问题
+    level: soft
+    check: auto
+    how: CI 编译时启用 Error Prone，或运行 SpotBugs；配置里按规则编号写明开启和关闭的规则
+    applies: [lang:jvm]
+    why: 格式正确不等于逻辑正确；这类工具能在编译时发现空指针、资源未关闭、`equals` 与 `hashCode` 不一致等问题。
+    detail: |
+      - 默认 Error Prone（编译期运行，反馈快）；需要空安全检查时加 NullAway。
+      - javac 打开 `-Xlint`，新代码不新增警告。
+      - 抑制警告必须写明具体规则，如 `@SuppressWarnings("unchecked")`，不用 `"all"`（见 COD-039）。
+    sources: [S28, S29, S30]
+    see: ["COD-039"]
+  - id: JVM-025
+    title: Kotlin 代码不用 `GlobalScope` 启动协程；`!!` 非空断言只在有注释说明为什么不会为空时使用
+    level: hard
+    check: auto
+    how: detekt 启用 `GlobalCoroutineUsage` 和 `UnsafeCallOnNullableType`；例外处用带规则名的 `@Suppress` 并写理由
+    applies: [lang:jvm]
+    why: '`GlobalScope` 里的协程不随请求或服务的生命周期取消，会泄漏；`!!` 把编译期的空安全变成运行时的空指针。'
+    detail: 服务边界的请求和返回类型显式写出可空性；`lateinit` 只用于框架注入，不用来掩盖初始化顺序问题。
+    sources: [S27]
+    see: ["COD-035"]
+  # ── 架构测试 ──
+  - id: JVM-026
+    title: 模块或包之间的依赖方向写成 ArchUnit 测试，与单元测试一起在 CI 里运行
+    level: soft
+    check: auto
+    how: 测试代码里有 ArchUnit 规则（如领域包不依赖 Spring、JPA、Web 包；模块间无环），CI 运行
+    applies: [lang:jvm]
+    why: 依赖方向只写在文档里会慢慢被破坏；写成测试，违规的 PR 直接失败。
+    detail: |
+      - 存量违规用 ArchUnit 的冻结规则（FreezingArchRule）记录，只拦新增的。
+      - Spring 项目按业务模块组织代码时，可以用 Spring Modulith 校验模块边界。
+      - 规则要有故意违规的负例，证明检查真的会失败（见 ARC-011）。
+    sources: [S31, S32]
+    see: ["ARC-006", "ARC-010", "ARC-011"]
+  # ── 测试 ──
+  - id: JVM-027
+    title: 单元测试用 JUnit 平台（Jupiter 编程模型）加 AssertJ 断言；Kotlin 项目可用 Kotest 断言和 MockK
+    level: soft
+    check: manual
+    how: 评审新增测试的写法和依赖
+    applies: [lang:jvm]
+    why: 统一的测试框架让 IDE、构建工具和 CI 报告都能直接识别；AssertJ 的失败信息比 `assertTrue` 清楚得多。
+    detail: 测试依赖的版本交给 Spring Boot 或 JUnit 的 BOM 管理，不逐个写死。
+    sources: [S33, S34]
+    see: ["04"]
+  - id: JVM-028
+    title: 涉及数据库、消息队列、缓存的集成测试用 Testcontainers 拉起与生产同款同大版本的组件，不用 H2 等内存库冒充
+    level: hard
+    check: semi
+    how: 依赖检查发现测试范围引入 H2、HSQLDB 而生产不是该数据库时要求说明；评审集成测试的依赖启动方式
+    applies: [lang:jvm]
+    why: H2 的 SQL 方言、锁、约束和类型行为与 PostgreSQL、国产库都不同，在 H2 上通过的查询上线照样会错。
+    detail: |
+      - Spring Boot 项目用 `@ServiceConnection` 把容器连接信息注入应用，不手写端口和地址。
+      - 镜像固定摘要，内网环境从内部镜像仓库拉取（见 TST-013）。
+      - 国产数据库没有可用镜像时，用隔离的专用测试实例，测试后清理。
+    sources: [S35, S36]
+    see: ["TST-010", "TST-013"]
+  - id: JVM-029
+    title: Mockito / MockK 只替代不可控的外部边界；对外 HTTP 依赖用 WireMock 等 HTTP 模拟，不把数据库和事务 mock 掉
+    level: soft
+    check: manual
+    how: 评审测试中被 mock 的对象：Repository、DataSource、事务管理器被 mock 时要说明理由
+    applies: [lang:jvm]
+    why: mock 掉数据库后，SQL、事务边界和序列化的错误都测不出来，测试只是在验证 mock 自己。
+    sources: [S37, S38]
+    see: ["TST-039"]
+  # ── 日志与异常 ──
+  - id: JVM-030
+    title: 应用代码只依赖 SLF4J 接口打日志；不用 `System.out`、`System.err` 和 `printStackTrace()`；运行时只保留一个日志实现
+    level: hard
+    check: auto
+    how: ArchUnit 的 `NO_CLASSES_SHOULD_ACCESS_STANDARD_STREAMS` 等规则或 Checkstyle 禁用这些调用；依赖检查发现多个 SLF4J 绑定时失败
+    applies: [lang:jvm]
+    why: 标准输出没有级别和结构，进不了日志系统；同时存在多个日志实现时，实际生效的是哪个取决于类路径顺序。
+    detail: Spring Boot 默认的 Logback 即可；换 Log4j2 要排除默认实现。用占位符 `log.info("order {} paid", id)` 或键值 API，不拼接字符串；Spring Boot 服务的生产日志用框架自带的结构化格式（`logging.structured.format.*`）输出并带追踪编号，不需要额外的编码器依赖。字段约定见 02。
+    sources: [S31, S39, S40]
+    see: ["COD-016", "COD-017", "COD-019"]
+  - id: JVM-031
+    title: 不写空的 `catch`；捕获 `InterruptedException` 后必须恢复中断标志或向上抛出
+    level: hard
+    check: auto
+    how: Error Prone、SpotBugs 或 detekt（`SwallowedException`、`EmptyCatchBlock`）检查；评审 `catch (InterruptedException e)` 的处理
+    applies: [lang:jvm]
+    why: 吞掉异常会让失败静默地变成成功；吞掉中断会让线程池停机和任务取消失效。
+    sources: [S28, S27]
+    see: ["COD-010"]
+  - id: JVM-032
+    title: 需要关闭的资源（流、连接、语句、结果集）用 try-with-resources 或 Kotlin 的 `use` 管理
+    level: hard
+    check: auto
+    how: SpotBugs 的资源未关闭检查（OBL、ODR 类规则）或 Error Prone 的相关检查；评审手写 `finally { close() }`
+    applies: [lang:jvm]
+    why: 异常路径上漏关一个连接，连接池就少一个，压力大时很快耗尽。
+    sources: [S29]
+  - id: JVM-033
+    title: 不用 Java 原生序列化（`ObjectInputStream`）读取不可信数据；不得不用时设置反序列化过滤器；Jackson 不开启全局多态类型（default typing）
+    level: hard
+    check: semi
+    how: SpotBugs 加 find-sec-bugs 检查 `ObjectInputStream` 和 Jackson default typing；评审 `jdk.serialFilter` 配置
+    applies: [lang:jvm]
+    why: 反序列化不可信数据可以触发类路径上的「利用链」直接执行代码，是 JVM 上最常见的远程代码执行来源之一。
+    sources: [S41, S42]
+    see: ["25"]
+  - id: JVM-034
+    title: HTTP 客户端（JDK HttpClient、RestClient、Ktor Client 等）必须显式设置连接超时和读取或请求超时
+    level: hard
+    check: semi
+    how: 评审客户端的创建代码；集成测试用 WireMock 模拟慢响应，断言在超时内失败
+    applies: [lang:jvm]
+    why: JDK HttpClient 默认没有请求超时；下游挂住时请求线程会一直占着，最终拖垮整个服务。
+    detail: 重试和熔断用 Resilience4j 或框架自带能力，只对幂等操作重试（见 COD-034）。
+    sources: [S43]
+    see: ["COD-033", "COD-034"]
+  # ── 数据库访问 ──
+  - id: JVM-035
+    title: SQL 参数一律用绑定参数（`PreparedStatement`、JdbcClient / JdbcTemplate 参数、JPA 参数、MyBatis 的 `#{}`），不拼接用户输入；MyBatis 的 `${}` 只能接白名单里的标识符
+    level: hard
+    check: semi
+    how: find-sec-bugs 的 SQL 注入检查；扫描 Mapper 文件中的 `${`；评审动态 SQL 的标识符来源
+    applies: [lang:jvm]
+    why: 拼接 SQL 是注入漏洞的直接来源；`${}` 是原样替换，和拼接字符串没有区别。
+    sources: [S42]
+    see: ["25"]
+  - id: JVM-036
+    title: 生产环境不得用 Hibernate 自动建表或改表（`ddl-auto` 为 `update`、`create`、`create-drop`）；表结构只通过迁移工具变更
+    level: hard
+    check: auto
+    how: CI 检查生产配置中 `spring.jpa.hibernate.ddl-auto` 只能是 `none` 或 `validate`
+    applies: [lang:jvm]
+    why: 自动改表没有评审、没有记录，可能直接删列丢数据，多副本同时启动时还会互相冲突。
+    detail: 迁移的原则（向前修复、单独的发布步骤、不在每个实例启动时跑）见 17。
+    sources: [S44]
+    see: ["17"]
+  - id: JVM-037
+    title: 一个服务只选一种主要的数据访问方式（JDBC / JdbcClient、JPA、jOOQ、MyBatis 之一）
+    level: soft
+    check: manual
+    how: 评审依赖树和数据访问层：出现第二种方式时要求说明
+    applies: [lang:jvm]
+    why: 几套并存时，事务、批量写入、缓存和错误处理各有一套写法，事务边界很容易出错。
+    detail: 报表等少量复杂查询可以在 JPA 项目里用 JdbcClient 补充，但要在说明里写清边界。
+  - id: JVM-038
+    title: JPA 实体不直接作为接口的请求或响应；用单独的 DTO 或查询投影
+    level: soft
+    check: semi
+    how: ArchUnit 规则：Controller 的方法签名不得出现 `@Entity` 类型
+    applies: [lang:jvm, kind:service]
+    why: 直接返回实体会触发懒加载和 N+1 查询，还会把内部字段暴露出去；直接接收实体会被批量赋值改掉不该改的字段。
+    sources: [S31]
+    see: ["16"]
+  - id: JVM-039
+    title: 使用 openGauss 等「兼容 PostgreSQL」的国产数据库时，确认驱动类名不与 pgJDBC 冲突，并在目标数据库上跑迁移和集成测试
+    level: soft
+    check: semi
+    how: 依赖树检查同时存在 pgJDBC 和厂商驱动；在目标数据库实例上跑迁移、增删改查和并发测试
+    applies: [lang:jvm]
+    why: 部分 openGauss 驱动沿用 `org.postgresql.Driver` 类名，两个驱动同时在类路径上时，加载哪个取决于顺序。
+    sources: [S45]
+    see: ["17"]
+  # ── 依赖安全与库 ──
+  - id: JVM-040
+    title: CI 对 JVM 依赖运行漏洞扫描（OWASP Dependency-Check 或 OSV-Scanner），按项目设定的严重级别阻断；断网环境使用内部同步的漏洞库并记录库的更新日期
+    level: hard
+    check: auto
+    how: CI 运行 Dependency-Check 的 Maven / Gradle 插件（设 `failBuildOnCVSS`）或 `osv-scanner`；误报写进抑制文件并附理由和到期日
+    applies: [lang:jvm]
+    why: JVM 项目的传递依赖很多，已知漏洞大多出在没直接声明的依赖里。
+    detail: Dependency-Check 下载 NVD 数据需要 API key，按密钥管理（见 25）。没有同步漏洞库却显示「通过」，不算扫描过。SBOM 用 CycloneDX 的 Maven / Gradle 插件在构建时生成，随发布物保存，比事后扫描 JAR 更准确。
+    sources: [S46, S47, S48]
+    see: ["25"]
+  - id: JVM-041
+    title: 供别人引用的库不使用 Spring Boot 的打包插件；对公开 API 做二进制兼容检查（Java 用 japicmp，Kotlin 用 Kotlin 插件的 ABI 校验）
+    level: soft
+    check: auto
+    how: 依赖检查库模块没有 `spring-boot-maven-plugin` 或 `org.springframework.boot` 插件；CI 运行 japicmp 或 ABI 校验任务，对比上一个发布版本
+    applies: [lang:jvm, kind:library]
+    why: Boot 插件会把库打成可执行 JAR，别人没法正常依赖；源码兼容不等于二进制兼容，删一个重载或改返回类型，使用方不重新编译就会运行时报错。
+    detail: 独立的 binary-compatibility-validator 插件已进入维护模式，新功能转到 Kotlin Gradle 插件内置的 ABI 校验（目前仍是实验特性）。
+    sources: [S49, S50]
+    see: ["16"]
+choices:
+  - category: JDK 发行版
+    pick: Eclipse Temurin（Adoptium）
+    alternatives:
+      - { name: Amazon Corretto、Microsoft Build of OpenJDK、Red Hat build of OpenJDK, when: 部署在对应厂商的云或系统上，想要厂商一并支持 }
+      - { name: Azul Zulu、BellSoft Liberica, when: 需要商业支持合同或更长的补丁期 }
+      - { name: 国内厂商的 OpenJDK 发行版, when: 客户的国产 CPU 或操作系统只认证了某个发行版；先核对其支持期和更新节奏 }
+    avoid:
+      - { name: 未核对许可就用 Oracle JDK, why: 免费条款有期限，过期后的更新需要付费订阅（JVM-005） }
+      - { name: 开发、CI、生产各用各的发行版, why: 补丁节奏不同，问题难以复现 }
+    license: OpenJDK 发行版为 GPLv2 + Classpath Exception；Oracle JDK 按 NFTC 或 OTN 条款，视版本而定
+    sources: [S01, S10]
+  - category: 构建工具
+    pick: Maven（Wrapper + Spring Boot parent / BOM + Enforcer）
+    when: Java 为主的 Spring Boot 服务
+    alternatives:
+      - { name: Gradle（Kotlin DSL + 版本目录 + 依赖锁定）, when: Kotlin 项目、多模块大仓、需要自定义构建逻辑；版本受 Kotlin 插件兼容表约束（JVM-015） }
+    avoid:
+      - { name: 同一仓库同时维护两套构建, why: 依赖和插件配置会分叉 }
+    license: Maven、Gradle 均为 Apache-2.0
+    sources: [S11, S12, S14, S15]
+  - category: Web 框架
+    pick: Spring Boot（Spring MVC）
+    alternatives:
+      - { name: Quarkus, when: 对内存和启动时间敏感，或计划用原生镜像；选它的 LTS 版本线 }
+      - { name: Micronaut, when: 想要编译期依赖注入、少用反射 }
+      - { name: Ktor, when: Kotlin 写的轻量 HTTP 服务，不需要 Spring 生态 }
+    avoid:
+      - { name: 用 JDBC 的服务选 WebFlux, why: 阻塞调用会卡住事件循环（JVM-017） }
+      - { name: 自己写 HTTP 框架, why: 现成框架已解决路由、校验、安全和可观测性 }
+    license: 以上框架均为 Apache-2.0
+    notes: 这是按约束选，不是性能排名；要比较就用目标业务和部署资源实际跑基准。
+    sources: [S04, S51, S52, S53]
+  - category: 数据访问
+    pick: Spring JDBC 的 JdbcClient / JdbcTemplate
+    when: SQL 简单、希望完全掌控 SQL 的服务
+    alternatives:
+      - { name: JPA（Hibernate）, when: 领域模型有聚合和对象关系，团队熟悉 ORM 的会话和懒加载 }
+      - { name: jOOQ, when: 复杂报表和联表查询，想要类型安全的 SQL；用于商业数据库时需要付费版本 }
+      - { name: MyBatis, when: 团队已有大量 Mapper，或高度手写 SQL }
+      - { name: Exposed, when: 纯 Kotlin、不依赖 Spring 的项目 }
+    avoid:
+      - { name: 一个服务并存多套访问层, why: 事务和错误处理各有一套（JVM-037） }
+      - { name: 自研「万能 Repository」, why: SQL 不透明，难审计难维护 }
+    license: Hibernate ORM 从 7.0 起为 Apache-2.0（更早版本为 LGPL-2.1）；jOOQ 开源版为 Apache-2.0，只支持开源数据库，商业数据库需商业许可；MyBatis、Exposed 为 Apache-2.0
+    notes: MyBatis-Plus 的逻辑删除、租户条件、分页插件会自动改写 SQL，用之前要清楚它生成了什么；租户隔离不能只靠插件（见 19）。
+    sources: [S54, S55]
+  - category: PostgreSQL 驱动与连接池
+    pick: pgJDBC + HikariCP（Spring Boot 默认）
+    alternatives:
+      - { name: 数据库厂商提供的 JDBC 驱动, when: 使用国产数据库（注意 JVM-039） }
+      - { name: Agroal, when: Quarkus 项目 }
+    avoid:
+      - { name: 不设上限的连接池或每次请求新建连接, why: 压垮数据库 }
+    license: pgJDBC 为 BSD-2-Clause；HikariCP 为 Apache-2.0
+    sources: [S56]
+  - category: 数据库迁移工具
+    pick: Flyway 社区版
+    when: 以 SQL 文件为迁移单位的项目；迁移原则见 17
+    alternatives:
+      - { name: Liquibase 社区版, when: 要用同一套变更集描述支持多种数据库，或需要它的变更集管理能力；先确认 FSL 许可符合项目的使用和分发方式 }
+    avoid:
+      - { name: Hibernate 的 ddl-auto 改生产库, why: 无评审、无记录、可能丢数据（JVM-036） }
+      - { name: 在应用里手写 DDL 执行逻辑, why: 多副本同时执行、无法审查 }
+    license: Flyway 社区版为 Apache-2.0，由 Redgate 维护；撤销迁移（undo）等功能只在付费的 Teams / Enterprise 版中，部分数据库也需付费版。Liquibase 社区版从 5.0 起为 FSL-1.1-ALv2：允许内部和生产使用，禁止拿去做与 Liquibase 竞争的商业产品或服务，每个版本发布两年后转为 Apache-2.0；它不是 OSI 认可的开源许可，更早的版本仍是 Apache-2.0
+    notes: 社区版不提供 undo，回退靠向前修复（见 17）。国产数据库的支持不能从 PostgreSQL 支持外推，要实际跑一遍。
+    sources: [S57, S58, S59]
+  - category: 格式化
+    pick: Spotless + google-java-format（Java）；ktlint（Kotlin）
+    alternatives:
+      - { name: palantir-java-format, when: 团队想要更宽的行长，全仓一起切换 }
+    avoid:
+      - { name: 只靠 IDE 的格式化设置, why: 不同人不同配置，CI 无法检查 }
+    license: Spotless、google-java-format 为 Apache-2.0；ktlint 为 MIT
+    sources: [S23, S25, S26]
+  - category: 静态检查
+    pick: Error Prone（Java，编译期）；detekt（Kotlin）
+    alternatives:
+      - { name: NullAway, when: 要在 Java 代码里强制空安全；作为 Error Prone 插件运行 }
+      - { name: SpotBugs（加 find-sec-bugs）, when: 想按字节码查资源泄漏、并发和安全问题 }
+      - { name: Checkstyle, when: 要强制命名、禁用 API 等格式器管不到的规则 }
+      - { name: PMD, when: 团队已有 PMD 规则集 }
+      - { name: SonarQube 自部署, when: 有资源维护服务端，需要跨项目的质量看板 }
+    avoid:
+      - { name: 一次开启全部规则, why: 误报淹没真问题；用基线只拦新增（COD-024） }
+    license: Error Prone、detekt 为 Apache-2.0；NullAway 为 MIT；SpotBugs、Checkstyle 为 LGPL-2.1；PMD 为 BSD 风格许可。都是构建时独立运行的工具，不进入产品分发（口径见 27）
+    sources: [S27, S28, S29, S30, S42]
+  - category: 架构测试
+    pick: ArchUnit
+    alternatives:
+      - { name: Spring Modulith, when: Spring 项目按业务模块组织，想同时校验模块边界并生成模块文档 }
+    license: ArchUnit、Spring Modulith 均为 Apache-2.0
+    sources: [S31, S32]
+  - category: 测试
+    pick: JUnit（Jupiter）+ AssertJ + Mockito；集成测试用 Testcontainers
+    alternatives:
+      - { name: MockK、Kotest, when: Kotlin 项目 }
+      - { name: WireMock, when: 模拟对外 HTTP 依赖 }
+      - { name: JMH, when: 微基准测试；不要用单次计时估算性能 }
+    avoid:
+      - { name: H2 冒充生产数据库, why: 方言和行为不同（JVM-028） }
+    license: JUnit 为 EPL-2.0；AssertJ、MockK、WireMock 为 Apache-2.0；Mockito、Testcontainers 为 MIT；JMH 为 GPLv2 + Classpath Exception（只在测试中使用）
+    sources: [S33, S34, S35, S37, S38]
+  - category: 日志
+    pick: SLF4J + Logback（Spring Boot 默认）
+    alternatives:
+      - { name: Log4j2, when: 存量项目已在用，或需要它的异步日志特性；排除默认的 Logback }
+    avoid:
+      - { name: 'System.out 和 printStackTrace', why: 无级别、无结构（JVM-030） }
+    license: SLF4J 为 MIT；Logback 为 EPL-1.0 / LGPL-2.1 双许可；Log4j2 为 Apache-2.0
+    sources: [S39, S40]
+  - category: HTTP 客户端与容错
+    pick: Spring 的 RestClient（或 JDK HttpClient）+ Resilience4j
+    alternatives:
+      - { name: Ktor Client, when: Kotlin / Ktor 项目 }
+      - { name: OkHttp、Apache HttpClient, when: 需要它们特有的连接管理或拦截器 }
+    avoid:
+      - { name: 在业务代码里手写重试循环, why: 容易无上限重试、重试非幂等操作 }
+    license: Resilience4j 为 Apache-2.0
+    sources: [S43, S60]
+  - category: 依赖漏洞扫描
+    pick: OWASP Dependency-Check（Maven / Gradle 插件）
+    alternatives:
+      - { name: OSV-Scanner, when: 想直接读锁文件或 SBOM，或不想维护 NVD 数据同步 }
+      - { name: Trivy 等通用扫描器, when: 还要扫容器镜像和系统包（见 25） }
+    license: Dependency-Check、OSV-Scanner 为 Apache-2.0
+    notes: Dependency-Check 的代码仓库已从个人账号迁到 dependency-check 组织，旧仓库已归档。
+    sources: [S46, S47]
+  - category: SBOM 生成
+    pick: CycloneDX Maven / Gradle 插件
+    license: Apache-2.0
+    sources: [S48]
+  - category: 库的二进制兼容检查
+    pick: japicmp（Java）；Kotlin Gradle 插件内置的 ABI 校验（Kotlin）
+    alternatives:
+      - { name: binary-compatibility-validator, when: 已在用的 Kotlin 项目；该插件已进入维护模式 }
+    license: 均为 Apache-2.0
+    sources: [S49, S50]
+antipatterns:
+  - { bad: 新服务选非 LTS 的最新 JDK 上生产, instead: 用仍在支持期的 LTS（JVM-001） }
+  - { bad: 默认 Oracle JDK 免费，不查当前版本适用的条款, instead: 用 Temurin 等 OpenJDK 发行版，或核对许可（JVM-005） }
+  - { bad: 给每个 starter 都显式写上最新补丁版本, instead: 交给 Spring Boot BOM 管理（JVM-013） }
+  - { bad: Kotlin 项目把 Kotlin 插件和 Gradle 都升到最新，不查兼容表, instead: 按 Kotlin 插件声明的 Gradle 范围选版本（JVM-015） }
+  - { bad: 在开发机上 `mvn -o` 构建成功就宣称支持离线交付, instead: 在无外网 CI 里从空缓存构建（JVM-012） }
+  - { bad: 只在 H2 上测试 PostgreSQL 或国产库的 SQL, instead: Testcontainers 或隔离的目标库实例（JVM-028） }
+  - { bad: 用 Mockito 把 Repository 和事务全部 mock 掉, instead: 数据库走真实集成测试，mock 只用于不可控的外部边界（JVM-029） }
+  - { bad: 生产开着 `ddl-auto=update`, instead: Flyway / Liquibase 管理表结构（JVM-036） }
+  - { bad: JPA 实体直接作为 JSON 返回, instead: DTO 或查询投影（JVM-038） }
+  - { bad: 多副本服务直接用 `@Scheduled` 跑只能执行一次的任务, instead: 用带集群锁的调度方案（选型见 18） }
+  - { bad: 因为 Spotless 没报错就跳过评审, instead: 格式只是第一道；缺陷检查和人工评审照常进行 }
+  - { bad: 不看许可证就引入 XXL-JOB（GPL-3.0）、Camunda 8 自托管或商业数据库上的 jOOQ, instead: 引入前按 27 的口径审查许可 }
+sources:
+  - { id: S01, title: Oracle Java SE Support Roadmap, url: "https://www.oracle.com/java/technologies/java-se-support-roadmap.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: Spring Support Policy, url: "https://spring.io/support-policy", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: Eclipse Temurin（Adoptium）, url: "https://adoptium.net/", publisher: Eclipse Adoptium, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Spring Boot: Build Systems（依赖管理与 starter）", url: "https://docs.spring.io/spring-boot/reference/using/build-systems.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "Spring Boot Maven Plugin: Using the Plugin", url: "https://docs.spring.io/spring-boot/maven-plugin/using.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: Spring Cloud Alibaba 版本说明, url: "https://sca.aliyun.com/docs/2025.x/overview/version-explain/", publisher: Alibaba, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Kotlin: Configure a Gradle project（Gradle 兼容表）", url: "https://kotlinlang.org/docs/gradle-configure-project.html", publisher: JetBrains, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Gradle: Toolchains for JVM projects", url: "https://docs.gradle.org/current/userguide/toolchains.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "Gradle: Compatibility Matrix", url: "https://docs.gradle.org/current/userguide/compatibility.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: Oracle No-Fee Terms and Conditions（NFTC）, url: "https://www.oracle.com/downloads/licenses/no-fee-license.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: Apache Maven Wrapper, url: "https://maven.apache.org/tools/wrapper/", publisher: Apache Maven, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "Gradle: The Gradle Wrapper", url: "https://docs.gradle.org/current/userguide/gradle_wrapper.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: gradle/actions（含 wrapper-validation）, url: "https://github.com/gradle/actions", publisher: Gradle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: Maven Enforcer Built-In Rules, url: "https://maven.apache.org/enforcer/enforcer-rules/index.html", publisher: Apache Maven, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: "Gradle: Version Catalogs", url: "https://docs.gradle.org/current/userguide/version_catalogs.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Gradle: Locking Dependency Versions", url: "https://docs.gradle.org/current/userguide/dependency_locking.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Gradle: Verifying Dependencies", url: "https://docs.gradle.org/current/userguide/dependency_verification.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: Introducing Jackson 3 support in Spring, url: "https://spring.io/blog/2025/10/07/introducing-jackson-3-support-in-spring/", publisher: Spring, date: 2025-10-07, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "Spring Boot: Actuator Endpoints", url: "https://docs.spring.io/spring-boot/reference/actuator/endpoints.html", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "Spring Boot: Graceful Shutdown", url: "https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: Java 25 Virtual Threads, url: "https://docs.oracle.com/en/java/javase/25/core/virtual-threads.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "Spring Boot: SpringApplication（含虚拟线程）", url: "https://docs.spring.io/spring-boot/reference/features/spring-application.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Google Java Style Guide, url: "https://google.github.io/styleguide/javaguide.html", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: Checkstyle 的 Google Java Style 配置, url: "https://checkstyle.org/google-style.html", publisher: Checkstyle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Spotless Gradle 插件, url: "https://plugins.gradle.org/plugin/com.diffplug.spotless", publisher: DiffPlug, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: ktlint, url: "https://github.com/pinterest/ktlint", publisher: Pinterest, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: detekt, url: "https://github.com/detekt/detekt", publisher: detekt, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: Error Prone, url: "https://errorprone.info/", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: SpotBugs, url: "https://spotbugs.github.io/", publisher: SpotBugs, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: NullAway, url: "https://github.com/uber/NullAway", publisher: Uber, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S31, title: ArchUnit, url: "https://www.archunit.org/", publisher: TNG, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: Spring Modulith, url: "https://github.com/spring-projects/spring-modulith", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: JUnit 发布说明, url: "https://docs.junit.org/6.1.3/release-notes", publisher: JUnit, date: 2026-08-07, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: AssertJ, url: "https://assertj.github.io/doc/", publisher: AssertJ, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: Testcontainers for Java, url: "https://github.com/testcontainers/testcontainers-java", publisher: Testcontainers, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: "Spring Boot: Testcontainers", url: "https://docs.spring.io/spring-boot/reference/testing/testcontainers.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S37, title: Mockito, url: "https://github.com/mockito/mockito", publisher: Mockito, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S38, title: WireMock, url: "https://wiremock.org/", publisher: WireMock, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S39, title: SLF4J, url: "https://www.slf4j.org/", publisher: QOS.ch, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S40, title: "Spring Boot: Logging（含结构化日志）", url: "https://docs.spring.io/spring-boot/reference/features/logging.html", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S41, title: Java 25 Serialization Filtering, url: "https://docs.oracle.com/en/java/javase/25/core/serialization-filtering1.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S42, title: find-sec-bugs, url: "https://github.com/find-sec-bugs/find-sec-bugs", publisher: find-sec-bugs, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S43, title: "Spring Boot: Calling REST Services（RestClient）", url: "https://docs.spring.io/spring-boot/reference/io/rest-client.html", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S44, title: Spring Boot Migration Guide（含 ddl-auto 与迁移工具）, url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S45, title: openGauss JDBC 驱动类与环境类, url: "https://docs.opengauss.org/zh/docs/latest/developer_guide/jdbc_package_driver_class_and_environment_class.html", publisher: openGauss, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S46, title: OWASP Dependency-Check, url: "https://github.com/dependency-check/DependencyCheck", publisher: OWASP, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S47, title: OSV-Scanner, url: "https://github.com/google/osv-scanner", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S48, title: CycloneDX Maven 插件, url: "https://github.com/CycloneDX/cyclonedx-maven-plugin", publisher: CycloneDX, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S49, title: japicmp, url: "https://github.com/siom79/japicmp", publisher: siom79, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S50, title: Kotlin binary-compatibility-validator（维护模式说明）, url: "https://github.com/Kotlin/binary-compatibility-validator", publisher: JetBrains, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S51, title: Quarkus Releases, url: "https://quarkus.io/releases/", publisher: Quarkus, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S52, title: Micronaut Release Announcements, url: "https://micronaut.io/category/release-announcements/", publisher: Micronaut Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S53, title: Ktor Releases, url: "https://ktor.io/docs/releases.html", publisher: JetBrains, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S54, title: Hibernate ORM relicensed under ASL 2.0, url: "https://in.relation.to/2025/03/14/orm-asl/", publisher: Hibernate, date: 2025-03-14, kind: official, checked: 2026-11-14 }
+  - { id: S55, title: jOOQ Licensing, url: "https://www.jooq.org/legal/licensing", publisher: Data Geekery, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S56, title: HikariCP, url: "https://github.com/brettwooldridge/HikariCP", publisher: brettwooldridge, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S57, title: flyway/flyway（LICENSE）, url: "https://github.com/flyway/flyway", publisher: Redgate, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S58, title: "The Flyway engine, OSS and Redgate", url: "https://www.red-gate.com/blog/the-flyway-engine-oss-open-source-software-and-redgate", publisher: Redgate, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S59, title: Liquibase Community for the future（FSL）, url: "https://www.liquibase.com/blog/liquibase-community-for-the-future-fsl", publisher: Liquibase, date: 2025-09-30, kind: official, checked: 2026-11-14 }
+  - { id: S60, title: Resilience4j, url: "https://resilience4j.readme.io/", publisher: Resilience4j, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - 当前 Java LTS 为 Java 25，下一个 LTS 按 Oracle 路线图为 Java 29（2027-09，路线图注明可能变化）；Oracle JDK 21 在 2026-09 之后的更新改用 OTN 许可。以上来自 Oracle 路线图，版本号不写进规则，由版本账本跟踪
+  - Spring Boot 各版本线的具体支持截止日期（如 4.0、4.1）只从第三方汇总页看到，未在官方支持表逐条核对；规则只引用官方政策（每个小版本线至少 13 个月开源支持）
+  - Gradle 当前大版本为 9（官方发布说明核实）；原报告「Kotlin 插件完整支持的 Gradle 上限低于最新 Gradle」的具体上限未在 Kotlin 官方兼容表复核，升级时以兼容表为准
+  - Flyway 社区版仍为 Apache-2.0、Redgate 维护；Teams / Enterprise 的现行功能划分和哪些数据库需要付费版，只从较早的 Redgate 页面看到，未核实 2026 年的现状
+  - Liquibase FSL 对「把 Liquibase 随产品一起分发给客户」是否构成竞争性使用，官方博客没有直接说明；私有化交付要随产品带上 Liquibase 时，需按 27 的口径单独确认
+  - Spring Cloud Alibaba 当前版本对新 Spring Boot 版本线的兼容情况（原报告称只覆盖较早的一条版本线）未复核
+  - 原报告的 Seata、Nacos、Dubbo、Testcontainers 等版本与日期存在自相矛盾或未核实，均未写入；中间件选型见 18
+  - EasyExcel、Valiktor、QuickTheories 的维护状态未核实（疑似停止维护），未写入选型
+  - 选型中的许可证：Hibernate、Liquibase、Flyway 已按官方说明核实，其余按 GitHub 仓库的 LICENSE 识别结果填写（google-java-format、PMD、Logback、jOOQ 的仓库未给出标准识别，按官方说明填写），未逐个阅读许可全文
+  - 2026-11-14 新增的来源（S03、S08、S10、S11–S15、S19、S20、S26–S32、S34、S35、S37–S43、S46–S50、S56–S58、S60）只确认链接有效且为官方入口，未逐页核对与规则对应的具体段落
+  - 待补调研：Spring Boot 最新大版本和 Spring Framework 大版本的系统性变化（Jakarta EE 基线、空值注解、starter 改名等），原报告只讲了 Jackson 3 和 starter 改名
+  - 待补调研：Gradle 版的 Spring Boot / Ktor 服务模板和 Maven 版库模板，需实际构建通过后再发布
+  - 待补调研：国产 JDK 发行版（面向国产 CPU 的发行版）的支持期与更新节奏；阿里巴巴 Java 开发手册中可直接采纳的条目
+  - 待补调研：容器中 JVM 的内存与 CPU 参数（按容器限额设置堆大小等）缺少有出处的建议
