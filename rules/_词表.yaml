@@ -1,0 +1,65 @@
+# 公共词表：所有主题统一使用，不得另起一套。
+
+级别:
+  hard:
+    名称: 硬约束
+    含义: 必须遵守。同时满足：有可靠出处或违反后果严重且公认；写得出检查方法；没有软措辞，适用前提写进规则。
+  soft:
+    名称: 软指导
+    含义: 默认这样做；有理由可以不做，但要写明理由。
+
+检查方式:
+  auto:
+    名称: 自动
+    含义: 工具或 CI 可以直接判定。
+  semi:
+    名称: 半自动
+    含义: 工具能发现候选问题，需要人确认。
+  manual:
+    名称: 人工
+    含义: 只能靠评审或演练记录确认；规则里要写清审查点。
+
+# 适用范围标签：rules[].applies 只能用这里的值
+适用范围:
+  all: 所有项目
+  lang:ts: TypeScript / JavaScript / Node
+  lang:go: Go
+  lang:python: Python
+  lang:rust: Rust
+  lang:jvm: Java / Kotlin（服务端）
+  lang:shell: 脚本与配置
+  platform:web: Web 前端
+  platform:android: Android
+  platform:ios: iOS
+  platform:desktop: 桌面应用
+  platform:mobile: 移动端（跨平台）
+  kind:service: 对外提供服务的后端
+  kind:library: 供别人引用的库或 SDK
+  kind:cli: 命令行工具
+  kind:agent: 由编码 Agent 参与开发的仓库
+  kind:llm: 调用大模型的应用
+  kind:data: 数据分析与统计
+  kind:onprem: 私有化或断网部署
+
+# 下面几组状态名，各主题需要时直接引用，不要另造
+优先级:
+  P0: 立刻处理，阻断发布或正在造成损失
+  P1: 本迭代内处理
+  P2: 排期处理
+  P3: 有空再做
+
+任务状态: [待澄清, 就绪, 进行中, 待评审, 待验收, 已完成, 已取消]
+
+事故等级:
+  SEV1: 核心功能不可用或数据受损，影响大多数用户
+  SEV2: 重要功能受损或部分用户不可用
+  SEV3: 次要功能受损，有绕过办法
+  SEV4: 轻微问题，无明显用户影响
+
+证据状态: [未运行, 通过, 失败, 已跳过]
+
+来源类型:
+  standard: 标准或规范（RFC、W3C、ISO、国标、法规）
+  official: 官方文档或官方公告
+  community: 社区共识、知名项目实践
+  case: 单个公司或个人的案例
