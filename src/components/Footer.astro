@@ -1,0 +1,12 @@
+---
+// 页脚：版本、授权和法律提示。
+import { config } from '../../tools/lib.ts';
+---
+<footer class="pr-footer">
+  <p>准绳 {config.version} · 内容按 <a href="https://creativecommons.org/licenses/by/4.0/deed.zh-hans">CC BY 4.0</a> 授权，代码按 MIT 授权 · <a href={config.repoUrl}>GitHub</a></p>
+  <p>涉及法律、合规和许可证的内容只是工程参考，不构成法律意见。</p>
+</footer>
+<style>
+  .pr-footer { margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--sl-color-hairline); font-size: var(--sl-text-sm); color: var(--sl-color-gray-3); }
+  .pr-footer p { margin: 0.25rem 0; }
+</style>

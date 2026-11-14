@@ -1,0 +1,143 @@
+---
+// 安装页：三种安装方式（页签）+ 按项目情况生成 AGENTS.md 片段。
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { browserData, vocab, config } from '../lib/site.ts';
+
+const scopes = Object.entries(vocab['适用范围'] as Record<string, string>).filter(([k]) => k !== 'all');
+const preset = new Set(['lang:go', 'kind:service', 'kind:agent']);
+const zip = `/downloads/plumbrule-skill-${config.version}.zip`;
+const tabs = [
+  { id: 'quick', label: '一条命令' },
+  { id: 'offline', label: '离线安装' },
+  { id: 'manual', label: '手动复制' },
+];
+---
+<StarlightPage frontmatter={{ title: '装到你的 Agent', description: '把准绳作为技能装到 Claude Code、Codex 等编码 Agent，并为项目生成 AGENTS.md 里的规则。', template: 'splash' }}>
+  <p class="lede">准绳以技能（Agent Skills 开放格式）发布。装好后，Agent 写代码时会按需查对应主题的规则；项目自己的规范优先。</p>
+
+  <div class="not-content">
+    <div role="tablist" aria-label="安装方式" class="tabs" data-tabs>
+      {tabs.map((t, i) => (
+        <button type="button" role="tab" id={`tab-${t.id}`} aria-controls={`panel-${t.id}`} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1}>{t.label}</button>
+      ))}
+    </div>
+
+    <div role="tabpanel" id="panel-quick" aria-labelledby="tab-quick" class="panel">
+      <p>需要 Node.js 18 或更新版本。默认装到 Claude Code 和 Codex 的用户目录：</p>
+      <div class="pr-code">
+        <div><span class="p">$ </span>npx plumbrule install</div>
+        <div class="c"># 只装一个：--agent claude 或 --agent codex；装到当前项目：--project</div>
+      </div>
+      <div class="pr-card dirs">
+        <table>
+          <thead><tr><th>Agent</th><th>用户级目录</th><th>项目级目录</th></tr></thead>
+          <tbody>
+            <tr><td>Claude Code</td><td class="pr-mono">~/.claude/skills/plumbrule</td><td class="pr-mono">.claude/skills/plumbrule</td></tr>
+            <tr><td>Codex</td><td class="pr-mono">~/.agents/skills/plumbrule</td><td class="pr-mono">.agents/skills/plumbrule</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="pr-muted small">装完重启 Agent。其他支持 Agent Skills 的工具：把技能文件夹复制到它的技能目录即可。卸载：<span class="pr-mono">npx plumbrule uninstall</span>。</p>
+    </div>
+
+    <div role="tabpanel" id="panel-offline" aria-labelledby="tab-offline" class="panel" hidden>
+      <p>内网或断网环境：在能联网的机器上下载安装包，拷进内网后安装，全程不访问网络。</p>
+      <div class="pr-code">
+        <div class="c"># 联网机器</div>
+        <div><span class="p">$ </span>npm pack plumbrule</div>
+        <div class="c"># 内网机器</div>
+        <div><span class="p">$ </span>npx ./plumbrule-{config.version}.tgz install</div>
+      </div>
+      <p class="small">也可以直接下载 <a href={zip}>plumbrule-skill-{config.version}.zip</a>，解压到技能目录。校验值：<a href={`${zip}.sha256`}>SHA-256</a>。</p>
+    </div>
+
+    <div role="tabpanel" id="panel-manual" aria-labelledby="tab-manual" class="panel" hidden>
+      <p>不想用命令行：下载 <a href={zip}>plumbrule-skill-{config.version}.zip</a>，解压后把 <span class="pr-mono">plumbrule</span> 文件夹放进上面表格里的任一目录。</p>
+    </div>
+  </div>
+
+  <h2 id="agents-md">为项目生成 AGENTS.md 里的规则</h2>
+  <p>选上项目用到的语言和端，只挑出相关的硬约束。复制后合并进仓库根目录的 AGENTS.md。</p>
+  <div class="not-content gen" data-gen>
+    <fieldset class="pr-card tags">
+      <legend>项目情况</legend>
+      {scopes.map(([k, v]) => <label><input type="checkbox" value={k} checked={preset.has(k)} data-tag /> {v}</label>)}
+      <label class="soft"><input type="checkbox" data-soft /> 同时包含软指导（标「建议」）</label>
+    </fieldset>
+    <div class="out">
+      <pre class="pr-card preview" tabindex="0" aria-label="生成的 AGENTS.md 片段" data-preview></pre>
+      <div class="row">
+        <button type="button" class="pr-btn" data-copy>复制</button>
+        <span class="pr-muted small" data-status aria-live="polite"></span>
+      </div>
+      <p class="pr-muted small">命令行等价：<span class="pr-mono" data-cli></span></p>
+    </div>
+  </div>
+  <script type="application/json" id="rules-data" set:html={JSON.stringify(browserData).replaceAll('<', '\\u003c')} />
+</StarlightPage>
+
+<script>
+  import { renderAgentsMd } from '../../tools/agents-md-core.mjs';
+
+  // 页签：点击或左右方向键切换。
+  const list = document.querySelector<HTMLElement>('[data-tabs]')!;
+  const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  const select = (t: HTMLButtonElement) => {
+    for (const x of tabs) {
+      const on = x === t;
+      x.setAttribute('aria-selected', String(on));
+      x.tabIndex = on ? 0 : -1;
+      document.getElementById(x.getAttribute('aria-controls')!)!.hidden = !on;
+    }
+  };
+  list.addEventListener('click', (e) => { const t = (e.target as HTMLElement).closest<HTMLButtonElement>('[role="tab"]'); if (t) select(t); });
+  list.addEventListener('keydown', (e) => {
+    const i = tabs.indexOf(document.activeElement as HTMLButtonElement);
+    if (i < 0 || (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft')) return;
+    const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    n.focus(); select(n); e.preventDefault();
+  });
+
+  // 生成器
+  const data = JSON.parse(document.getElementById('rules-data')!.textContent!);
+  const gen = document.querySelector<HTMLElement>('[data-gen]')!;
+  const render = () => {
+    const tags = new Set([...gen.querySelectorAll<HTMLInputElement>('[data-tag]')].filter((x) => x.checked).map((x) => x.value));
+    const soft = gen.querySelector<HTMLInputElement>('[data-soft]')!.checked;
+    const { text, count } = renderAgentsMd(data, tags, soft);
+    gen.querySelector('[data-preview]')!.textContent = text;
+    gen.querySelector('[data-status]')!.textContent = `共 ${count} 条`;
+    gen.querySelector('[data-cli]')!.textContent = `npx plumbrule agents-md${tags.size ? ` --tags ${[...tags].join(',')}` : ''}${soft ? ' --soft' : ''}`;
+    return text;
+  };
+  gen.addEventListener('change', render);
+  gen.querySelector('[data-copy]')!.addEventListener('click', async () => {
+    const s = gen.querySelector('[data-status]')!;
+    try { await navigator.clipboard.writeText(render()); s.textContent = '已复制'; }
+    catch { s.textContent = '浏览器不允许写剪贴板，请手动选中上面的文字复制'; }
+  });
+  render();
+</script>
+
+<style>
+  .lede { color: var(--sl-color-gray-2); }
+  .tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 1.75rem; border-bottom: 1px solid var(--pr-line); }
+  .tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--sl-color-gray-2); font: inherit; padding: 0.5rem 0.875rem; cursor: pointer; min-height: 2.5rem; }
+  .tabs button[aria-selected='true'] { border-bottom-color: var(--sl-color-accent); color: var(--sl-color-accent); font-weight: 600; }
+  .panel { padding: 1.25rem 0; }
+  .panel > p { margin: 0 0 0.625rem; }
+  .dirs { margin-top: 1rem; overflow-x: auto; }
+  .dirs table { width: 100%; border-collapse: collapse; font-size: var(--sl-text-sm); }
+  .dirs th { text-align: start; background: var(--sl-color-gray-7); padding: 0.5rem 0.75rem; }
+  .dirs td { border-top: 1px solid var(--pr-line); padding: 0.5rem 0.75rem; white-space: nowrap; }
+  .small { font-size: var(--sl-text-sm); margin-top: 0.75rem; }
+  .gen { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-top: 1rem; }
+  .tags { flex: 1 1 16rem; margin: 0; padding: 0.875rem 1.125rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.375rem 0.75rem; font-size: var(--sl-text-sm); align-content: start; }
+  .tags legend { font-weight: 600; padding: 0 0.25rem; }
+  .tags .soft { grid-column: 1 / -1; margin-top: 0.375rem; color: var(--sl-color-gray-2); }
+  .out { flex: 2 1 26rem; min-width: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .preview { margin: 0; padding: 0.875rem 1.125rem; font-family: var(--sl-font-mono); font-size: 0.8125rem; line-height: 1.75; color: var(--sl-color-gray-1); white-space: pre-wrap; max-height: 28rem; overflow: auto; }
+  .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+  .out .small { margin: 0; word-break: break-all; }
+  @media (max-width: 30rem) { .tags { grid-template-columns: 1fr; } }
+</style>

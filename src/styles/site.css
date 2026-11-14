@@ -1,0 +1,99 @@
+/* 配色、字体与站点自有组件的样式。颜色只在这里定义，深色模式在下方重定义。 */
+:root {
+  --sl-font: Inter, 'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+  --sl-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+:root,
+:root[data-theme='light'] {
+  --sl-color-accent-low: #e6f2ee;
+  --sl-color-accent: #0b6e5b;
+  --sl-color-accent-high: #08513f;
+  --sl-color-white: #16191d;
+  --sl-color-gray-1: #2a3038;
+  --sl-color-gray-2: #3e4650;
+  --sl-color-gray-3: #5b6470;
+  --sl-color-gray-4: #8a929c;
+  --sl-color-gray-5: #d5d9de;
+  --sl-color-gray-6: #f0f2f4;
+  --sl-color-gray-7: #f5f6f7;
+  --sl-color-black: #fafaf8;
+  --sl-color-bg-nav: #ffffff;
+  --sl-color-bg-sidebar: #fafaf8;
+  --sl-color-hairline: #e3e5e8;
+  --sl-color-hairline-shade: #d5d9de;
+  --pr-card: #ffffff;
+  --pr-line: #e3e5e8;
+  --pr-hard-bg: #16191d;
+  --pr-hard-fg: #ffffff;
+  --pr-soft-line: #8a929c;
+  --pr-chip: #f0f2f4;
+  --pr-pending-bg: #fff4d6;
+  --pr-pending-fg: #6b4e00;
+  --pr-open-bg: #fffbeb;
+  --pr-open-line: #f1dfa6;
+  --pr-open-fg: #4a3a08;
+  --pr-bad: #8a2b1e;
+  --pr-code-bg: #16191d;
+  --pr-code-fg: #e9ecef;
+  --pr-code-dim: #9aa3ad;
+  --pr-code-prompt: #7fd1b9;
+}
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #0e2e27;
+  --sl-color-accent: #3fb89a;
+  --sl-color-accent-high: #7fd1b9;
+  --sl-color-white: #eef0f2;
+  --sl-color-gray-1: #d9dde2;
+  --sl-color-gray-2: #bfc5cc;
+  --sl-color-gray-3: #9aa3ad;
+  --sl-color-gray-4: #6b737d;
+  --sl-color-gray-5: #3a4048;
+  --sl-color-gray-6: #23282e;
+  --sl-color-gray-7: #1b1f24;
+  --sl-color-black: #111417;
+  --sl-color-bg-nav: #15191d;
+  --sl-color-bg-sidebar: #111417;
+  --sl-color-hairline: #2a3038;
+  --sl-color-hairline-shade: #3a4048;
+  --pr-card: #181c20;
+  --pr-line: #2a3038;
+  --pr-hard-bg: #eef0f2;
+  --pr-hard-fg: #111417;
+  --pr-soft-line: #6b737d;
+  --pr-chip: #23282e;
+  --pr-pending-bg: #3a2f0c;
+  --pr-pending-fg: #f5d77a;
+  --pr-open-bg: #241f0d;
+  --pr-open-line: #5a4a17;
+  --pr-open-fg: #f1e3b0;
+  --pr-bad: #f08a7a;
+  --pr-code-bg: #0b0d0f;
+  --pr-code-fg: #e9ecef;
+  --pr-code-dim: #8a929c;
+  --pr-code-prompt: #7fd1b9;
+}
+
+/* 通用小件 */
+.pr-badge { display: inline-block; font-size: 0.75rem; font-weight: 600; line-height: 1.5; padding: 0.0625rem 0.5rem; border-radius: 4px; white-space: nowrap; }
+.pr-badge.hard { background: var(--pr-hard-bg); color: var(--pr-hard-fg); border: 1px solid var(--pr-hard-bg); }
+.pr-badge.soft { border: 1px solid var(--pr-soft-line); color: var(--sl-color-gray-2); }
+.pr-badge.pending { background: var(--pr-pending-bg); color: var(--pr-pending-fg); border: 1px solid transparent; }
+.pr-chip { display: inline-block; font-size: 0.75rem; color: var(--sl-color-gray-2); background: var(--pr-chip); border-radius: 4px; padding: 0.0625rem 0.4375rem; }
+.pr-mono { font-family: var(--sl-font-mono); }
+.pr-muted { color: var(--sl-color-gray-3); }
+.pr-card { background: var(--pr-card); border: 1px solid var(--pr-line); border-radius: 10px; }
+.pr-code { background: var(--pr-code-bg); color: var(--pr-code-fg); border-radius: 10px; padding: 0.875rem 1.125rem; font-family: var(--sl-font-mono); font-size: 0.875rem; line-height: 1.9; overflow-x: auto; }
+.pr-code .p { color: var(--pr-code-prompt); user-select: none; }
+.pr-code .c { color: var(--pr-code-dim); }
+.pr-pill { border: 1px solid var(--sl-color-gray-5); background: var(--pr-card); color: var(--sl-color-gray-2); border-radius: 999px; padding: 0.1875rem 0.75rem; font: inherit; font-size: 0.8125rem; cursor: pointer; min-height: 2rem; }
+.pr-pill[aria-pressed='true'] { border-color: var(--pr-hard-bg); background: var(--pr-hard-bg); color: var(--pr-hard-fg); }
+.pr-btn { border: 1px solid var(--pr-hard-bg); background: var(--pr-hard-bg); color: var(--pr-hard-fg); border-radius: 8px; padding: 0.4375rem 0.875rem; font: inherit; font-size: 0.875rem; font-weight: 600; cursor: pointer; text-decoration: none; display: inline-block; }
+.pr-btn.ghost { background: var(--pr-card); color: var(--sl-color-white); border-color: var(--sl-color-gray-5); font-weight: 400; }
+.pr-btn:hover { opacity: 0.9; }
+
+/* 站点自有区块里的链接与标题尺寸 */
+:root { --sl-text-h2: 1.5rem; --sl-text-h3: 1.1875rem; }
+.not-content :where(a:not(.pr-btn)) { color: var(--sl-color-accent); text-decoration: none; }
+.not-content :where(a:not(.pr-btn)):hover { text-decoration: underline; }
+/* 首页不显示 Starlight 的标题栏（首页标题在正文里） */
+html[data-home] main > .content-panel:first-child { display: none; }

@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "plumbrule",
+  "compatibility_date": "2026-10-28",
+
+  // 只托管静态文件：没有 main，不运行 Worker 脚本，请求直接由构建产物响应。
+  "assets": {
+    "directory": "./dist/site",
+    // 静态站，找不到的路径返回 404.html。
+    "not_found_handling": "404-page"
+  },
+
+  // 站点只有一个公开域名，不再从 workers.dev 和预览地址提供重复内容。
+  "workers_dev": false,
+  "preview_urls": false
+}

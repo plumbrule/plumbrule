@@ -1,0 +1,14 @@
+---
+// 站点标志：铅锤图形 + 中文名 + 英文名。图形用 currentColor，深色模式下也看得清。
+---
+<a href="/" class="site-title">
+  <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><line x1="11" y1="1" x2="11" y2="15" stroke="currentColor" stroke-width="1.6" /><path d="M6 14 L16 14 L11 21 Z" fill="var(--sl-color-accent)" /><line x1="5" y1="3" x2="17" y2="3" stroke="currentColor" stroke-width="1.6" /></svg>
+  <span class="zh">准绳</span>
+  <span class="en" translate="no">Plumbrule</span>
+</a>
+<style>
+  .site-title { display: flex; align-items: center; gap: 0.625rem; text-decoration: none; color: var(--sl-color-white); white-space: nowrap; }
+  .zh { font-weight: 700; font-size: 1.125rem; }
+  .en { font-size: 0.8125rem; color: var(--sl-color-gray-3); }
+  @media (max-width: 30rem) { .en { display: none; } }
+</style>

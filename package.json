@@ -8,11 +8,26 @@
   "scripts": {
     "check": "node tools/check.ts",
     "gen:skill": "node tools/gen-skill.ts",
-    "pack:cli": "pnpm gen:skill && rm -rf cli/skill && cp -r dist/skill cli/skill && cd cli && npm pack --pack-destination ../dist"
+    "pack:cli": "pnpm gen:skill && rm -rf cli/skill && cp -r dist/skill cli/skill && cd cli && npm pack --pack-destination ../dist",
+    "dev": "astro dev",
+    "build": "pnpm check && pnpm gen:skill && astro build && node tools/post-build.ts",
+    "preview": "astro preview",
+    "deploy": "pnpm build && wrangler deploy"
   },
   "devDependencies": {
+    "@astrojs/starlight": "0.42.8",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
+    "astro": "7.4.0",
+    "marked": "18.1.2",
+    "wrangler": "4.156.0",
     "yaml": "^2.9.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "workerd"
+    ]
   }
 }

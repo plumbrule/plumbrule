@@ -1,0 +1,40 @@
+---
+// 站点头部：标志、主导航、搜索、深浅色切换、GitHub。在 Starlight 自带头部上加了主导航。
+import Search from 'virtual:starlight/components/Search';
+import SiteTitle from 'virtual:starlight/components/SiteTitle';
+import SocialIcons from 'virtual:starlight/components/SocialIcons';
+import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
+
+const path = Astro.url.pathname;
+const nav = [
+  { href: '/topics/', label: '主题', on: path.startsWith('/topics/') },
+  { href: '/rules/', label: '全部规则', on: path.startsWith('/rules/') },
+  { href: '/install/', label: '安装', on: path.startsWith('/install/') },
+  { href: '/guide/', label: '怎么读规则', on: path.startsWith('/guide/') },
+  { href: '/changelog/', label: '更新记录', on: path.startsWith('/changelog/') },
+];
+---
+
+<div class="pr-header">
+  <div class="pr-title"><SiteTitle /></div>
+  <nav aria-label="主导航" class="pr-nav sl-hidden md:sl-flex">
+    {nav.map((n) => <a href={n.href} aria-current={n.on ? 'page' : undefined}>{n.label}</a>)}
+  </nav>
+  <div class="pr-search print:hidden"><Search /></div>
+  <div class="sl-hidden md:sl-flex print:hidden pr-right">
+    <ThemeSelect />
+    <SocialIcons />
+  </div>
+</div>
+
+<style>
+  .pr-header { display: flex; align-items: center; gap: 1.5rem; height: 100%; }
+  .pr-title { min-width: 0; overflow: clip; padding: 0.25rem; margin: -0.25rem; }
+  .pr-nav { gap: 1.25rem; font-size: 0.9375rem; white-space: nowrap; }
+  .pr-nav a { color: var(--sl-color-white); text-decoration: none; }
+  .pr-nav a:hover { color: var(--sl-color-accent-high); }
+  .pr-nav a[aria-current='page'] { color: var(--sl-color-accent-high); font-weight: 600; }
+  .pr-search { margin-inline-start: auto; display: flex; }
+  .pr-right { gap: 1rem; align-items: center; }
+  @media (min-width: 50rem) { .pr-search { min-width: 18rem; } }
+</style>

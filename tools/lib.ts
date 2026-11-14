@@ -1,10 +1,12 @@
 // 读取规则库的公共函数，供生成器使用。
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 
-export const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+// 网站构建时本文件会被打包到别处，找不到规则目录就退回到当前工作目录（仓库根）。
+const guess = join(dirname(fileURLToPath(import.meta.url)), '..');
+export const root = existsSync(join(guess, 'rules/_词表.yaml')) ? guess : process.cwd();
 const rulesDir = join(root, 'rules');
 const load = (p: string) => parse(readFileSync(p, 'utf8'));
 
@@ -29,7 +31,7 @@ export type Topic = {
   sources: Source[]; open_questions?: string[];
 };
 
-export const config: { siteUrl: string; version: string } = JSON.parse(readFileSync(join(root, 'plumbrule.config.json'), 'utf8'));
+export const config: { siteUrl: string; repoUrl: string; version: string } = JSON.parse(readFileSync(join(root, 'plumbrule.config.json'), 'utf8'));
 export const vocab = load(join(rulesDir, '_词表.yaml'));
 
 export function loadTopics(): Topic[] {
@@ -46,3 +48,18 @@ export const topicUrl = (t: Topic) => `${config.siteUrl}/topics/${t.slug}/`;
 
 /** 规则是否适用于给定的范围标签集合（all 总是适用）。 */
 export const ruleApplies = (r: Rule, tags: Set<string>) => r.applies.some((a) => a === 'all' || tags.has(a));
+
+export const ownership = load(join(rulesDir, '_归属.yaml'));
+/** 主题名称表（含还没整理的主题）。 */
+export const topicNames: Record<string, { slug: string; 名称: string; 前缀: string }> = ownership['主题'];
+
+/** 网站和技能里主题的分组。 */
+export const topicGroups: { name: string; ids: string[] }[] = [
+  { name: '工程基础', ids: ['01', '02', '03', '04', '05', '06'] },
+  { name: 'Web 与交互', ids: ['07', '08', '09'] },
+  { name: '编码 Agent 与大模型', ids: ['23', '24', '32'] },
+  { name: '语言', ids: ['10', '11', '12', '13', '14', '15'] },
+  { name: '后端与数据', ids: ['16', '17', '18', '19', '20', '21', '22'] },
+  { name: '安全、运维与合规', ids: ['25', '26', '27'] },
+  { name: '移动与桌面', ids: ['28', '29', '30', '31'] },
+];

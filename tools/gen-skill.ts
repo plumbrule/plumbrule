@@ -111,5 +111,6 @@ const data = {
 };
 writeFileSync(join(out, 'data/rules.json'), JSON.stringify(data));
 copyFileSync(join(root, 'tools/agents-md.mjs'), join(out, 'scripts/agents-md.mjs'));
+copyFileSync(join(root, 'tools/agents-md-core.mjs'), join(out, 'scripts/agents-md-core.mjs'));
 
 console.log(`技能已生成：${out}（${topics.length} 个主题，${data.rules.length} 条规则）`);

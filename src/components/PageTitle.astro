@@ -1,0 +1,23 @@
+---
+// 页面标题：主题页在标题上方显示所属分组，编号用等宽灰字。
+const PAGE_TITLE_ID = '_top'; // 与 Starlight 内部常量一致，供「回到顶部」使用
+import { topics, topicGroups } from '../lib/site.ts';
+
+const title = Astro.locals.starlightRoute.entry.data.title;
+const m = Astro.url.pathname.match(/^\/topics\/([^/]+)\/$/);
+const topic = m ? topics.find((t) => t.slug === m[1]) : undefined;
+const group = topic ? topicGroups.find((g) => g.ids.includes(topic.id))?.name : undefined;
+---
+
+{Astro.url.pathname === '/' ? null : <>
+{topic && <p class="crumb"><a href="/topics/">主题</a> / {group}</p>}
+<h1 id={PAGE_TITLE_ID}>{topic ? <><span class="num">{topic.id}</span> {topic.title}</> : title}</h1>
+</>}
+
+<style>
+  .crumb { margin: 1rem 0 0; font-size: var(--sl-text-sm); color: var(--sl-color-gray-3); }
+  .crumb a { color: inherit; }
+  .crumb + h1 { margin-top: 0.25rem; }
+  h1 { margin-top: 1rem; font-size: var(--sl-text-h1); line-height: var(--sl-line-height-headings); font-weight: 600; color: var(--sl-color-white); }
+  .num { font-family: var(--sl-font-mono); font-weight: 500; color: var(--sl-color-gray-3); }
+</style>
