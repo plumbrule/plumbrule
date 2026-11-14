@@ -25,6 +25,7 @@ schema/           主题文件的 JSON Schema
 tools/            校验、技能生成、AGENTS.md 生成、构建后打包
 src/              网站（Astro Starlight），页面在构建时读取 rules/
 cli/              安装器（npm 包 plumbrule）
+.agents/skills/   维护技能 plumbrule-maintain（.claude/skills 里是指向它的链接）
 docs/             编写指南、计划文档
 ```
 
@@ -38,12 +39,17 @@ pnpm check        # 校验全部规则：结构、编号、引用、软措辞
 pnpm dev          # 本地预览网站
 pnpm build        # 校验 → 生成技能 → 构建网站 → 打包技能 zip（输出在 dist/site）
 pnpm pack:cli     # 生成安装器的 npm 包（dist/plumbrule-<版本>.tgz）
+pnpm release 0.2.0  # 准备发布：统一版本号、更新编号台账、构建打包
 pnpm run deploy   # 构建并部署到 Cloudflare Workers（静态资源）；注意 `pnpm deploy` 是 pnpm 自带命令，要加 run
 ```
 
-## 改规则
+## 维护
 
-先读 [docs/编写指南.md](docs/编写指南.md)，改完运行 `pnpm check`。每类事项只归一个主题管，归属见 `rules/_归属.yaml`。
+先读 [docs/编写指南.md](docs/编写指南.md)，改完运行 `pnpm check`。每类事项只归一个主题管，归属见 `rules/_归属.yaml`。已发布的规则编号不能删、不能复用，删掉的登记在 `rules/_编号台账.yaml`。
+
+修改、新增、废弃规则，新增主题，吸收调研，定期复核，发布新版本，这些事的完整步骤写在维护技能 [.agents/skills/plumbrule-maintain/SKILL.md](.agents/skills/plumbrule-maintain/SKILL.md) 里。在本仓库里打开 Claude Code 或 Codex 就能用：Claude Code 输入 `/plumbrule-maintain`，Codex 输入 `$plumbrule-maintain`；也可以直接说要做什么。
+
+发布：先在更新记录里写好「## 新版本号（未发布）」，再运行 `pnpm release <新版本号>`。部署网站和发布 npm 由维护者手动执行。
 
 ## 授权
 
