@@ -1,0 +1,584 @@
+id: "10"
+slug: typescript
+title: TypeScript 与 Node
+summary: TypeScript / JavaScript / Node 的语言层约定：运行时版本策略、包管理器与锁文件、tsconfig 严格选项、模块格式、lint 与格式化、单元测试与属性测试、运行时校验，以及查询层、迁移工具和 OpenAPI 生成器的选型。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Node 运行时的版本策略，Bun / Deno 的使用条件
+    - 包管理器、锁文件、安装脚本与发布冷却期的具体配置
+    - tsconfig 严格选项、类型检查、Node 直接运行 .ts 的边界
+    - 模块格式（ESM / CJS）、导入路径、库的发布格式
+    - lint、格式化工具及类型感知规则
+    - 单元测试、属性测试、变异测试、HTTP 模拟库
+    - 运行时校验库、配置解析
+    - Node 的异步、取消、并发、子进程写法
+    - 查询构建器 / ORM、数据库迁移工具、PostgreSQL 驱动
+    - OpenAPI 的 TypeScript 生成器、服务端 HTTP 框架、日志库
+  excludes:
+    - { what: 格式化与 lint 的通用原则、命名、错误传播、日志字段, see: "02" }
+    - { what: 测试分层、覆盖率口径、不稳定测试、验收证据, see: "04" }
+    - { what: 浏览器 E2E 工具, see: "04" }
+    - { what: 前端框架、组件库、样式、前端构建, see: "07" }
+    - { what: 接口风格、OpenAPI 契约语义、错误格式、幂等语义, see: "16" }
+    - { what: 迁移原则、事务、乐观锁、outbox、备份, see: "17" }
+    - { what: 任务队列、缓存、调度、工作流引擎, see: "18" }
+    - { what: 登录、令牌校验、密码哈希、授权模型, see: "19" }
+    - { what: 文档、表格、PDF 的解析库, see: "20" }
+    - { what: 供应链总体规则、密钥扫描、SAST、SBOM、Web 安全, see: "25" }
+    - { what: 容器镜像、健康检查、优雅停机、OpenTelemetry, see: "26" }
+    - { what: 开源许可口径与许可扫描工具, see: "27" }
+    - { what: 本机沙箱与不可信代码隔离, see: "32" }
+overview: |
+  1. **Node 用仍在维护期的 LTS。** 不用已停止维护的版本、奇数号的短期版本和预发布版本。Bun、Deno 要有兼容验证才上生产。
+  2. **一个包管理器、一份锁文件、CI 冻结安装。** 默认 pnpm；`packageManager` 写精确版本。依赖的安装脚本默认不执行，只放行白名单；开启发布冷却期。
+  3. **`strict` 显式写出来。** TypeScript 7（Go 原生编译器）已经发布，默认值也变了，靠默认值不可靠。再加上 `noUncheckedIndexedAccess`、`verbatimModuleSyntax` 等。
+  4. **能跑不等于类型对。** Node 直接运行 `.ts` 只是把类型擦掉，不做类型检查；esbuild、tsx、Vite 也一样。CI 必须单独跑 `tsc --noEmit`。
+  5. **类型在运行时不存在。** HTTP 请求、环境变量、消息、数据库 JSON、第三方和模型返回的数据，进业务前用 Zod 这类库解析，不用 `as` 糊过去。
+  6. **统一 ESM。** 相对导入写扩展名；库默认只发 ESM，用 `exports` 声明入口。
+  7. **格式化和 lint 默认 Biome。** 需要完整的类型感知规则（如漏掉的 `await`）时，再加 typescript-eslint，但只用它的类型规则，格式化仍只归一个工具。
+  8. **测试默认 Vitest，有不变量的代码加 fast-check 属性测试。**
+  9. **数据层：** 默认 Kysely + node-postgres，迁移用所选工具自带的 CLI 并人工评审 SQL；schema 想写在 TypeScript 里的选 Drizzle。OpenAPI 客户端默认 openapi-typescript + openapi-fetch，生成物只读。
+  10. **TypeScript 7 生态还在追赶。** 依赖编译器编程接口的工具（typescript-eslint 的类型规则、ts-morph 等）暂时要配 TypeScript 6 的接口；升级大版本先跑版本矩阵。
+rules:
+  # ── 运行时与包管理 ──
+  - id: TS-001
+    title: 生产环境的 Node 只用仍在维护期的 LTS 主线并跟进安全补丁；不用已停止维护、奇数号短期版本或预发布版本
+    level: hard
+    check: auto
+    how: CI 打印 `node --version` 并对照官方发布计划；容器镜像扫描标出停止维护的运行时
+    applies: [lang:ts]
+    why: 停止维护的版本不再有安全修复；短期版本和预发布版本的支持期太短或不稳定。
+    detail: |
+      - 新项目选当前活跃的 LTS；存量项目可以留在另一条仍在维护期的 LTS 上，但要在其停止维护前完成升级。
+      - Bun、Deno 上生产前，要在目标平台上验证所用的原生扩展、信号、子进程和文件系统行为。
+    sources: [S01]
+  - id: TS-002
+    title: 只提交一种锁文件，CI 用冻结锁文件的方式安装（`pnpm install --frozen-lockfile` 或 `npm ci`）
+    level: hard
+    check: auto
+    how: CI 检查仓库里只有一种锁文件；安装命令带冻结参数，锁文件与清单不一致时失败
+    applies: [lang:ts]
+    why: 混用包管理器或不冻结安装，每次装到的依赖都可能不同，问题无法复现，也给投毒版本留了口子。
+    sources: [S08]
+  - id: TS-003
+    title: package.json 用 `engines` 声明支持的 Node 范围，用 `packageManager` 写包管理器的精确版本
+    level: soft
+    check: auto
+    how: 脚本检查两个字段存在，且 CI、镜像里的版本落在声明范围内
+    applies: [lang:ts]
+    why: 只在 README 里写版本没人看；写进清单后，版本管理工具和 CI 才能读同一份。
+    detail: 本机用 mise 等版本管理工具读取同一份声明，不在多个地方各写一遍。
+  - id: TS-004
+    title: 构建和 CI 里不临时安装 `latest` 版本的工具，不用 `npx 包名@latest` 这类不锁版本的调用
+    level: hard
+    check: semi
+    how: 在 CI 配置、Dockerfile、脚本里搜索 `@latest`、`npm install -g` 和不带版本的 `npx`，评审确认
+    applies: [lang:ts]
+    why: 不锁版本的工具每次构建都可能变，而且绕过了锁文件和冷却期，是供应链攻击的常见入口。
+    see: ["25"]
+  - id: TS-005
+    title: 依赖的安装脚本默认不执行，只对审查过的包逐个放行；禁止整体放开
+    level: hard
+    check: auto
+    how: pnpm 保持 `strictDepBuilds` 开启，用 `allowBuilds` 列白名单；CI 检查没有 `dangerouslyAllowAllBuilds`；白名单文件写进 CODEOWNERS
+    applies: [lang:ts]
+    why: 安装脚本能在开发机和 CI 上执行任意代码，近年的 npm 投毒事件大多经由它窃取凭据。
+    detail: |
+      - pnpm 新版默认就不执行未放行的安装脚本，且装到未放行的包会失败；不要为了省事把它关掉。
+      - 用 npm 的项目用 `--ignore-scripts` 安装，再对需要编译的包单独执行。
+      - 安装依赖的 CI 步骤不持有发布令牌和生产凭据。
+    sources: [S06, S07, S08]
+    see: ["25"]
+  - id: TS-006
+    title: 开启发布冷却期：刚发布的新版本过一段时间才允许安装；紧急安全修复用精确版本单独放行
+    level: soft
+    check: auto
+    how: 检查 pnpm 配置里的 `minimumReleaseAge` 没有被设为 0；例外写进 `minimumReleaseAgeExclude` 并经评审
+    applies: [lang:ts]
+    why: 被投毒的版本通常在发布后几小时内被发现并撤下，冷却期能避开这段窗口。
+    ref_value: pnpm 新版默认 1440 分钟（1 天）；风险高的项目可以设得更长，这是参考做法，没有统一标准。
+    sources: [S06, S07]
+    see: ["25"]
+  - id: TS-007
+    title: 发布到 npm 的包用 OIDC 可信发布并生成来源证明，CI 里不保存长期有效的 npm 令牌
+    level: hard
+    check: auto
+    how: 检查发布工作流使用可信发布配置、带来源证明；仓库和 CI 密钥里没有 npm 长期令牌
+    applies: [lang:ts, kind:library]
+    why: 长期令牌一旦泄漏，攻击者就能以你的名义发布恶意版本。
+    sources: [S09, S16]
+    see: ["25"]
+  - id: TS-008
+    title: 库发布前用 `npm pack` 打包，在一个干净的项目里安装，验证导入、类型和最低支持的 Node 版本
+    level: soft
+    check: auto
+    how: CI 任务：打包、在空目录安装、分别用 ESM 导入和类型检查，在最低和最新 Node 版本上各跑一次
+    applies: [lang:ts, kind:library]
+    why: 在单仓里能用不代表发出去能用，漏打包文件、`exports` 写错只有在真实消费方那里才暴露。
+  # ── TypeScript 配置与类型检查 ──
+  - id: TS-009
+    title: tsconfig 显式写 `strict` 为 true，不靠默认值；不得为了通过检查关掉 strict 的子项
+    level: hard
+    check: auto
+    how: 脚本检查生效的 tsconfig（`tsc --showConfig`）里 strict 为 true，且没有把 `strictNullChecks` 等子项设为 false
+    applies: [lang:ts]
+    why: TypeScript 7 改了多项默认值，不同版本、不同工具读到的默认值可能不同；关掉 strict 子项会把空值和隐式 any 错误放到运行时。
+    sources: [S02]
+  - id: TS-010
+    title: 新项目在 strict 之外再开启 `noUncheckedIndexedAccess`、`noImplicitOverride`、`noFallthroughCasesInSwitch`、`verbatimModuleSyntax`，并显式写 `types`
+    level: soft
+    check: auto
+    how: 脚本检查 tsconfig 中这些选项
+    applies: [lang:ts]
+    why: 这几项能抓到下标越界、漏写 override、switch 穿透、类型导入混进运行时等常见错误，代价很小。
+    detail: |
+      - `types` 在新版中默认不再自动包含所有 `@types` 包，Node 项目写 `["node"]`，测试目录按需补测试库的类型。
+      - `exactOptionalPropertyTypes` 更严格，存量项目开启改动面大，可按模块逐步开。
+      - 大项目可以保留 `skipLibCheck: true` 以控制检查时间，但要知道它会跳过依赖的声明文件错误。
+    sources: [S02]
+  - id: TS-011
+    title: CI 必须单独跑一次类型检查（`tsc --noEmit`）；Node 直接运行 .ts、esbuild、tsx、Vite 编译成功都不算类型通过
+    level: hard
+    check: auto
+    how: CI 中有独立的类型检查步骤，失败即阻断合并
+    applies: [lang:ts]
+    why: 这些工具只把类型擦掉再运行，不检查类型；不单独检查，类型错误会一路带到生产。
+    sources: [S03]
+  - id: TS-012
+    title: 直接用 Node 运行 .ts 的项目必须开启 `erasableSyntaxOnly` 和 `verbatimModuleSyntax`，不用 enum、带运行时代码的 namespace、参数属性，类型导入写 `import type`
+    level: hard
+    check: auto
+    how: tsconfig 开启这两项后，`tsc --noEmit` 会直接报出不可擦除的语法和缺少 `type` 的类型导入
+    applies: [lang:ts]
+    why: Node 只会把类型语法替换成空白，遇到需要生成代码的语法会报错，没写 `type` 的类型导入会被当成值导入，运行时失败。
+    detail: |
+      - Node 不读 tsconfig，所以 `paths` 别名、`target` 等设置对它无效；也不会处理 `node_modules` 里的 .ts 文件。
+      - enum 改用 `as const` 对象加联合类型；参数属性改成显式字段赋值。
+    sources: [S03]
+  - id: TS-013
+    title: 测试、脚本和工具配置文件也纳入类型检查，不用 `exclude` 把它们排除在外
+    level: soft
+    check: semi
+    how: 检查 `tsc --listFilesOnly` 的输出包含测试和脚本目录；需要不同设置时用单独的 tsconfig 并在 CI 里一起检查
+    applies: [lang:ts]
+    why: 构建配置排除测试目录很常见，但如果检查也用同一份配置，测试代码就从没被检查过。
+  - id: TS-014
+    title: 不用 `any`、非空断言 `!` 和 `as` 绕过类型错误；必须抑制时用 `@ts-expect-error` 写明原因，禁用 `@ts-ignore` 和 `@ts-nocheck`
+    level: soft
+    check: auto
+    how: 开启 lint 的相应规则（Biome 的 `noExplicitAny`、`noNonNullAssertion`，typescript-eslint 的 `ban-ts-comment` 等）；例外按 02 的要求写理由
+    applies: [lang:ts]
+    why: 这些写法让编译器闭嘴，错误照样会在运行时出现，而且以后没人知道这里本来有问题。
+    detail: 未知结构的数据用 `unknown` 接住，再经校验收窄；生成的代码目录可以在专门的例外配置里排除。
+    see: ["02"]
+  # ── 运行时校验与配置 ──
+  - id: TS-015
+    title: 来自外部的数据（HTTP 请求、环境变量、消息、文件、数据库 JSON 列、第三方和模型返回的结果）进入业务前，用运行时校验库解析，不得只用 `as` 声明类型
+    level: hard
+    check: semi
+    how: lint 找候选（`JSON.parse` 或 `response.json()` 后直接 `as`、typescript-eslint 的 `no-unsafe-*` 规则）；评审检查每个入口都有 schema 解析
+    applies: [lang:ts]
+    why: TypeScript 的类型在运行时全部擦除，外部数据长什么样只有运行时检查才知道；从 OpenAPI 生成的类型同样不做运行时检查。
+    detail: |
+      - 一条链路选一种校验方式：用 Fastify 的就用它的 JSON Schema 校验，否则用 Zod；不要同一个入口校验两遍。
+      - 校验失败返回明确的错误，不把原始输入写进日志。
+    sources: [S14]
+    see: ["16", "25"]
+  - id: TS-016
+    title: 配置只在一个入口模块里读取环境变量并用 schema 解析，其他代码从这个模块取值，不直接读 `process.env`
+    level: soft
+    check: auto
+    how: lint 禁止在配置模块以外使用 `process.env`（如 Biome 的 `noProcessEnv` 或 ESLint 的 `n/no-process-env`）
+    applies: [lang:ts]
+    why: 到处读 `process.env` 无法在启动时一次性发现缺失和格式错误的配置，也查不清有哪些配置项。
+    see: ["02"]
+  # ── 模块格式 ──
+  - id: TS-017
+    title: '新项目统一用 ESM：package.json 设 `"type": "module"`；Node 直接运行的代码用 `NodeNext` 模块解析，相对导入写文件扩展名'
+    level: soft
+    check: auto
+    how: 检查 package.json 和 tsconfig 的模块设置；`tsc --noEmit` 在 NodeNext 下会报出缺扩展名的相对导入
+    applies: [lang:ts]
+    why: ESM 是 JavaScript 的标准模块格式；CJS 和 ESM 混用时的互操作问题很难排查。
+    detail: |
+      - 源码里写 `./x.ts` 时，用 `rewriteRelativeImportExtensions` 让编译输出变成 `./x.js`。
+      - 由打包工具处理的前端代码可以用 `bundler` 模块解析，见 07。
+    sources: [S03]
+  - id: TS-018
+    title: 不依赖 tsconfig 的 `paths` 别名在运行时生效；需要内部别名时用 package.json 的 `imports`（以 `#` 开头的子路径导入）
+    level: soft
+    check: auto
+    how: 检查 tsconfig 是否配置了 `paths`；有的话在评审时确认运行时有对应的解析方式
+    applies: [lang:ts]
+    why: tsconfig 的 `paths` 只影响类型检查，Node 不认识，构建输出能过检查却在运行时找不到模块。
+    sources: [S03]
+  - id: TS-019
+    title: 库默认只发布 ESM，用 `exports` 字段声明入口和类型文件；确有 CJS 使用方时才发布双格式
+    level: soft
+    check: semi
+    how: 检查 package.json 的 `exports`；双格式包要说明使用方并在 TS-008 的打包测试里覆盖两种导入
+    applies: [lang:ts, kind:library]
+    why: 双格式包容易出现同一个模块被加载两份、类型和实现对不上的问题。
+  # ── lint 与格式化 ──
+  - id: TS-020
+    title: 仓库只用一个格式化工具（默认 Biome），CI 用检查模式运行，有差异即失败
+    level: hard
+    check: auto
+    how: CI 运行 `biome ci .`（或用 Prettier 的项目运行 `prettier --check .`）；检查没有同时配置第二个格式化工具
+    applies: [lang:ts]
+    why: 两个格式化工具会互相改对方的输出，每次提交都出现无意义的差异。
+    sources: [S04]
+    see: ["COD-038"]
+  - id: TS-021
+    title: 每个 Promise 都要 await、return，或显式用 `void` 标记并处理错误；用 lint 的漏 await 规则检查
+    level: hard
+    check: auto
+    how: 开启 typescript-eslint 的 `no-floating-promises` 和 `no-misused-promises`（或 Biome 的对应规则，覆盖不全时见 TS-022）
+    applies: [lang:ts]
+    why: 漏掉的 await 会让错误变成未处理的拒绝，Node 默认会因此让进程退出；也会让操作在事务或请求结束后才执行。
+    sources: [S04, S05]
+  - id: TS-022
+    title: 需要完整的类型感知 lint 时，在 Biome 之外只补 typescript-eslint 的类型规则，格式化仍只归一个工具
+    level: soft
+    check: semi
+    how: 检查 ESLint 配置只启用类型相关规则、没有格式化类规则；CI 里两者都跑
+    applies: [lang:ts]
+    why: Biome 自己实现了类型推断，部分类型规则的检出率还不如 typescript-eslint；只补缺的那部分，避免两套工具规则重叠。
+    ref_value: Biome 官方称其漏 await 规则的检出率约为 typescript-eslint 的 75%（初步测试，2025 年发布时的数据）。
+    sources: [S04, S05]
+  # ── 异步、并发与子进程 ──
+  - id: TS-023
+    title: 发出网络请求和其他 IO 时传入 AbortSignal 并设超时，取消信号一路传到最底层的调用
+    level: soft
+    check: semi
+    how: 评审时检查 `fetch` 和客户端库调用是否带 `signal`；lint 找出没有 signal 参数的 `fetch` 作为候选
+    applies: [lang:ts]
+    why: 没有超时和取消的调用会一直挂着，占住连接和内存；只在外层取消、内层不传，底下的请求照样在跑。
+    detail: '`AbortSignal.timeout(ms)` 只负责产生取消信号，被调用的库忽略 signal 时依然会挂住，选库时要确认它支持取消。'
+    see: ["02"]
+  - id: TS-024
+    title: 对数量不定的集合并发处理时限制并发数，不直接 `Promise.all(items.map(...))`
+    level: soft
+    check: semi
+    how: 评审时检查对查询结果、文件列表等集合的 `Promise.all`；用 `p-limit` 等库限制并发
+    applies: [lang:ts]
+    why: 无界并发会一次打出成千上万个请求，压垮下游或耗尽内存和连接池。
+    detail: 一个失败就该终止全部时，失败后调用 `abort()` 取消其余任务；需要收集全部结果时用 `Promise.allSettled`。
+  - id: TS-025
+    title: 启动子进程用参数数组（`spawn`、`execFile`），不把含外部输入的字符串交给 shell（`exec`、`shell` 设为 true）
+    level: hard
+    check: semi
+    how: SAST 规则或 lint 标出 `exec`、`execSync` 和 `shell` 设为 true 的调用，评审确认参数不含外部输入
+    applies: [lang:ts]
+    why: 交给 shell 的字符串一旦混进外部输入，就是命令注入。
+    detail: 子进程要限制运行时间和输出大小，并在退出或取消时回收整棵进程树；只杀主进程会留下孙进程。
+    sources: [S11]
+    see: ["25", "32"]
+  - id: TS-026
+    title: 不把 Node 的 `vm` 模块或权限模型（`--permission`）当作运行不可信代码的沙箱
+    level: hard
+    check: manual
+    how: 评审时检查执行外部提交代码、插件或 Agent 生成代码的地方，确认隔离靠容器、虚拟机或独立系统用户
+    applies: [lang:ts]
+    why: Node 官方明确说明权限模型和 `vm` 都不能防御恶意代码，只能减少误操作。
+    sources: [S10]
+    see: ["32"]
+  # ── 测试 ──
+  - id: TS-027
+    title: 单元测试默认用 Vitest；一个仓库只维护一套单元测试框架
+    level: soft
+    check: auto
+    how: 检查依赖清单里没有同时出现两套单元测试框架（存量迁移期间除外，需写明期限）
+    applies: [lang:ts]
+    why: 两套框架意味着两套断言、模拟和配置，新人和 Agent 都会写混。
+    detail: 零依赖的小库或 CLI 可以用 Node 自带的 `node:test`；存量 Jest 项目可以保留，迁移不是必须的。
+    sources: [S15]
+    see: ["04"]
+  - id: TS-028
+    title: 解析、序列化、校验、金额和日期计算这类有明确不变量的代码，用 fast-check 写属性测试
+    level: soft
+    check: semi
+    how: 评审时检查这类模块是否有属性测试；失败时记录种子和缩减后的最小样例（见 04）
+    applies: [lang:ts]
+    why: 手写的样例只覆盖想得到的情况，属性测试能自动找出边界上的反例。
+    see: ["04"]
+  - id: TS-029
+    title: 不把 `.only` 提交进主干，不用 `|| true`、跳过测试或删断言的方式让 CI 变绿
+    level: hard
+    check: auto
+    how: lint 禁止 `.only`（如 `@vitest/eslint-plugin` 的 `no-focused-tests`）；CI 配置检查测试命令没有 `|| true`；新增 `.skip` 要求写原因和任务编号
+    applies: [lang:ts]
+    why: 这些写法让测试看起来通过，实际什么都没测。
+    see: ["03", "04"]
+  # ── 数据访问 ──
+  - id: TS-030
+    title: SQL 一律参数化或用查询构建器拼装，不把外部输入拼进 SQL 字符串；原始 SQL 接口的调用要评审
+    level: hard
+    check: semi
+    how: SAST 规则标出字符串拼接的 SQL 和 `sql.raw`、`$queryRawUnsafe` 等原始接口，评审确认没有外部输入
+    applies: [lang:ts]
+    why: SQL 注入是最常见也最严重的漏洞之一。
+    detail: Kysely、Drizzle 的 `sql` 模板标签会把插值变成参数，是安全的；名字里带 raw 或 unsafe 的接口不会。
+    sources: [S17]
+    see: ["25"]
+  - id: TS-031
+    title: 数据库迁移用所选查询层或独立迁移工具的 CLI 生成 SQL 文件入库，SQL 经人工评审后再执行
+    level: soft
+    check: semi
+    how: 迁移目录写进 CODEOWNERS；评审时看生成的 SQL，不只看 schema 定义的变化
+    applies: [lang:ts]
+    why: 工具生成的迁移可能把改名变成删列再加列，只有看 SQL 才发现得了。
+    detail: 迁移何时执行、能否回滚、怎么和旧版本代码兼容，见 17。
+    see: ["17"]
+  - id: TS-032
+    title: 每个进程只创建一个数据库连接池，连接上限和获取超时可配置；不在每个请求里新建连接或连接池
+    level: soft
+    check: semi
+    how: 评审时搜索 `new Pool`、`new Client` 的位置；压测时观察数据库连接数
+    applies: [lang:ts, kind:service]
+    why: 每请求建连接会在流量高峰时耗尽数据库连接。
+    sources: [S18]
+    see: ["17"]
+  # ── 接口与日志 ──
+  - id: TS-033
+    title: 从 OpenAPI 生成的 TypeScript 类型和客户端放在只读目录，不手改；CI 重新生成后用 `git diff --exit-code` 检查
+    level: hard
+    check: auto
+    how: CI 运行生成命令，有差异即失败
+    applies: [lang:ts]
+    why: 手改的生成代码下次生成就会丢，客户端也会和契约悄悄对不上。
+    sources: [S19]
+    see: ["16", "COD-009"]
+  - id: TS-034
+    title: 服务端用结构化日志库（默认 Pino）并配置敏感字段脱敏，不用 `console.log` 打业务日志
+    level: soft
+    check: auto
+    how: lint 在服务代码里禁止 `console`（如 Biome 的 `noConsole`），CLI 和脚本可放开；测试里检查日志不含令牌等字段
+    applies: [lang:ts, kind:service]
+    why: console 输出没有级别和字段，也不会自动脱敏。
+    detail: 日志字段和级别的含义见 02，采集和链路关联见 26。
+    sources: [S20]
+    see: ["02", "26"]
+  # ── 升级 ──
+  - id: TS-035
+    title: 升级 Node 或 TypeScript 的大版本时，先在 CI 里并行跑新旧两个版本，确认编译、lint、测试、生成器和构建工具都支持后再切换
+    level: soft
+    check: semi
+    how: 升级 PR 附版本矩阵的 CI 结果；评审检查依赖编译器接口的工具是否兼容
+    applies: [lang:ts]
+    why: 大版本会改默认值和接口；TypeScript 7 暂时没有稳定的编程接口，依赖它的工具不能直接跟着升级。
+    detail: TypeScript 7 下，typescript-eslint 的类型规则、ts-morph 等依赖编译器接口的工具，暂时要配合 TypeScript 6 的接口包使用，类型检查本身用 TypeScript 7 的 `tsc`。
+    sources: [S02, S21]
+choices:
+  - category: 运行时
+    pick: Node.js 仍在维护期的 LTS 主线
+    alternatives:
+      - { name: Bun, when: 想要一体化工具或更快启动，并已在目标平台验证原生扩展、信号和子进程行为 }
+      - { name: Deno, when: 需要默认权限隔离的脚本或边缘运行环境，并已验证所用 npm 包的兼容性 }
+    avoid:
+      - { name: 已停止维护的版本、奇数号短期版本、预发布版本, why: 没有安全修复或支持期太短 }
+    sources: [S01]
+  - category: Node 版本管理
+    pick: mise（读取项目里声明的版本）
+    alternatives:
+      - { name: fnm 或 nvm, when: 团队已经在用，且只需管 Node 一种运行时 }
+    avoid:
+      - { name: 只在 README 里写版本, why: 没法被工具读取和校验 }
+    notes: 多语言仓库里 mise 还能同时管 Go、Python 等运行时的版本。
+  - category: 包管理器
+    pick: pnpm（含 workspace）
+    alternatives:
+      - { name: npm, when: 单包项目，不想多装一个工具 }
+      - { name: Bun 的包管理器, when: 运行时也用 Bun }
+    avoid:
+      - { name: 一个仓库里混用多种包管理器和锁文件, why: 依赖解析结果不一致 }
+    license: MIT（待核实）
+    notes: pnpm 默认开启发布冷却期、默认拒绝未放行的安装脚本，供应链防护比 npm 默认配置强。内网环境需要镜像仓库保留包的发布时间信息，冷却期才能生效。
+    sources: [S06, S07]
+  - category: 单仓任务编排
+    pick: pnpm workspace 自带的过滤和递归命令
+    alternatives:
+      - { name: Turborepo 或 Nx, when: 包多、构建慢，需要任务图和缓存 }
+    avoid:
+      - { name: 包很少时就上任务图和远端缓存, why: 增加配置和运维成本，远端缓存在断网环境也用不了 }
+  - category: 类型检查
+    pick: TypeScript 7 的 `tsc --noEmit`
+    alternatives:
+      - { name: TypeScript 6 的接口包, when: typescript-eslint 类型规则、ts-morph 等工具需要编译器编程接口时，与 TypeScript 7 并存 }
+    avoid:
+      - { name: 把 esbuild、tsx、Node 能运行当成类型通过, why: 它们都不检查类型 }
+      - { name: 依赖编译器插件或 transformer 的方案, why: TypeScript 7 不支持 }
+    license: Apache-2.0（待核实）
+    sources: [S02, S21]
+  - category: 开发时直接运行 .ts
+    pick: Node 原生的类型擦除
+    alternatives:
+      - { name: tsx, when: 代码里还有 enum、参数属性等不可擦除的语法，或需要 tsconfig 的 `paths` }
+    avoid:
+      - { name: 用运行成功代替类型检查, why: 见 TS-011 }
+    sources: [S03]
+  - category: 构建
+    pick: 服务和 CLI 直接用 `tsc` 输出 JavaScript，不打包
+    alternatives:
+      - { name: tsdown, when: 发布库，需要生成声明文件、多入口和 `exports` 映射 }
+      - { name: esbuild, when: 需要单文件产物或冷启动敏感 }
+    avoid:
+      - { name: 发布未编译的 .ts 源码, why: Node 不处理 node_modules 里的 .ts 文件，消费方用不了 }
+    notes: tsdown 仍是 0.x 版本，锁精确版本并在升级时看变更记录。
+    sources: [S03, S22]
+  - category: 格式化与 lint
+    pick: Biome（一个工具同时管格式化和 lint）
+    alternatives:
+      - { name: ESLint + typescript-eslint + Prettier, when: 需要 Biome 没有的插件生态（如框架专用规则），或存量项目已稳定使用 }
+      - { name: Oxlint, when: 存量 ESLint 项目想先提速 lint，格式化另选一个工具 }
+    avoid:
+      - { name: 同时开两个以上格式化工具, why: 互相改对方的输出 }
+    license: MIT（待核实）
+    sources: [S04]
+  - category: 类型感知 lint 的补充
+    pick: typescript-eslint 的类型规则（如 `no-floating-promises`、`no-misused-promises`、`no-unsafe-*`），只启用 Biome 覆盖不全的那部分
+    when: 默认用 Biome，又需要完整的类型感知检查时
+    license: MIT（待核实）
+    sources: [S05]
+  - category: 单元测试
+    pick: Vitest
+    alternatives:
+      - { name: "node:test", when: 零依赖的小库或 CLI }
+      - { name: Jest, when: 存量项目已在用 }
+    avoid:
+      - { name: 一个仓库同时维护两套单元测试框架, why: 断言、模拟、配置各一套 }
+    license: MIT（待核实）
+    sources: [S15]
+  - category: 属性测试
+    pick: fast-check
+    license: MIT（待核实）
+  - category: 变异测试
+    pick: StrykerJS
+    when: 核心逻辑需要检验测试是否真的能发现错误时，按模块定期跑，不进每次提交的门禁
+    license: Apache-2.0（待核实）
+  - category: HTTP 模拟
+    pick: MSW（在网络层拦截请求）
+    avoid:
+      - { name: 到处手写 fetch 的替身, why: 和真实请求的行为差别大，维护成本高 }
+    license: MIT（待核实）
+  - category: 运行时校验
+    pick: Zod
+    alternatives:
+      - { name: Valibot, when: 前端或边缘环境对包体积敏感 }
+      - { name: 框架自带的 JSON Schema 校验（Fastify / Ajv）, when: 服务端已用 Fastify，校验和 OpenAPI 文档共用一份 schema }
+    avoid:
+      - { name: "`req.body as T` 或手写字段检查", why: 运行时没有任何保证 }
+    license: MIT（待核实）
+    sources: [S14]
+  - category: 服务端 HTTP 框架
+    pick: Fastify
+    alternatives:
+      - { name: Hono, when: 需要在 Node、Bun、Deno、边缘环境之间通用，或服务很小 }
+      - { name: NestJS, when: 团队大、模块多，明确需要依赖注入和统一的组织方式 }
+      - { name: Express, when: 存量项目 }
+    avoid:
+      - { name: 用 Node 自带的 http 模块手写路由和中间件, why: 请求体限制、超时、解析边界都要自己补，容易出错 }
+    license: MIT（待核实）
+    sources: [S23, S24]
+  - category: 查询构建器 / ORM
+    pick: Kysely（类型安全的 SQL 查询构建器）+ node-postgres
+    alternatives:
+      - { name: Drizzle ORM, when: 希望 schema 写在 TypeScript 里并由它生成迁移 }
+      - { name: Prisma ORM, when: 团队已熟悉，需要它的关系查询和工具链；断网环境要先验证代码生成步骤不需联网 }
+    avoid:
+      - { name: 手写字符串拼 SQL, why: 注入风险，见 TS-030 }
+    license: Kysely MIT（待核实）；Drizzle ORM Apache-2.0；Prisma ORM Apache-2.0
+    notes: 宣称兼容 PostgreSQL 的国产数据库，要用真实数据库实例测试事务、锁和迁移，不能只看驱动能连上。
+    sources: [S12, S13, S17]
+  - category: 数据库迁移工具
+    pick: 跟随查询层：Kysely 自带迁移器、Drizzle Kit、Prisma Migrate
+    alternatives:
+      - { name: node-pg-migrate, when: 只用 PostgreSQL，查询层不带迁移 }
+      - { name: dbmate 等与语言无关的工具, when: 多种语言的服务共用一个数据库时，统一用一个工具（见 17） }
+    avoid:
+      - { name: 一个数据库由两套迁移工具同时管理, why: 迁移历史分裂，无法判断当前结构 }
+    notes: 迁移原则（向前修复为主、与旧代码兼容、执行时机）见 17。
+    sources: [S12, S13, S17]
+  - category: PostgreSQL 驱动
+    pick: node-postgres（pg）+ 连接池
+    alternatives:
+      - { name: postgres.js, when: 偏好模板字符串写 SQL，且不用依赖 pg 的查询层 }
+    sources: [S18]
+  - category: OpenAPI 的 TypeScript 生成器
+    pick: openapi-typescript（生成类型）+ openapi-fetch（轻量客户端）
+    alternatives:
+      - { name: Orval, when: 前端需要直接生成 TanStack Query 的 hooks }
+      - { name: Hey API, when: 需要生成完整的 SDK（仍是 0.x，升级注意破坏性变化） }
+    avoid:
+      - { name: 多个生成器同时产出同一份客户端, why: 两份代码会不一致 }
+      - { name: 手写一份接口类型在前后端之间复制, why: 改接口后必然漂移 }
+    notes: 契约本身怎么写、谁是唯一来源，见 16。
+    license: MIT（待核实）
+    sources: [S19, S25, S26]
+  - category: 日志
+    pick: Pino
+    alternatives:
+      - { name: Winston, when: 存量项目 }
+    license: MIT（待核实）
+    sources: [S20]
+  - category: 并发控制
+    pick: p-limit
+    alternatives:
+      - { name: p-queue, when: 还需要优先级、暂停或速率限制 }
+    license: MIT（待核实）
+antipatterns:
+  - { bad: Node 直接运行 .ts 成功，就认为类型没问题, instead: CI 单独跑 `tsc --noEmit` }
+  - { bad: "`JSON.parse(body) as User`", instead: 用 Zod 等库解析后再使用 }
+  - { bad: tsconfig 不写 strict，依赖默认值, instead: "显式写 `strict: true`" }
+  - { bad: 用 tsconfig 的 `paths` 别名，构建后运行时报找不到模块, instead: 用 package.json 的 `imports` 子路径导入 }
+  - { bad: Biome、Prettier、ESLint 的格式化规则同时开, instead: 一个格式化工具，ESLint 只补类型规则 }
+  - { bad: 为了装上某个原生包，把安装脚本整体放开, instead: 只把这个包加入白名单 }
+  - { bad: "CI 里 `npx 某工具@latest`", instead: 把工具写进 devDependencies，用锁文件固定 }
+  - { bad: 对几万条记录 `Promise.all(rows.map(fetchSomething))`, instead: 用 p-limit 限制并发，或改成流式处理 }
+  - { bad: "`exec(\\`git clone ${url}\\`)`", instead: "`execFile('git', ['clone', url])`" }
+  - { bad: 用 `vm` 模块运行用户提交的代码, instead: 放进容器或虚拟机隔离（见 32） }
+  - { bad: 每个请求里 `new Pool()`, instead: 进程启动时创建一个连接池 }
+sources:
+  - { id: S01, title: Node.js Release Working Group（发布计划）, url: "https://github.com/nodejs/Release", publisher: Node.js, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S02, title: Announcing TypeScript 7.0, url: "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/", publisher: Microsoft, date: 2026-07-08, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Node.js: Modules: TypeScript", url: "https://nodejs.org/api/typescript.html", publisher: Node.js, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Biome v2—codename: Biotype", url: "https://biomejs.dev/blog/biome-v2/", publisher: Biome, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "typescript-eslint: Linting with Type Information", url: "https://typescript-eslint.io/getting-started/typed-linting", publisher: typescript-eslint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: pnpm 11.0 release, url: "https://pnpm.io/blog/releases/11.0", publisher: pnpm, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "pnpm: Mitigating supply chain attacks", url: "https://pnpm.io/supply-chain-security", publisher: pnpm, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "pnpm: Settings (pnpm-workspace.yaml)", url: "https://pnpm.io/settings", publisher: pnpm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "npm: Trusted publishing", url: "https://docs.npmjs.com/trusted-publishers/", publisher: npm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "Node.js: Permissions", url: "https://nodejs.org/api/permissions.html", publisher: Node.js, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "Node.js: Child process", url: "https://nodejs.org/api/child_process.html", publisher: Node.js, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Drizzle ORM, url: "https://github.com/drizzle-team/drizzle-orm", publisher: Drizzle Team, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: Prisma ORM（LICENSE）, url: "https://github.com/prisma/prisma/blob/main/LICENSE", publisher: Prisma, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: Zod, url: "https://github.com/colinhacks/zod", publisher: Zod, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Vitest, url: "https://github.com/vitest-dev/vitest", publisher: Vitest, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "npm: Generating provenance statements", url: "https://docs.npmjs.com/generating-provenance-statements", publisher: npm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: Kysely, url: "https://github.com/kysely-org/kysely", publisher: Kysely, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: node-postgres, url: "https://node-postgres.com/", publisher: node-postgres, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: openapi-typescript, url: "https://github.com/openapi-ts/openapi-typescript", publisher: openapi-ts, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: Pino, url: "https://github.com/pinojs/pino", publisher: Pino, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Announcing TypeScript 7.0 RC, url: "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0-rc/", publisher: Microsoft, date: 2026-06-18, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: tsdown, url: "https://github.com/rolldown/tsdown", publisher: Rolldown, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Fastify, url: "https://github.com/fastify/fastify", publisher: Fastify, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: Hono, url: "https://github.com/honojs/hono", publisher: Hono, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Orval, url: "https://orval.dev/", publisher: Orval, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: Hey API openapi-ts, url: "https://github.com/hey-api/openapi-ts", publisher: Hey API, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - TypeScript 7.1（稳定的编程接口）是否已发布、typescript-eslint 何时原生支持 TypeScript 7；目前依据是 7.0 RC 公告和社区报道，TS-035 的过渡做法到时要更新
+  - TypeScript 6 接口兼容包的确切包名和用法，未在官方文档核实
+  - Biome 类型规则的当前检出率（官方 75% 是 v2 发布时的初步数据），以及 `noFloatingPromises` 是否已移出试验分组
+  - 「新版 Node 不再自带 Corepack，需要单独安装」未联网核实
+  - Node 是否已移除 `--experimental-transform-types`（只在夜间版文档里看到），未核实正式版
+  - pnpm 当前大版本号、`minimumReleaseAge` 在默认值和显式设置时的严格程度差异（宽松模式会自动放行）需再核对
+  - Vitest、fast-check、StrykerJS、MSW、Kysely、Zod、Valibot、Fastify、Hono、Pino、p-limit、pnpm、Biome、typescript-eslint、openapi-typescript、Orval、Hey API、TypeScript 的许可证本次未联网核实（标「待核实」）
+  - Prisma 新版的代码生成和查询引擎在断网环境下是否还需要下载二进制，未核实
+  - Bun、Deno 与 Node 的具体兼容问题（原生扩展、信号、子进程）没有可靠资料
+  - 待补调研：内存泄漏排查工具（堆快照、clinic 等）与长时间运行进程的监测做法
+  - 待补调研：Turborepo、Nx、moon 的取舍细节
+  - 待补调研：Node 单文件可执行程序（SEA）的现状
+  - 待补调研：TypeScript 7 生态（tsdown、Vitest、各生成器）的兼容情况

@@ -1,0 +1,571 @@
+id: "11"
+slug: go
+title: Go
+summary: Go 项目的工具链与模块、格式化与 lint、错误处理、context、并发、测试、日志、HTTP 服务超时、数据库访问写法、迁移工具和漏洞扫描怎么做。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - go.mod、go.sum 与工具链版本策略
+    - gofmt、goimports、golangci-lint 及推荐 linter
+    - 错误包装与判断（%w、errors.Is/As）
+    - context 传递、goroutine 生命周期、竞态检测
+    - Go 的测试、fuzz、mock 写法
+    - log/slog 日志
+    - HTTP 服务端与客户端的超时和限制
+    - database/sql 与 pgx 的事务、查询写法；迁移工具选型
+    - 包依赖方向检查工具
+    - govulncheck 的用法
+  excludes:
+    - { what: 格式化与 lint 的通用原则、错误与日志的跨语言约定, see: "02" }
+    - { what: 测试分层、集成测试要接真实组件、覆盖率口径, see: "04" }
+    - { what: 模块划分与依赖方向的原则, see: "01" }
+    - { what: 接口风格、OpenAPI、幂等语义、错误响应格式, see: "16" }
+    - { what: 迁移原则、事务隔离、乐观锁、租约、outbox, see: "17" }
+    - { what: 任务队列、工作流、缓存、消息队列选型, see: "18" }
+    - { what: 安全扫描工具总体选型、SBOM、密钥管理, see: "25" }
+    - { what: 镜像、健康检查、停机编排、可观测性, see: "26" }
+    - { what: 开源许可证口径与许可扫描, see: "27" }
+overview: |
+  1. **版本跟着官方支持窗口走。** Go 官方同时支持最新的两个大版本；超出窗口就收不到安全补丁。`go.mod` 的 `go` 行写最低语言版本，构建用的工具链另外固定。
+  2. **go.mod 和 go.sum 都入库。** CI 用只读模式，检查 `go mod tidy` 没有差异；发布构建不用 `@latest`。
+  3. **格式不讨论。** gofmt + goimports，由 golangci-lint v2 统一执行；配置用 v2 格式，入库，CI 先校验配置再跑。
+  4. **错误不丢、不吞、不比字符串。** 用 `%w` 包装，用 `errors.Is` / `errors.As` 判断。
+  5. **context 是第一个参数并一路下传。** 不存进结构体，不在请求路径上换成 `context.Background()`。
+  6. **每个 goroutine 都知道怎么停。** 有限并发用 errgroup；测试里开 `-race`，停机路径用 goleak 查泄漏。
+  7. **HTTP 默认值不安全。** `http.Server` 自己设各项超时，客户端不用没有超时的 `http.DefaultClient`，请求体限大小。
+  8. **数据库：pgx + sqlc。** 参数化查询，事务带 ctx、defer 回滚、检查提交错误，rows 关闭并检查 `rows.Err()`。迁移默认 goose。
+  9. **日志用 log/slog。** 敏感类型实现 `LogValuer` 脱敏。
+  10. **govulncheck 进 CI。** 它按调用关系判断漏洞是否真的会被触发，比只看依赖版本误报少。
+rules:
+  # ── 工具链与模块 ──
+  - id: GO-001
+    title: 构建和运行用的 Go 版本必须在官方支持窗口内（最新的两个大版本），并及时升级到最新补丁版
+    level: hard
+    check: auto
+    how: CI 打印 `go version`，与官方发布列表比对；超出支持窗口时失败
+    applies: [lang:go]
+    why: 每个大版本只支持到再出两个新的大版本为止，之后的安全问题不再修。
+    sources: [S01]
+  - id: GO-002
+    title: go.mod 里的 `go` 行写项目需要的最低语言版本；构建用的工具链用 `toolchain` 行或构建镜像固定到补丁版，CI 和生产一致
+    level: soft
+    check: auto
+    how: CI 检查构建镜像的 Go 版本与 `toolchain` 行或版本文件一致
+    applies: [lang:go]
+    why: '`go` 行是语言要求，不是构建版本；只写一个大版本号，不同机器会用不同补丁版构建出不同结果。'
+    detail: |
+      - 库只写真正需要的最低 `go` 版本，不要因为自己升级了就抬高，否则会逼着调用方升级。
+      - 断网或受控构建环境设 `GOTOOLCHAIN=local`，禁止构建时自动下载工具链，所需版本预置在镜像里。
+    sources: [S02]
+  - id: GO-003
+    title: go.mod 和 go.sum 必须入库；CI 用 `-mod=readonly` 构建，并检查 `go mod tidy` 后没有差异
+    level: hard
+    check: auto
+    how: CI 设 `GOFLAGS=-mod=readonly`，运行 `go mod tidy -diff` 或 tidy 后 `git diff --exit-code go.mod go.sum`，再跑 `go mod verify`
+    applies: [lang:go]
+    why: go.sum 记录每个依赖的校验和，缺了它或允许 CI 改写，就无法保证每次构建用的是同一份代码。
+    sources: [S03]
+  - id: GO-004
+    title: 发布构建和 CI 里不得用 `go install …@latest` 或 `go get …@latest`；开发工具固定版本
+    level: hard
+    check: auto
+    how: CI 扫描脚本和 Makefile 中的 `@latest`；工具用 go.mod 的 `tool` 指令或写死版本安装
+    applies: [lang:go]
+    why: '`@latest` 每次解析出的版本可能不同，同一个提交今天和明天构建结果不一样。'
+    sources: [S03]
+  - id: GO-005
+    title: 私有模块用 `GOPRIVATE`（或 `GONOSUMDB`）限定到具体域名或路径，不在组织层关闭校验和数据库（`GOSUMDB=off`）
+    level: hard
+    check: semi
+    how: 检查 CI 环境变量和开发者模板；`GOSUMDB=off` 出现时要求说明
+    applies: [lang:go]
+    why: 关掉校验和数据库后，公开模块被篡改也发现不了。
+    sources: [S03]
+  - id: GO-006
+    title: 要求断网交付的 Go 项目，必须用内部模块代理或 vendor 目录，在无外网环境下重建一次并保留记录
+    level: hard
+    check: auto
+    how: 在隔离网络的 CI 里设 `GOPROXY=off`（vendor）或指向内部代理、`GOTOOLCHAIN=local`，跑构建和测试
+    applies: [lang:go, kind:onprem]
+    why: 本地能编译不代表隔离网络里能重建；模块、工具链、生成器都可能悄悄访问公网。
+    sources: [S03]
+    see: ["04", "26"]
+  # ── 格式化与 lint ──
+  - id: GO-007
+    title: 所有 Go 代码用 gofmt 格式化、goimports 整理导入；CI 检查没有格式差异
+    level: hard
+    check: auto
+    how: CI 运行 `golangci-lint fmt --diff`，有输出即失败；或 `gofmt -l .` 输出非空即失败
+    applies: [lang:go]
+    why: gofmt 是 Go 社区的统一格式，评审不必再讨论空白和导入顺序。
+    sources: [S04, S06]
+    see: ["COD-038"]
+  - id: GO-008
+    title: golangci-lint 的配置文件入库，用工具当前的配置格式；CI 先校验配置（`golangci-lint config verify`）再运行
+    level: hard
+    check: auto
+    how: CI 依次运行 `golangci-lint config verify` 和 `golangci-lint run ./...`；v1 配置先用 `golangci-lint migrate` 转换
+    applies: [lang:go]
+    why: v2 只接受 v2 格式；配置不校验时写错的键会被静默忽略，以为开了的检查其实没开。
+    detail: |
+      - `linters.default` 取 `standard`、`all`、`none`、`fast` 之一，再用 `enable` / `disable` 调整。
+      - gofmt、goimports、gofumpt 属于 `formatters`，不能再写进 `linters.enable`。
+    sources: [S05, S06]
+  - id: GO-009
+    title: '在默认 linter 之外显式启用一组推荐 linter，不用 `default: all` 再大面积关闭'
+    level: soft
+    check: semi
+    how: 评审 `.golangci.yml`：检查推荐集合是否启用、关闭项是否写明理由
+    applies: [lang:go]
+    why: 全开会带来大量误报，最后靠成片的 `nolint` 压下去，真正的问题反而被淹没。
+    detail: |
+      推荐起步集合：`govet`、`staticcheck`、`errcheck`、`errorlint`、`ineffassign`、`unused`、`bodyclose`、`noctx`、`contextcheck`、`containedctx`、`rowserrcheck`、`sqlclosecheck`、`gosec`、`revive`、`nolintlint`、`misspell`。
+      需要约束导入时加 `depguard`；`gocritic` 逐项评估后再开。
+    sources: [S05]
+  - id: GO-010
+    title: '`//nolint` 必须写明具体 linter 和理由；用 nolintlint 强制'
+    level: hard
+    check: auto
+    how: '启用 nolintlint，并设 `require-specific: true`、`require-explanation: true`'
+    applies: [lang:go]
+    why: 不指名的 nolint 会把以后新增的检查一起关掉，也没人知道当初为什么关。
+    sources: [S05]
+    see: ["COD-039"]
+  - id: GO-011
+    title: CI 必须运行 `go vet ./...` 并且没有报告
+    level: hard
+    check: auto
+    how: CI 单独运行 `go vet ./...`，或在 golangci-lint 中启用 govet
+    applies: [lang:go]
+    why: go vet 查的是编译能过但几乎一定是错的写法，如格式串参数不匹配、复制了锁、丢了 cancel。
+    sources: [S07]
+  # ── 错误处理 ──
+  - id: GO-012
+    title: 不得丢弃函数返回的 error；确实可以忽略的，显式写 `_ =` 并注释原因
+    level: hard
+    check: auto
+    how: 启用 errcheck
+    applies: [lang:go]
+    why: Go 的错误只是一个返回值，不检查就等于什么都没发生，失败会在很远的地方才暴露。
+    see: ["COD-010"]
+  - id: GO-013
+    title: '补上下文时用 `fmt.Errorf("…: %w", err)` 包装；判断错误用 `errors.Is` / `errors.As`，不用 `==` 比较包装过的错误，也不匹配错误消息文本'
+    level: hard
+    check: auto
+    how: 启用 errorlint（检查 `%w`、比较和类型断言）
+    applies: [lang:go]
+    why: 包装后原始错误还在错误链上，调用方才能可靠判断；`==` 和字符串匹配遇到包装就失效。
+    detail: |
+      多个错误同时返回用 `errors.Join`。上下文写操作和对象，如 `fmt.Errorf("load order %s: %w", id, err)`，不要以 "failed to" 开头堆叠。
+    sources: [S08, S09]
+    see: ["COD-011", "COD-014"]
+  - id: GO-014
+    title: 公开的库只对愿意长期承诺给调用方的错误用 `%w`；不想暴露内部依赖的错误用 `%v`，并导出哨兵错误或错误类型供判断
+    level: soft
+    check: manual
+    how: 评审公开包的错误返回：被 `%w` 包装的底层错误是否成了 API 的一部分
+    applies: [lang:go, kind:library]
+    why: 用 `%w` 包装后，调用方就能 `errors.Is` 到底层错误，以后换掉底层实现会破坏调用方。
+    sources: [S08]
+  - id: GO-015
+    title: 不用 panic 表达可预期的错误，panic 不越过包边界；`init` 里不做网络、文件等外部 I/O
+    level: soft
+    check: manual
+    how: 评审时检查非测试代码中的 `panic`、`log.Fatal` 和 `init` 函数
+    applies: [lang:go]
+    why: panic 会绕过调用方的错误处理；init 里的 I/O 让导入一个包就可能失败或变慢，也难以测试。
+    detail: 程序启动时配置非法可以在 `main` 里直接退出；库代码一律返回 error。
+    sources: [S10]
+  # ── context ──
+  - id: GO-016
+    title: 会做 I/O 或可能阻塞的函数，第一个参数接收 `ctx context.Context` 并传给下游，调用带 Context 的 API（如 `QueryContext`、`http.NewRequestWithContext`）
+    level: hard
+    check: semi
+    how: 启用 noctx（发 HTTP、执行 SQL 没带 ctx）和 contextcheck（没有沿用上游 ctx）；评审新增的公开函数签名
+    applies: [lang:go]
+    why: 只有 ctx 一路传下去，请求取消或超时时下游的查询和调用才会及时停止并释放连接。
+    sources: [S11, S12]
+    see: ["COD-033"]
+  - id: GO-017
+    title: 不把 context 存进结构体字段；在请求处理路径上不用 `context.Background()` 或 `context.TODO()` 代替传入的 ctx
+    level: hard
+    check: semi
+    how: 启用 containedctx 和 contextcheck；评审中出现的 `context.Background()` 要说明为什么不用上游 ctx
+    applies: [lang:go]
+    why: 存进结构体的 ctx 和真实请求的生命周期脱节；换成 Background 后，取消和截止时间都失效。
+    detail: |
+      请求结束后仍需继续的工作（如审计写入、清理），用 `context.WithoutCancel(ctx)` 保留值但不继承取消，并另设超时；真正的后台任务交给任务队列（见 18），不要在请求里 `go func()` 了事。
+    sources: [S11]
+  - id: GO-018
+    title: '`context.WithCancel` / `WithTimeout` / `WithDeadline` 返回的 cancel 必须调用，通常紧跟一行 `defer cancel()`'
+    level: hard
+    check: auto
+    how: go vet 的 lostcancel 检查
+    applies: [lang:go]
+    why: 不调用 cancel，子 context 和它的计时器要等父 context 结束才释放，会泄漏资源。
+    sources: [S11, S07]
+  - id: GO-019
+    title: context 只携带请求范围的值（追踪编号、认证信息等），不用来传可选参数或依赖对象；键用包内私有类型
+    level: soft
+    check: manual
+    how: 评审 `context.WithValue` 的调用
+    applies: [lang:go]
+    why: 塞进 context 的参数在签名里看不见，编译器也查不出缺失；用字符串当键容易和别的包冲突。
+    sources: [S11]
+  # ── 并发 ──
+  - id: GO-020
+    title: 每个 goroutine 在启动处写明由谁停止、何时退出；服务停止时所有 goroutine 都能结束
+    level: hard
+    check: semi
+    how: 评审每个 `go` 语句的退出条件；在停机和关键组件的测试中用 goleak 检查泄漏
+    applies: [lang:go]
+    why: 没有退出路径的 goroutine 会一直占着内存、连接和锁，停机时还可能丢数据。
+    see: ["COD-035"]
+    sources: [S13]
+  - id: GO-021
+    title: 并发扇出用 `errgroup.WithContext` 加 `SetLimit`（或 semaphore）限制并发数，不按输入数量无限启动 goroutine
+    level: soft
+    check: manual
+    how: 评审循环里的 `go` 语句和 WaitGroup 用法
+    applies: [lang:go]
+    why: 输入量一大，无限并发会打满下游和内存；errgroup 还能在第一个错误时取消其余任务。
+    sources: [S14]
+  - id: GO-022
+    title: CI 在支持的平台上用 `go test -race` 跑测试，发现竞态即失败
+    level: hard
+    check: auto
+    how: CI 至少有一个 job 运行 `go test -race ./...`
+    applies: [lang:go]
+    why: 数据竞争在 Go 里是未定义行为，靠评审很难看出来；竞态检测器只能发现实际执行到的竞争，所以要在测试里开。
+    sources: [S15]
+    see: ["COD-036"]
+  - id: GO-023
+    title: 关键的后台任务不用裸 goroutine 或 `time.Ticker` 承担；需要持久、重试、定时的工作交给任务队列或调度系统
+    level: soft
+    check: manual
+    how: 评审 `go func()` 和 Ticker 是否承载了进程重启后不能丢的工作
+    applies: [lang:go, kind:service]
+    why: 进程一重启，内存里的 goroutine 和计时器就没了，任务会悄悄丢失或重复。
+    see: ["18"]
+  # ── 测试 ──
+  - id: GO-024
+    title: 单元测试用标准库 testing 加表驱动和子测试（`t.Run`）；复杂结构比较用 go-cmp
+    level: soft
+    check: manual
+    how: 评审新增测试的写法
+    applies: [lang:go]
+    why: 表驱动让新增用例只加一行数据；子测试能单独运行和并行，失败时能直接看出是哪个用例。
+    sources: [S16]
+    see: ["04"]
+  - id: GO-025
+    title: 依赖替身优先用手写的 fake；需要生成 mock 时用 go.uber.org/mock，不得引入已归档的 golang/mock
+    level: hard
+    check: auto
+    how: depguard 禁止导入 `github.com/golang/mock`
+    applies: [lang:go]
+    why: golang/mock 已归档不再维护，Uber 的分支是官方推荐的延续。
+    sources: [S17, S18]
+  - id: GO-026
+    title: 解析外部输入的代码（协议、文件格式、URL、配置）写 fuzz 测试；PR 只跑种子语料，长时间 fuzz 放到定时任务
+    level: soft
+    check: semi
+    how: 评审解析类包是否有 `FuzzXxx`；定时任务运行 `go test -fuzz=… -fuzztime=…`
+    applies: [lang:go]
+    why: fuzz 能找到人想不到的畸形输入；普通 `go test` 会把种子语料当单元测试跑，成本很低。
+    detail: fuzz 发现的失败输入会写进 `testdata/fuzz/`，要入库作为回归用例。
+    sources: [S19]
+    see: ["TST-038"]
+  - id: GO-027
+    title: 集成测试用 testcontainers-go 拉起和生产同款的数据库等依赖，镜像固定摘要
+    level: soft
+    check: semi
+    how: 评审集成测试的依赖启动方式
+    applies: [lang:go]
+    why: 用内存实现或别的引擎替代，测不出真实的 SQL 方言、锁和约束行为。
+    sources: [S20]
+    see: ["TST-010"]
+  # ── 日志 ──
+  - id: GO-028
+    title: 新代码的日志用 log/slog（生产用 JSONHandler），全项目一套；不新增 `log.Printf` 和第二套日志库
+    level: soft
+    check: auto
+    how: depguard 或 forbidigo 禁止在非 main 包中使用 `log` 包的打印函数和未批准的日志库
+    applies: [lang:go]
+    why: slog 是标准库的结构化日志，第三方日志库可以作为它的 Handler 接入；两套并存时字段和级别对不齐。
+    detail: 处理请求时用 `InfoContext(ctx, …)` 等带 ctx 的方法，便于 Handler 取出追踪编号。字段约定见 02。
+    sources: [S21]
+    see: ["02"]
+  - id: GO-029
+    title: 含密码、令牌、个人信息的类型实现 `slog.LogValuer`（或 `String()`）返回脱敏后的值
+    level: soft
+    check: semi
+    how: 评审敏感类型定义；日志测试断言输出中没有原文
+    applies: [lang:go]
+    why: 在类型上脱敏，比在每个打日志的地方记得脱敏可靠。
+    sources: [S21]
+    see: ["COD-019"]
+  # ── HTTP ──
+  - id: GO-030
+    title: '对外监听的 `http.Server` 必须显式设置 `ReadHeaderTimeout`、`ReadTimeout`、`WriteTimeout`（流式接口除外）和 `IdleTimeout`；不用无超时的 `http.ListenAndServe`'
+    level: hard
+    check: auto
+    how: gosec 的 G112（缺 ReadHeaderTimeout）和 G114（使用默认 ListenAndServe）
+    applies: [lang:go, kind:service]
+    why: 这些超时默认都是 0，也就是不限时；慢速攻击可以用很少的连接耗尽服务。
+    detail: 流式或长连接接口（SSE、WebSocket）不设全局 WriteTimeout 时，用 `http.ResponseController` 按请求设置截止时间。
+    sources: [S22]
+    see: ["25"]
+  - id: GO-031
+    title: HTTP 客户端必须有超时（`Client.Timeout` 或请求 ctx 的截止时间），不用 `http.Get` 和默认 `http.DefaultClient` 调外部服务；响应体必须关闭
+    level: hard
+    check: auto
+    how: 启用 noctx 和 bodyclose；forbidigo 禁止 `http.Get`、`http.Post`、`http.DefaultClient`
+    applies: [lang:go]
+    why: 默认客户端没有超时，下游挂住时调用方的 goroutine 和连接会一直堆积；不关闭响应体会泄漏连接。
+    sources: [S22]
+    see: ["COD-033"]
+  - id: GO-032
+    title: 读取请求体前用 `http.MaxBytesReader` 限制大小，不对不可信输入直接 `io.ReadAll`
+    level: hard
+    check: semi
+    how: 评审 handler 中的请求体读取；边界测试发送超限请求，断言返回 413
+    applies: [lang:go, kind:service]
+    why: 不限大小时，一个大请求就能耗尽内存。
+    sources: [S22]
+    see: ["25"]
+  - id: GO-033
+    title: 停机用 `signal.NotifyContext` 接收信号，`http.Server.Shutdown` 带截止时间；后台 worker 处理完手头工作再退出
+    level: soft
+    check: semi
+    how: 集成测试发送 SIGTERM，断言进行中的请求完成、进程在截止时间内退出
+    applies: [lang:go, kind:service]
+    why: 直接 `os.Exit` 会中断进行中的请求和事务；Shutdown 不带截止时间可能永远等下去。
+    sources: [S22, S23]
+    see: ["26"]
+  # ── 数据库访问 ──
+  - id: GO-034
+    title: SQL 参数一律用占位符传递，不用 `fmt.Sprintf` 或字符串拼接把值写进 SQL；表名、列名等动态标识符只能从白名单里选
+    level: hard
+    check: auto
+    how: gosec 的 G201、G202；评审动态 SQL 的标识符来源
+    applies: [lang:go]
+    why: 拼接 SQL 是注入漏洞的直接来源；占位符只能传值，不能传标识符，所以标识符要另外限定。
+    sources: [S24]
+    see: ["25"]
+  - id: GO-035
+    title: 事务用带 ctx 的 `BeginTx` 开启，紧跟 `defer tx.Rollback(…)`，并检查 `Commit` 返回的错误；事务里的语句都用 tx 执行
+    level: hard
+    check: semi
+    how: 评审事务代码；集成测试覆盖中途出错和 ctx 取消时事务被回滚
+    applies: [lang:go]
+    why: 中途 return 或 panic 时，defer 的回滚保证连接不会带着未结束的事务回到连接池；提交失败如果不检查，就会把没写进去的数据当成已写入。
+    detail: |
+      - 提交成功后再调 Rollback 是无操作，可以放心 defer。pgx 的 Rollback 需要 ctx，请求 ctx 已取消时用带短超时的独立 ctx 做清理。
+      - 在事务里用 `db` 而不是 `tx` 执行语句，会落到另一个连接上，不在事务内。
+      - 事务边界怎么划、隔离级别、哪些错误可以整体重试，见 17。
+    sources: [S25]
+    see: ["17"]
+  - id: GO-036
+    title: 查询结果的 rows 必须关闭，遍历结束后检查 `rows.Err()`
+    level: hard
+    check: auto
+    how: 启用 sqlclosecheck 和 rowserrcheck
+    applies: [lang:go]
+    why: 不关闭会占住连接；遍历中途的网络错误只会体现在 `rows.Err()` 里，不检查就会把半截结果当完整结果。
+    sources: [S25]
+  - id: GO-037
+    title: 生成的代码（sqlc、OpenAPI、protobuf、mock）不手改；CI 重新生成后 `git diff --exit-code` 必须无差异
+    level: hard
+    check: auto
+    how: CI 用固定版本的生成器运行 `go generate ./...` 或 `sqlc generate`，再 `git diff --exit-code`
+    applies: [lang:go]
+    why: 手改会在下次生成时被覆盖；生成物和源文件不一致时，评审看到的不是实际运行的代码。
+    detail: 生成文件头部要有 `// Code generated … DO NOT EDIT.`，linter 会据此跳过。
+    sources: [S26]
+    see: ["COD-009"]
+  # ── 架构与安全 ──
+  - id: GO-038
+    title: 包之间的依赖方向写进 go-arch-lint 配置并在 CI 检查；禁止导入的具体包用 depguard；用 `internal/` 控制可见性
+    level: soft
+    check: auto
+    how: CI 运行 `go-arch-lint check`；golangci-lint 启用 depguard
+    applies: [lang:go]
+    why: 依赖方向只写在文档里会慢慢被破坏；工具检查才能在 PR 里拦住。
+    detail: 不照搬社区流传的「标准项目布局」，它不是官方规定；按官方的模块布局指南从简单结构开始。
+    sources: [S27, S28]
+    see: ["01"]
+  - id: GO-039
+    title: CI 必须运行 `govulncheck ./...`，存在被代码实际调用到的已知漏洞时失败；发布前在最终提交上再跑一次
+    level: hard
+    check: auto
+    how: CI 运行 govulncheck，非零退出即失败；断网环境用内部镜像的漏洞库并记录库的更新日期
+    applies: [lang:go]
+    why: govulncheck 根据调用关系判断漏洞是否可达，误报比只看版本号少，结果可以直接作为门禁。
+    detail: 只出现在依赖里、代码没调用到的漏洞会单独列出，不阻断，但要排期升级。容器镜像和系统包的扫描见 25。
+    sources: [S29]
+    see: ["25"]
+choices:
+  - category: 工具链版本
+    pick: go.mod 的 `go` 与 `toolchain` 行 + 固定补丁版的构建镜像
+    alternatives:
+      - { name: mise 或 asdf, when: 一台机器上要管多种语言的版本 }
+    avoid:
+      - { name: 开发、CI、生产各用各的版本, why: 结果不可复现，补丁版之间也有行为修复 }
+    sources: [S01, S02]
+  - category: 格式化
+    pick: gofmt + goimports（通过 golangci-lint 的 formatters 执行）
+    alternatives:
+      - { name: gofumpt, when: 团队想要更严格的统一格式，全仓一起切换 }
+    avoid:
+      - { name: 同一仓库混用不同格式器, why: 来回改格式，产生无意义的差异 }
+    license: gofmt 随 Go 发行（BSD-3-Clause）；gofumpt 为 BSD-3-Clause
+    sources: [S04, S30]
+  - category: lint
+    pick: golangci-lint v2，配合 GO-009 的推荐集合
+    alternatives:
+      - { name: staticcheck 等单独运行, when: 只需要少数检查、不想引入聚合工具 }
+    avoid:
+      - { name: '`default: all` 再加大量 nolint', why: 误报淹没真问题 }
+    license: golangci-lint 和 depguard 为 GPL-3.0；作为 CI 里独立运行的工具使用，不链接进产品（口径见 27）
+    sources: [S05, S31]
+  - category: 漏洞扫描
+    pick: govulncheck
+    alternatives:
+      - { name: Trivy、Grype 等通用扫描器, when: 还要扫容器镜像和系统包（见 25） }
+    license: BSD-3-Clause
+    sources: [S29]
+  - category: HTTP 路由
+    pick: 标准库 net/http 的 ServeMux（支持方法和路径参数）
+    alternatives:
+      - { name: chi, when: 需要路由分组、子路由和较多中间件；兼容标准 `http.Handler` }
+      - { name: Huma, when: 想从代码生成 OpenAPI 并做请求校验（接口约定见 16） }
+    avoid:
+      - { name: 为简单服务引入全栈框架, why: 多一层抽象和依赖，收益很小 }
+    license: chi、Huma 均为 MIT
+    sources: [S32]
+  - category: PostgreSQL 驱动
+    pick: pgx/v5 + pgxpool
+    alternatives:
+      - { name: database/sql + pgx 的 stdlib 适配, when: 要配合只支持 database/sql 的库或 ORM，或要保持驱动可替换 }
+    license: MIT
+    sources: [S33]
+  - category: SQL 代码生成
+    pick: 'sqlc（配置 `sql_package: "pgx/v5"`）'
+    when: 以 SQL 为准、查询基本固定的项目
+    alternatives:
+      - { name: 直接用 pgx 手写查询, when: 查询很少，或大量动态 SQL }
+      - { name: GORM、Bun、Ent 等 ORM, when: 以增删改查为主、团队已熟悉；要额外关注生成的 SQL }
+    avoid:
+      - { name: sqlc、大型 ORM、自研查询封装叠着用, why: 三套写法并存，事务和错误处理各不相同 }
+    license: sqlc 为 MIT（CLI 只在开发时运行，生成的代码不带运行时依赖）
+    sources: [S34, S35]
+  - category: 数据库迁移工具
+    pick: goose
+    when: 迁移原则（向前修复、受控发布步骤、不在每个实例启动时跑）见 17
+    alternatives:
+      - { name: golang-migrate, when: 团队已在用，或只需要一个精简的命令行 }
+      - { name: Atlas, when: 想要声明式 schema 比对和迁移 lint；先确认需要的功能在哪个版本里 }
+    avoid:
+      - { name: 在应用启动代码里手写 DDL, why: 多副本同时执行、无记录、无法审查 }
+    license: goose、golang-migrate 为 MIT。Atlas 源码仓库为 Apache-2.0，社区版即按此构建，含版本化迁移的 diff、apply、status；官方标准版二进制按 Atlas MSA 授权，迁移 down、checkpoint、迁移 lint、视图和触发器等对象、部分驱动与集成只在标准版或付费的 Pro 中提供
+    sources: [S36, S37, S38]
+  - category: 测试
+    pick: 标准库 testing + go-cmp；集成测试用 testcontainers-go
+    alternatives:
+      - { name: testify, when: 团队偏好断言库；用 require 而不是 assert，失败即停 }
+      - { name: go.uber.org/mock, when: 接口方法多、手写 fake 成本高 }
+    avoid:
+      - { name: golang/mock, why: 已归档 }
+    license: go-cmp 为 BSD-3-Clause；testcontainers-go 为 MIT；go.uber.org/mock 为 Apache-2.0
+    sources: [S16, S17, S18, S20]
+  - category: goroutine 泄漏检测
+    pick: go.uber.org/goleak
+    license: MIT
+    sources: [S13]
+  - category: 有限并发
+    pick: golang.org/x/sync/errgroup
+    alternatives:
+      - { name: golang.org/x/sync/semaphore, when: 需要按权重限流 }
+    sources: [S14]
+  - category: 日志
+    pick: log/slog
+    alternatives:
+      - { name: zap, when: 存量项目已在用；新代码可用 slog 接口、zap 作为 Handler }
+    avoid:
+      - { name: 标准库 log 的 Printf, why: 非结构化，无级别 }
+    sources: [S21]
+  - category: 依赖注入
+    pick: 在 main 或组合根里手写构造函数
+    alternatives:
+      - { name: Uber Fx, when: 组件多、启动和停止顺序复杂 }
+    avoid:
+      - { name: google/wire, why: 已归档 }
+    license: Fx 为 MIT
+    sources: [S39]
+  - category: 架构检查
+    pick: go-arch-lint
+    alternatives:
+      - { name: arch-go, when: 除依赖方向外还要检查函数规模、命名、包内容等规则 }
+      - { name: depguard, when: 只需禁止导入少数具体包 }
+    license: go-arch-lint、arch-go 均为 MIT
+    sources: [S27, S40]
+antipatterns:
+  - { bad: 'go.mod 只写 `go 1.xx`，CI 用 `golang:latest` 镜像构建', instead: 固定工具链补丁版和镜像摘要 }
+  - { bad: '`if err.Error() == "not found"`', instead: '`errors.Is(err, ErrNotFound)`' }
+  - { bad: '在 handler 里 `go func() { … }()` 做发邮件、写审计，用的还是请求 ctx', instead: 投递到任务队列；必须在进程内做的，用 `context.WithoutCancel` 加超时 }
+  - { bad: '`http.ListenAndServe(":8080", mux)` 直接上线', instead: 自建 `http.Server` 并设好各项超时 }
+  - { bad: 在 Repository、Service、Handler 每层都打一遍错误日志, instead: 中间层 `%w` 包装往上传，在边界记录一次 }
+  - { bad: 从 v1 升级到 golangci-lint v2 后沿用旧配置，看到没报错就以为检查都在跑, instead: 先 `golangci-lint migrate`，再 `config verify` }
+  - { bad: 每个服务实例启动时自动执行迁移, instead: 迁移作为单独的发布步骤执行（见 17） }
+sources:
+  - { id: S01, title: Go Release History（含发布支持策略）, url: "https://go.dev/doc/devel/release", publisher: Go, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: Go Toolchains, url: "https://go.dev/doc/toolchain", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: Go Modules Reference, url: "https://go.dev/ref/mod", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S04, title: "cmd/gofmt", url: "https://pkg.go.dev/cmd/gofmt", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "golangci-lint: Configuration File", url: "https://golangci-lint.run/docs/configuration/file/", publisher: golangci-lint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "golangci-lint: Command-Line Options", url: "https://golangci-lint.run/docs/configuration/cli/", publisher: golangci-lint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "cmd/vet", url: "https://pkg.go.dev/cmd/vet", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: Working with Errors in Go 1.13, url: "https://go.dev/blog/go1.13-errors", publisher: Go, date: 2019-10-17, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: errors package, url: "https://pkg.go.dev/errors", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: Go Code Review Comments, url: "https://go.dev/wiki/CodeReviewComments", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: context package, url: "https://pkg.go.dev/context", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Canceling in-progress database operations, url: "https://go.dev/doc/database/cancel-operations", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: uber-go/goleak, url: "https://github.com/uber-go/goleak", publisher: Uber, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S14, title: "golang.org/x/sync/errgroup", url: "https://pkg.go.dev/golang.org/x/sync/errgroup", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Data Race Detector, url: "https://go.dev/doc/articles/race_detector", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: google/go-cmp, url: "https://github.com/google/go-cmp", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: golang/mock（已归档）, url: "https://github.com/golang/mock", publisher: Go, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: uber-go/mock, url: "https://github.com/uber-go/mock", publisher: Uber, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S19, title: Go Fuzzing, url: "https://go.dev/doc/security/fuzz/", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: testcontainers-go, url: "https://github.com/testcontainers/testcontainers-go", publisher: Testcontainers, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "log/slog", url: "https://pkg.go.dev/log/slog", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "net/http", url: "https://pkg.go.dev/net/http", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "os/signal: NotifyContext", url: "https://pkg.go.dev/os/signal#NotifyContext", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "gosec: Go security checker", url: "https://github.com/securego/gosec", publisher: securego, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S25, title: Executing transactions, url: "https://go.dev/doc/database/execute-transactions", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "go command: Generate Go files by processing source", url: "https://pkg.go.dev/cmd/go#hdr-Generate_Go_files_by_processing_source", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: go-arch-lint, url: "https://github.com/fe3dback/go-arch-lint", publisher: fe3dback, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S28, title: Organizing a Go module, url: "https://go.dev/doc/modules/layout", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: Go Vulnerability Management, url: "https://go.dev/doc/security/vuln/", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: mvdan/gofumpt, url: "https://github.com/mvdan/gofumpt", publisher: mvdan, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S31, title: golangci/golangci-lint（LICENSE）, url: "https://github.com/golangci/golangci-lint", publisher: golangci, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: go-chi/chi, url: "https://github.com/go-chi/chi", publisher: go-chi, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: jackc/pgx, url: "https://github.com/jackc/pgx", publisher: jackc, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: "sqlc: Using Go and pgx", url: "https://docs.sqlc.dev/en/latest/guides/using-go-and-pgx.html", publisher: sqlc, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: sqlc-dev/sqlc（LICENSE）, url: "https://github.com/sqlc-dev/sqlc", publisher: sqlc, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: pressly/goose, url: "https://github.com/pressly/goose", publisher: pressly, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: golang-migrate/migrate, url: "https://github.com/golang-migrate/migrate", publisher: golang-migrate, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S38, title: "Atlas: Community Edition", url: "https://atlasgo.io/community-edition", publisher: Ariga, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S39, title: uber-go/fx, url: "https://github.com/uber-go/fx", publisher: Uber, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S40, title: arch-go, url: "https://github.com/arch-go/arch-go", publisher: arch-go, date: null, kind: community, checked: 2026-11-14 }
+open_questions:
+  - Atlas MSA 的具体条款（再分发、商业使用、是否需要联网登录）未读原文；在断网环境用标准版前要确认
+  - GORM、Bun、Ent、testify、zap 的许可证和维护状态未在本主题核实
+  - google/wire 已归档（2025-08 前后），只从仓库归档标记确认，未查归档公告
+  - 原报告关于 Go 新版本特性（泛型方法、encoding/json/v2、goroutineleak profile 转正）的说法只有一个来源，未核实，未写进规则
+  - gosec 规则编号（G112、G114、G201、G202）以 gosec 仓库为准，未逐条复核
+  - 待补调研：国内网络下的 Go 模块代理（如 goproxy.cn）可用性与私有化镜像方案
+  - 待补调研：CLI（flag 与 cobra）和可复用 SDK 的依赖与发布写法
+  - 待补调研：openGauss 等「PostgreSQL 兼容」数据库与 pgx、sqlc、goose 的实际兼容情况
