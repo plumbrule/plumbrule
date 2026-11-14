@@ -1,0 +1,655 @@
+id: "16"
+slug: api
+title: 接口契约与事件
+summary: 对外接口和事件怎么定契约：接口风格、OpenAPI 契约优先与 lint、错误格式、命名、分页、版本与破坏性变更、幂等、并发写、事件与 webhook 发布、实时推送、MCP 服务端和命令行的机器可读输出。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 接口风格选择（REST、GraphQL、gRPC/Connect、WebSocket）
+    - OpenAPI 契约优先、契约 lint、破坏性变更检测、版本与废弃
+    - 错误响应格式（RFC 9457）、JSON 字段命名、时间格式、分页、过滤
+    - 幂等语义（Idempotency-Key）与并发写（ETag / If-Match）
+    - 事件格式（CloudEvents、AsyncAPI）、对外发布 webhook 与签名
+    - 实时推送（SSE、WebSocket）的续传约定
+    - MCP 服务端接口约定（工具设计、错误、版本、授权）
+    - 命令行工具的机器可读输出契约
+  excludes:
+    - { what: 接收第三方回调（验签、去重、快速确认）, see: "21" }
+    - { what: 幂等记录表、outbox / inbox 表、事务与乐观锁的数据库实现, see: "17" }
+    - { what: 限流实现、消息队列和任务调度选型, see: "18" }
+    - { what: 登录、令牌、授权模型、401/403 的判定细则, see: "19" }
+    - { what: 各语言的 OpenAPI 生成器、服务端框架, see: "10-14" }
+    - { what: SSRF 防护细则、密钥管理, see: "25" }
+    - { what: 契约测试、基于 schema 的接口测试工具, see: "04" }
+    - { what: 本机 HTTP 服务（含本机 MCP 服务）的监听与防护, see: "32" }
+    - { what: llms.txt 与文档站的通用写法, see: "05" }
+    - { what: MCP 工具在 Agent 侧的使用与权限, see: "23" }
+overview: |
+  1. **先定契约，再写实现。** 普通 HTTP 接口默认 REST + OpenAPI；契约文件放在仓库里，和实现在同一个 PR 里改，CI 跑 lint 和破坏性变更检测。GraphQL、gRPC/Connect、WebSocket 要有客观理由并记下来。
+  2. **OpenAPI 默认 3.1。** 3.2 已正式发布，但生成器、网关、lint 工具支持不齐，用 3.2 新特性前先在自己的工具链上验证。
+  3. **错误统一 RFC 9457**（`application/problem+json`）。`type` 和 `code` 是给程序判断的稳定标识；`title`、`detail` 给人看，程序不解析。不泄露堆栈、SQL、令牌。
+  4. **同一个接口域只用一种命名风格。** 新接口的 JSON 字段默认 camelCase，用 lint 强制。
+  5. **列表必须分页。** 有默认值和上限的 `limit`、确定的排序（带唯一的兜底字段）、不透明的游标；过滤和排序只认白名单字段。
+  6. **会被重试的写操作要幂等。** 用 `Idempotency-Key`（IETF 草案，尚未成为 RFC）或客户端自定 ID + PUT。缺键 400、同键不同请求体 422、第一次请求还在处理 409。幂等记录要和业务变更一起持久化。
+  7. **防丢失更新用强 ETag + If-Match。** 不匹配 412，缺前置条件 428，业务状态冲突 409；服务端做原子比较更新。
+  8. **破坏性变更不能悄悄发。** CI 用 oasdiff 对比上一个发布的契约；破坏性改动走新主版本或经批准的迁移计划；废弃用 `Deprecation` / `Sunset` 响应头通知。
+  9. **事件和投递分开。** 事件用 CloudEvents 信封、AsyncAPI 描述；至少一次投递，重发保持同一个 `(source, id)`，消费方去重；不承诺全局有序和恰好一次。
+  10. **对外 webhook 按 Standard Webhooks 签名**：签 `webhook-id.webhook-timestamp.原始请求体`，支持多签名轮换密钥；有限次退避重试、死信和手动重放；用户填的回调地址做 SSRF 防护。
+  11. **MCP 以当前正式版本为准，用官方 SDK。** 核实时（2026-11-14）当前版本是 2026-07-28：去掉了初始化握手，每个请求自带协议版本，可用 `server/discover` 预先协商；兼容 2025-11-25 及更早的旧客户端要单独测试。HTTP 传输上开了授权的，服务端按 OAuth 2.1 资源服务器实现：提供受保护资源元数据，校验令牌受众，不转发令牌。
+  12. **命令行工具人机两用。** `--json` 时标准输出只有 JSON，诊断走标准错误；退出码公开稳定；支持非交互运行。
+rules:
+  # ── 接口风格与契约 ──
+  - id: API-001
+    title: 普通 HTTP 接口默认用 REST + OpenAPI；改用 GraphQL、gRPC/Connect 或 WebSocket 时，把客观理由写进设计记录
+    level: soft
+    check: manual
+    how: 评审新服务的设计记录（ADR），看非 REST 方案是否写了需求依据和取舍
+    applies: [kind:service]
+    why: REST + OpenAPI 的客户端、网关、调试工具最普及；为少数场景引入别的风格，会增加运维和接入成本。
+    detail: |
+      常见的客观理由：
+      - GraphQL：前端需要频繁自由组合查询，且能做查询复杂度限制；
+      - gRPC / Connect：内部服务间强类型调用、需要流式；浏览器和第三方调用方优先 Connect 或 REST，不强制原生 gRPC；
+      - WebSocket：真正的双向实时交互。只是服务端单向推送时用 SSE（见 API-031）。
+    sources: [S26, S27]
+    see: ["01"]
+  - id: API-002
+    title: 对外 HTTP 接口必须有放在仓库里的 OpenAPI 契约文件，接口改动与契约改动在同一个 PR 里提交
+    level: hard
+    check: auto
+    how: CI 检查契约文件存在；用基于 schema 的测试（见 04）验证实现的响应符合契约
+    applies: [kind:service]
+    why: 截图、口头约定和聊天记录没法被工具检查，客户端和 SDK 也没法据此生成。
+    detail: |
+      - 契约是唯一来源，生成的客户端、服务端桩代码只读（各语言做法见 10–14）。
+      - 从代码注解导出契约也可以，但导出的文件必须提交进仓库、参与 lint 和破坏性检测，不能只在运行时生成。
+      - 契约引用的 schema 随仓库提交，不在构建或运行时去拉远程 `$ref`。
+    sources: [S01]
+    see: ["04", "10-14"]
+  - id: API-003
+    title: 每个操作必须有唯一且稳定的 operationId，每个响应写明状态码、Content-Type 和 schema，并给出成功和错误示例
+    level: hard
+    check: auto
+    how: Spectral 规则集启用 operationId 唯一、响应必须有 schema 和示例等规则，CI 中以错误级别运行
+    applies: [kind:service]
+    why: 生成的 SDK 方法名取自 operationId，改了就是破坏性变更；没有写明的响应，调用方和 Agent 只能猜。
+    sources: [S01, S20]
+  - id: API-004
+    title: 契约 lint 规则集放在仓库里，CI 对每次契约改动运行，错误级别的问题阻断合并
+    level: hard
+    check: auto
+    how: CI 运行 `spectral lint`（或所选工具），检查退出码
+    applies: [kind:service]
+    why: 命名、分页、错误格式这些约定只写在文档里会慢慢走样，lint 才能让每次改动都遵守。
+    detail: 本主题里能机器判定的约定（命名风格、分页参数、错误响应格式、operationId）都应写成 lint 规则。
+    sources: [S20]
+    see: ["02"]
+  - id: API-005
+    title: OpenAPI 默认用 3.1；要用 3.2 的新特性，先确认所用的 lint、diff、生成器和网关都支持
+    level: soft
+    check: semi
+    how: 升级前在 CI 里用全部工具链跑一遍 3.2 契约，并编译生成的客户端
+    applies: [kind:service]
+    why: 3.2 已正式发布，但规范发布不等于工具支持；部分生成器对 3.1 的支持都还标为测试版。
+    detail: 3.2 新增了 `QUERY` 方法描述、流式媒体类型等。只有确实需要这些特性时才升级。
+    sources: [S01, S02, S24]
+  - id: API-006
+    title: 按业务资源和动作建模接口，不直接暴露数据库表名、内部函数名和内部枚举
+    level: soft
+    check: manual
+    how: 评审新接口时对照数据模型，看路径和字段是否只是表结构的照搬
+    applies: [kind:service]
+    why: 接口一旦和表结构绑死，改一次表就要改一次公开契约。
+    sources: [S06, S08]
+    see: ["17"]
+  - id: API-007
+    title: GET、HEAD 请求不得产生业务副作用；不能归为标准方法的业务动作用 POST，并在契约里写明副作用和是否幂等
+    level: hard
+    check: semi
+    how: 评审时检查 GET 处理函数是否写库或调用有副作用的服务；契约里自定义动作必须有副作用说明
+    applies: [kind:service]
+    why: HTTP 规定 GET、HEAD 是安全方法，缓存、预取、爬虫和重试都会假定它们没有副作用。
+    detail: |
+      自定义动作可以写成 `POST /v1/orders/{id}:cancel`，也可以建模成子资源 `POST /v1/orders/{id}/cancellations`。选一种并在整个接口域里统一，不要混用。
+    sources: [S05, S08]
+  # ── 命名与格式 ──
+  - id: API-008
+    title: 同一个接口域里的 JSON 字段、查询参数和错误码各只用一种命名风格，并用 lint 强制
+    level: hard
+    check: auto
+    how: Spectral 的 casing 规则检查 schema 属性名和参数名
+    applies: [kind:service]
+    why: 同一个接口里 `createdAt` 和 `created_at` 并存，调用方和生成器都会出错，事后统一就是破坏性变更。
+    detail: |
+      - 新接口的 JSON 字段和查询参数默认用 camelCase（与浏览器和 TypeScript 客户端一致，也是 Microsoft 接口指南的约定）；已有接口或生态普遍用 snake_case 的，沿用原风格。
+      - 错误码（`code`）用全大写下划线，如 `ORDER_NOT_FOUND`。
+      - 枚举值、事件字段同样遵守本接口域的风格。
+      - 已经公开的字段不为了统一风格而改名。
+    sources: [S06, S28]
+    see: ["02"]
+  - id: API-009
+    title: "时间字段用 RFC 3339 格式并带时区偏移（推荐 UTC），在 schema 里标 `format: date-time`"
+    level: soft
+    check: auto
+    how: Spectral 规则检查名称像时间的字段是否声明了 date-time 格式
+    applies: [kind:service]
+    why: 不带时区的时间在跨时区部署和客户端解析时会出错。
+    sources: [S06]
+  # ── 分页、过滤、批量、长任务 ──
+  - id: API-010
+    title: 返回列表的接口必须分页：`limit` 有默认值和上限，排序确定并以唯一字段兜底
+    level: hard
+    check: semi
+    how: lint 检查列表操作有分页参数和上限；测试用排序字段相同的数据验证翻页不重不漏
+    applies: [kind:service]
+    why: 不分页的列表会随数据增长拖垮服务；排序不确定时，翻页会重复或漏掉数据。
+    detail: |
+      - 数据量大或变化快的列表用游标分页；offset 只用于数据少、基本不变的表或确实需要跳页的场景。
+      - 例：`GET /v1/orders?limit=50&sort=-createdAt,id&cursor=...`，最后一个 `id` 保证排序唯一。
+    sources: [S06]
+  - id: API-011
+    title: 游标对调用方不透明，绑定生成它的查询条件和调用者；条件不一致时拒绝，不承诺快照一致
+    level: soft
+    check: semi
+    how: 测试篡改游标、换过滤条件或换用户复用游标，应返回 400；契约文档写明翻页期间数据增删的行为
+    applies: [kind:service]
+    why: 调用方解析或拼接游标后，服务端就没法改实现；跨用户复用的游标还可能越权。
+    detail: |
+      - 游标可以签名防篡改；base64 编码不是保护。
+      - 不承诺游标内容和长度。
+      - 除非实现了快照，翻页期间有增删时不承诺零重复、零遗漏。
+    sources: [S06]
+  - id: API-012
+    title: 过滤、排序、字段选择、展开参数只接受白名单字段，不允许传 SQL 片段或任意表达式
+    level: hard
+    check: semi
+    how: 契约里这些参数用枚举声明；测试传非白名单字段应返回 400
+    applies: [kind:service]
+    why: 任意表达式会导致注入，也会让查询成本不可控。
+    sources: [S06]
+    see: ["25"]
+  - id: API-013
+    title: 批量操作在契约里写明是否全有或全无、逐项结果的格式和幂等粒度
+    level: soft
+    check: manual
+    how: 评审批量接口的契约，看是否有逐项状态字段和部分失败的说明
+    applies: [kind:service]
+    why: 部分成功时只看 HTTP 状态码，调用方不知道哪些成功了、哪些可以重试。
+    detail: 部分成功时在响应体里给逐项结果，如 `items[{clientRef, status, result, error}]`；用 200 还是 207 在接口域里统一。
+    sources: [S06]
+  - id: API-014
+    title: 可能超时的长任务返回 202 和一个任务资源，可查询状态、终态结果和失败原因，并写明取消方式和结果保留期
+    level: soft
+    check: semi
+    how: 端到端测试覆盖任务提交、查询、完成、失败、取消
+    applies: [kind:service]
+    why: 长时间占着连接等结果，断线后调用方无法恢复，也会被网关超时打断。
+    sources: [S07]
+  # ── 错误 ──
+  - id: API-015
+    title: 4xx 和 5xx 响应使用 RFC 9457 格式（`application/problem+json`），`status` 与 HTTP 状态码一致；不用 200 包装失败
+    level: hard
+    check: auto
+    how: lint 检查所有错误响应引用统一的 Problem schema 和媒体类型；接口测试校验错误响应体
+    applies: [kind:service]
+    why: 统一的错误格式让客户端、网关和重试逻辑能通用处理；`200 {success:false}` 会骗过所有按状态码工作的中间件。
+    detail: |
+      - 标准成员：`type`（问题类型 URI，缺省为 `about:blank`）、`title`、`status`、`detail`、`instance`。
+      - 扩展成员按需加，如 `code`（稳定错误码）、`errors`（字段级校验错误）、`retryable`。客户端必须忽略不认识的扩展成员。
+      - RFC 9457 取代了 RFC 7807，新代码按 9457 写。
+    sources: [S03]
+  - id: API-016
+    title: 程序只按 `type` 或 `code` 判断错误，不解析 `title` 和 `detail`；错误码登记在错误目录里，发布后不改含义
+    level: hard
+    check: semi
+    how: 契约里 `code` 用枚举并与错误目录比对；评审客户端代码时查找对 `detail` 文本的匹配
+    applies: [kind:service, kind:library]
+    why: RFC 9457 明确建议不解析 `detail`；它可能被本地化或改写，靠文本判断的客户端会突然失效。
+    sources: [S03]
+  - id: API-017
+    title: 错误响应不得包含堆栈、SQL、内部主机名、令牌和个人信息；`instance` 只用作追踪标识
+    level: hard
+    check: semi
+    how: 测试触发各类服务端异常，扫描错误响应体中的堆栈和 SQL 特征
+    applies: [kind:service]
+    why: 错误信息是常见的信息泄露渠道，攻击者靠它探测内部结构。
+    sources: [S03]
+    see: ["25"]
+  - id: API-018
+    title: 429 和 503 响应带 `Retry-After`；`retryable` 只表示原请求可以原样重放，写操作是否能重试还要看幂等策略
+    level: soft
+    check: semi
+    how: 故障测试检查限流和降级响应的响应头；评审错误目录里 `retryable` 的取值
+    applies: [kind:service]
+    why: 没有重试提示，客户端会立刻重试造成雪崩；把不幂等的写操作标为可重试会造成重复执行。
+    sources: [S05]
+    see: ["18"]
+  # ── 幂等 ──
+  - id: API-019
+    title: 有副作用、且调用方可能重试的 POST 操作必须在契约里声明幂等方式：Idempotency-Key 或客户端自定 ID + PUT
+    level: hard
+    check: semi
+    how: lint 检查非幂等方法是否声明了 `Idempotency-Key` 请求头或说明了替代方式；评审支付、下单、发消息等操作
+    applies: [kind:service]
+    why: 网络超时后调用方不知道请求是否成功，只能重试；没有幂等就会重复扣款、重复下单。
+    detail: |
+      `Idempotency-Key` 由 IETF httpapi 工作组的草案定义，核实时（2026-11-14）仍是草案第 08 版（2026-10-22），尚未成为 RFC，按草案语义实现，并关注后续变化。
+    sources: [S04]
+  - id: API-020
+    title: 使用 Idempotency-Key 时，缺键（且要求必填）返回 400，同键不同请求体返回 422，第一次请求仍在处理返回 409；同键同请求体已完成的，返回第一次的结果
+    level: hard
+    check: auto
+    how: 契约测试逐一构造这四种情况并校验状态码和响应体
+    applies: [kind:service]
+    why: 这是草案规定的语义；状态码统一后，客户端才能区分「我用错了键」和「请稍后再查」。
+    detail: 错误响应用 RFC 9457 格式，`type` 区分这几类情况。
+    sources: [S04, S03]
+  - id: API-021
+    title: 幂等键的作用域绑定调用者和操作，并记录请求体指纹；幂等记录与业务变更一起持久化，有效期写进契约
+    level: hard
+    check: semi
+    how: 并发重复请求测试和进程崩溃测试，验证只执行一次；评审幂等存储是否持久化
+    applies: [kind:service]
+    why: 只存在内存里的幂等键，重启或多实例时就失效；不比对请求体，会把两个不同的请求当成一个。
+    detail: |
+      - 作用域例：租户 + 调用者 + 方法 + 路由 + 键。
+      - 有效期只是重放保护窗口，过期后不保证去重；绝不能重复的业务事实（如同一笔付款）还要靠数据库唯一约束。
+      - 处理中状态要有超时回收，不能永久卡住。
+      - 存储与事务的实现见 17。
+    ref_value: 有效期 24 小时是常见的产品取值，不是标准要求。
+    sources: [S04]
+    see: ["17"]
+  # ── 并发写 ──
+  - id: API-022
+    title: 可能丢失更新的写操作用强 ETag + If-Match 做前置条件：不匹配返回 412，要求带前置条件却没带返回 428，业务状态冲突返回 409；弱 ETag 不用于 If-Match
+    level: hard
+    check: auto
+    how: 双客户端竞争测试：两个客户端用同一个 ETag 先后更新，后者必须得到 412
+    applies: [kind:service]
+    why: 两个人同时编辑，后保存的会静默覆盖前一个人的改动。If-Match 按 HTTP 规定只做强比较。
+    detail: |
+      - 服务端必须用原子的比较并更新（如带版本号条件的 UPDATE），不能先查 ETag 再无条件更新。
+      - 428 来自 RFC 6585。
+      - 也可以用领域版本号字段代替 ETag，语义相同。数据库层的乐观锁见 17。
+    sources: [S05]
+    see: ["17"]
+  # ── 版本与兼容 ──
+  - id: API-023
+    title: CI 用 oasdiff 对比上一个发布版本的契约；检测到破坏性变更时阻断，除非走新主版本或附上经批准的迁移计划
+    level: hard
+    check: auto
+    how: CI 运行 `oasdiff breaking <基线契约> <新契约>` 并按退出码阻断；豁免要在 PR 里写明并经负责人批准
+    applies: [kind:service, kind:library]
+    why: 删字段、改类型、改必填，单个服务的测试全绿，调用方却会出错。
+    detail: |
+      工具查不出的破坏性变化要人工评审：
+      - 新增枚举值（按穷举处理的客户端会出错）；
+      - 默认值、排序、分页行为、限流、权限语义的变化；
+      - 字段含义变化但类型没变。
+      客户端一侧要容忍未知字段和未知枚举值。
+    sources: [S22, S09]
+    see: ["03", "04"]
+  - id: API-024
+    title: 每个接口域只选一种版本策略并写进接口说明；默认用路径主版本（如 `/v1`）
+    level: soft
+    check: manual
+    how: 评审接口说明里是否写明版本策略、新版本发布后旧版本的支持期
+    applies: [kind:service]
+    why: 版本放路径、放请求头、放日期混用，调用方无从判断自己在用哪个版本。
+    detail: |
+      - 路径主版本简单直观，适合大多数产品。
+      - 已有大量 SDK 的公开平台可以用日期版本请求头（如 GitHub 的做法）。
+      - `info.version` 是接口文档的版本，`openapi` 字段是规范的版本，两者不要混淆。
+    ref_value: GitHub 承诺旧版本在新版本发布后至少支持 24 个月，可作参考，不是通用要求。
+    sources: [S09]
+  - id: API-025
+    title: 公开接口废弃时，发布迁移说明，并在响应里带 `Deprecation` 头，确定下线日期后再带 `Sunset` 头
+    level: hard
+    check: auto
+    how: 契约测试检查被标为 deprecated 的操作响应带这两个头
+    applies: [kind:service]
+    why: 只在发布说明里写「以后删除」，调用方多半看不到；标准响应头能被客户端和监控自动发现。
+    detail: |
+      - `Deprecation` 由 RFC 9745 定义，值是 `@` 加 Unix 秒数；`Sunset` 由 RFC 8594 定义，值是 HTTP 日期。两者格式不同。
+      - 同时在契约里把操作标为 `deprecated: true`。
+    sources: [S10, S11]
+  # ── 事件 ──
+  - id: API-026
+    title: 对外发布的事件用 CloudEvents 信封，`type` 稳定且带业务版本，每个 `type` 有独立 schema，并在事件目录里登记
+    level: soft
+    check: semi
+    how: CI 用 JSON Schema 校验事件样例；事件目录（可用 AsyncAPI 描述）与代码里的事件类型比对
+    applies: [kind:service]
+    why: 各服务自定事件字段，消费方只能逐个适配；没有 schema 的事件改起来没人知道会影响谁。
+    detail: |
+      - 必填属性：`specversion`、`id`、`source`、`type`。
+      - 事件名用过去时表达已发生的事实，如 `com.example.orders.order.confirmed.v1`；不要把命令伪装成事件。
+      - 三种版本别混：`specversion` 是信封规范版本，`type` 后缀或 `dataschema` 是业务载荷版本，聚合版本号是对象的状态序号。
+      - 事件目录写明：负责人、含义、schema、是否含个人信息、顺序键、投递保证、保留期、重放方式、兼容策略。
+    sources: [S12, S13]
+  - id: API-027
+    title: 事件按至少一次投递设计：重发时保持同一个 `(source, id)`，消费方据此去重；写明顺序范围，不承诺全局有序和恰好一次
+    level: hard
+    check: semi
+    how: 测试重复投递和乱序投递，验证消费方结果不变；评审事件目录里的顺序和投递保证说明
+    applies: [kind:service]
+    why: 网络和重试决定了重复不可避免；每次重发换 id，消费方就没法去重。
+    detail: |
+      - 需要顺序时按聚合对象排序，事件里带聚合 id 和版本号。
+      - 关键事件和业务变更的一致性靠 outbox，消费方去重状态靠 inbox，表设计见 17。
+    sources: [S12]
+    see: ["17", "18"]
+  # ── 对外发布 webhook ──
+  - id: API-028
+    title: 对外发布的 webhook 按 Standard Webhooks 签名：带 `webhook-id`、`webhook-timestamp`、`webhook-signature`，对「id.时间戳.原始请求体」签名，每个接收端单独密钥，轮换期间同时附新旧两个签名
+    level: hard
+    check: auto
+    how: 用 Standard Webhooks 官方验签库写测试，验证签名可通过、篡改请求体或时间戳后失败、轮换期间新旧密钥都能验证
+    applies: [kind:service]
+    why: 不签名的 webhook 可以被伪造；签名不含时间戳就挡不住重放。
+    detail: |
+      - 默认用 HMAC-SHA256（`v1`）；接收方不完全可信、需要只给公钥时用 Ed25519（`v1a`）。
+      - `webhook-id` 在重试时不变，接收方用它去重；`webhook-timestamp` 是本次发送时间。
+      - 发送的字节必须与签名的字节完全一致。
+      - 只用 HTTPS；请求体保持较小，大内容给链接。
+      - 接收第三方回调的一侧见 21。
+    ref_value: 规范建议载荷一般不超过约 20 KB；时间戳容忍窗口规范没有给定值，由接收方设定。
+    sources: [S14]
+    see: ["21", "25"]
+  - id: API-029
+    title: webhook 投递失败时按指数退避加随机抖动重试，有总时长上限；持续失败后停用接收端并通知对方，提供投递记录和手动重放
+    level: soft
+    check: semi
+    how: 故障注入测试：接收端返回 5xx、超时、410，检查重试节奏、停用和重放
+    applies: [kind:service]
+    why: 接收方短暂故障很常见；不重试会丢事件，无限重试又会打垮对方和自己。
+    detail: |
+      - 接收端返回 410 时停用该接收端；有 `Retry-After` 时遵守。
+      - 2xx 只表示对方已收到，不代表业务处理成功。
+      - 投递记录包括每次尝试的时间、状态码、耗时。
+    ref_value: Standard Webhooks 的示例重试计划持续约 3 天，是参考值。
+    sources: [S14]
+    see: ["18"]
+  - id: API-030
+    title: webhook 地址由用户填写时，发送前和每次跟随重定向时都校验目标地址，禁止回环、内网和云元数据地址
+    level: hard
+    check: auto
+    how: SSRF 测试用例：回环地址、内网段、元数据地址、指向内网的重定向和 DNS 重绑定都必须被拒绝
+    applies: [kind:service]
+    why: 用户可控的回调地址是典型的 SSRF 入口，可被用来探测和攻击内网服务。
+    detail: 私有化部署中客户要求投递到自己内网的，用显式配置的允许列表放行，不整体关闭校验。具体防护手段见 25。
+    see: ["25"]
+  # ── 实时推送 ──
+  - id: API-031
+    title: 承诺断线可续传的 SSE 流，每条事件带 `id`，服务端从持久化的事件记录按 `Last-Event-ID` 续传；超出保留期时明确告知调用方重新同步
+    level: soft
+    check: semi
+    how: 端到端测试断网重连、服务端重启、游标过期三种情况
+    applies: [kind:service, platform:web]
+    why: 事件只存在进程内存里，重启或断线后就丢了；悄悄丢掉一段历史，客户端会以为数据完整。
+    detail: |
+      - 定期发注释行作心跳，防止中间代理断开空闲连接。
+      - 浏览器原生 EventSource 不能自定义请求头，鉴权用 Cookie 或支持流式 fetch 的客户端。
+      - 服务端单向推送用 SSE；需要双向交互时才用 WebSocket。
+    sources: [S15]
+  # ── MCP 服务端 ──
+  - id: API-032
+    title: MCP 工具按用户任务设计，不把每个 REST 接口自动转成工具；每个工具有清楚的名称、描述和输入 schema，结构化输出声明输出 schema
+    level: soft
+    check: semi
+    how: 静态检查工具清单：每个工具有描述、输入 schema 禁止多余字段；用固定任务集评测工具被选中和调用的正确率（见 24）
+    applies: [kind:service, kind:llm]
+    why: 工具太多、太碎，模型容易选错；描述不清，模型不知道何时用、出错后怎么办。
+    detail: |
+      - 描述写清：做什么、什么时候用、什么时候不用、是否修改数据、输入的格式和单位、失败后的安全下一步。
+      - 单次输出有大小上限；结果多时分页、过滤或返回资源链接。
+      - 长任务返回任务句柄，不阻塞等待。
+      - 工具列表排序稳定。
+    sources: [S16]
+    see: ["24"]
+  - id: API-033
+    title: MCP 工具执行中的业务错误放在工具结果里并标 `isError`；只有协议层的错误（未知工具、参数不合 schema 等）用 JSON-RPC 错误
+    level: hard
+    check: auto
+    how: 协议测试：构造业务失败和协议错误两类请求，检查返回形式
+    applies: [kind:service, kind:llm]
+    why: 放在工具结果里的错误模型能看到并自行修正；当成协议错误返回，模型通常拿不到有用信息。
+    sources: [S16]
+  - id: API-034
+    title: 用官方 SDK 实现 MCP 协议层；声明支持哪些协议版本，并为每个声明支持的版本跑互通测试
+    level: hard
+    check: auto
+    how: CI 用各个声明版本的客户端连接服务，跑工具列表和调用测试
+    applies: [kind:service, kind:llm]
+    why: 新版协议与旧版差别很大，手写协议拼装容易出错；不测就声称兼容，旧客户端会在上线后才失败。
+    detail: |
+      - 核实时（2026-11-14）的当前版本是 2026-07-28：每个请求在 `_meta` 和 `MCP-Protocol-Version` 头里带协议版本，服务端逐个请求接受或拒绝，不支持时返回 `UnsupportedProtocolVersionError` 并列出支持的版本；客户端可调用 `server/discover` 预先获取版本和能力。
+      - 2025-11-25 及更早的版本基于初始化握手，兼容它们要按规范的「向后兼容」一节实现并单独测试。
+      - 被标为废弃的特性至少保留 12 个月（加急情况 90 天），升级前查看规范的废弃特性清单。
+    sources: [S17]
+  - id: API-035
+    title: 通过 HTTP 提供、需要授权的 MCP 服务，按 OAuth 2.1 资源服务器实现：提供受保护资源元数据，校验令牌是签发给本服务的，不接受也不转发其他令牌，令牌不放在 URL 里
+    level: hard
+    check: auto
+    how: 测试用发给其他服务的令牌、过期令牌、放在查询参数里的令牌访问，都必须返回 401；检查受保护资源元数据端点可访问
+    applies: [kind:service, kind:llm]
+    why: 规范对这些要求用的是 MUST；不校验受众的服务会接受本该发给别的服务的令牌，转发令牌会造成代理混淆攻击。
+    detail: |
+      - MCP 的授权本身是可选的；一旦在 HTTP 传输上做，就按规范实现。标准输入输出传输不走这套流程，从环境中取凭据。
+      - 令牌无效或过期返回 401 并带 `WWW-Authenticate`（含 `resource_metadata`）；权限不足返回 403 和 `insufficient_scope`，一次给出当前操作需要的全部 scope。
+      - 客户端注册优先 Client ID Metadata Documents，动态客户端注册已标为废弃，仅为兼容保留。
+      - 令牌、会话、授权模型的通用规则见 19；本机运行的 MCP 服务的监听和防护见 32。
+    sources: [S18]
+    see: ["19", "RUN-038", "RUN-039"]
+  - id: API-036
+    title: MCP 客户端或宿主不信任第三方服务自报的工具注解（只读、破坏性、幂等等）；副作用和权限由宿主自己的策略决定
+    level: hard
+    check: manual
+    how: 评审宿主的权限策略，确认没有根据第三方注解自动放行写操作
+    applies: [kind:llm, kind:agent]
+    why: 注解是服务端自己声明的，恶意或有缺陷的服务可以把删除操作标成只读。
+    detail: 自己提供的 MCP 服务仍应如实标注注解，方便可信的宿主使用。
+    sources: [S16]
+    see: ["23"]
+  # ── 命令行工具 ──
+  - id: API-037
+    title: 命令行工具提供 `--json` 模式（标准输出只有一个合法 JSON，诊断信息走标准错误），公开稳定的退出码表，并支持非交互运行
+    level: soft
+    check: auto
+    how: CLI 测试用 `jq` 解析 `--json` 输出；在无终端环境下运行，检查不会等待输入
+    applies: [kind:cli]
+    why: 脚本、CI 和 Agent 要靠稳定的输出和退出码判断结果；混进进度条或提示文字就解析不了。
+    detail: |
+      - 提供 `--no-input`，需要确认的操作在非交互时直接失败或要求显式的 `--yes`。
+      - 有修改的命令提供 `--dry-run` 预览。
+      - 流式大列表用单独的模式（如 `--output ndjson`），不让 `--json` 时而输出一个对象、时而输出多行。
+      - 退出码不直接用 HTTP 状态码；错误输出里带接口错误的 `code`。
+      - 命令结构全局一致，如「产品 名词 动词」。
+    sources: [S19]
+choices:
+  - category: 接口风格
+    pick: REST + OpenAPI
+    when: 普通 HTTP 接口，尤其是公开接口和第三方调用
+    alternatives:
+      - { name: GraphQL, when: 前端频繁自由组合查询，且能做查询复杂度限制 }
+      - { name: Connect / gRPC, when: 内部服务间强类型调用或需要流式；Connect 兼容浏览器和普通 HTTP 客户端 }
+      - { name: WebSocket, when: 真正的双向实时交互 }
+    avoid:
+      - { name: 为少数页面引入 GraphQL 服务, why: 运维和安全治理成本超过收益 }
+      - { name: 强制浏览器和第三方用原生 gRPC, why: 浏览器不直接支持，接入成本高 }
+    sources: [S01, S26, S27]
+  - category: OpenAPI 规范版本
+    pick: OpenAPI 3.1
+    alternatives:
+      - { name: OpenAPI 3.2, when: 确实需要 QUERY 方法、流式媒体描述等新特性，且工具链已验证支持 }
+    avoid:
+      - { name: Swagger 2.0 / OpenAPI 3.0 用于新项目, why: 不完全兼容 JSON Schema，新工具逐步以 3.1 为基线 }
+    license: 规范为 Apache-2.0
+    sources: [S01, S02]
+  - category: 契约 lint
+    pick: Spectral（规则集放在仓库里）
+    alternatives:
+      - { name: Redocly CLI, when: 需要多文件契约打包（bundle）或想用它的内置规则；可与 Spectral 并用，打包后再 lint }
+    avoid:
+      - { name: 只看文档预览判断契约对不对, why: 预览能渲染不代表契约正确 }
+    license: Spectral 为 Apache-2.0；Redocly CLI 为 MIT（均待核实）
+    notes: 两者都是 CI 里独立运行的工具，不随产品分发。
+    sources: [S20, S21]
+  - category: 破坏性变更检测
+    pick: oasdiff
+    alternatives:
+      - { name: openapi-diff, when: 已在用且能满足检测需求时 }
+    avoid:
+      - { name: 对契约文件做纯文本 diff, why: 看不出语义上的破坏 }
+    license: Apache-2.0（待核实）
+    notes: 只能发现契约层的破坏，行为层的变化仍需人工评审和契约测试（见 04）。
+    sources: [S22]
+  - category: 接口文档站
+    pick: Scalar 或 Redoc，静态构建后自托管
+    avoid:
+      - { name: 私有化项目的文档站引用外部 CDN、字体或在线 schema, why: 内网打不开 }
+    license: 均为 MIT（待核实）
+    notes: 这里只管接口参考文档；通用文档站见 05。
+    sources: [S23]
+  - category: 客户端与 SDK 生成
+    pick: 按语言选专用生成器（见 10–14）
+    alternatives:
+      - { name: OpenAPI Generator, when: 需要一次生成多种语言的 SDK；先验证目标语言生成器对 3.1 的支持 }
+    avoid:
+      - { name: 生成的代码手改, why: 下次生成就被覆盖 }
+      - { name: 把错误恢复、缓存、重连、幂等键管理也交给生成器, why: 这些需要手写薄封装并测试 }
+    license: OpenAPI Generator 为 Apache-2.0（待核实）
+    sources: [S24]
+  - category: 错误格式
+    pick: RFC 9457 Problem Details
+    alternatives:
+      - { name: 迁移期适配旧格式, when: 已有调用方依赖旧格式，需设定迁移截止日期 }
+    avoid:
+      - { name: "200 {success: false}", why: 破坏按状态码工作的客户端、网关和重试逻辑 }
+    sources: [S03]
+  - category: 写操作幂等
+    pick: Idempotency-Key + 持久化幂等记录
+    alternatives:
+      - { name: 客户端自定资源 ID + PUT, when: 资源 ID 可以由客户端生成时，天然幂等 }
+    avoid:
+      - { name: 幂等键只放内存缓存, why: 重启和多实例时失效 }
+      - { name: 只比对键、不比对请求体, why: 会把不同请求误当成重复 }
+    sources: [S04]
+  - category: 并发写
+    pick: 强 ETag + If-Match
+    alternatives:
+      - { name: 领域版本号 + 比较并更新, when: 非 HTTP 接口或客户端不便处理 ETag }
+    avoid:
+      - { name: 后写覆盖先写且不提示, why: 静默丢失别人的修改 }
+    sources: [S05]
+  - category: 列表分页
+    pick: 不透明游标 + 有上限的 limit + 确定排序
+    alternatives:
+      - { name: offset 分页, when: 数据少、基本不变，或确实需要跳页 }
+    avoid:
+      - { name: 不分页返回全量, why: 随数据增长拖垮服务 }
+    sources: [S06]
+  - category: 长任务
+    pick: 202 + 任务资源（参考 Google AIP-151 的长时操作）
+    avoid:
+      - { name: 长时间占着 HTTP 连接等结果, why: 断线无法恢复，易被网关超时 }
+    sources: [S07]
+  - category: 大文件上传
+    pick: 分段、可恢复的上传会话；需要与第三方互通时用 tus 协议
+    alternatives:
+      - { name: multipart/form-data, when: 小文件 }
+    avoid:
+      - { name: 大文件单个请求、失败只能从头传, why: 弱网下几乎传不完 }
+    sources: [S25]
+  - category: 事件信封与描述
+    pick: CloudEvents 信封 + AsyncAPI 描述事件通道
+    alternatives:
+      - { name: JSON Schema + 文档, when: 事件少、规模小 }
+    avoid:
+      - { name: 每个服务自定事件字段, why: 消费方要逐个适配 }
+      - { name: 用 OpenAPI 描述全部事件语义, why: 表达不了通道、发布订阅关系 }
+    license: CloudEvents、AsyncAPI 规范均为 Apache-2.0
+    notes: AsyncAPI 文档本身不提供可靠投递、重放和顺序，这些要自己实现。
+    sources: [S12, S13]
+  - category: 对外 webhook 格式与签名
+    pick: Standard Webhooks，用其官方各语言库签名和验签
+    alternatives:
+      - { name: 保留已有的格式并行提供, when: 已有大量接收方依赖旧格式 }
+    avoid:
+      - { name: 不签名或自创签名格式, why: 接收方无法用通用库验签，容易出安全漏洞 }
+    license: 规范为 Apache-2.0
+    sources: [S14]
+  - category: 实时推送
+    pick: SSE + 持久化事件记录 + Last-Event-ID 续传
+    alternatives:
+      - { name: WebSocket, when: 需要双向交互 }
+      - { name: 长轮询, when: 中间网络不支持长连接 }
+    avoid:
+      - { name: 只为服务端推送而上 WebSocket, why: 多出连接管理和鉴权复杂度 }
+      - { name: 事件只放进程内存却声称支持续传, why: 重启即丢 }
+    sources: [S15]
+  - category: MCP 服务端
+    pick: 官方 SDK，实现当前正式协议版本
+    alternatives:
+      - { name: 同时兼容旧的握手式版本, when: 仍有旧客户端，需逐版本测试 }
+    avoid:
+      - { name: 手写协议拼装, why: 版本协商、传输和授权细节多，易出错 }
+      - { name: 把所有 REST 接口自动转成 MCP 工具, why: 工具数量爆炸，模型容易误操作 }
+    notes: 各 SDK 的许可证和对当前版本的支持情况，采用时到其仓库核实。
+    sources: [S17, S16]
+  - category: 命令行机器输出
+    pick: 按 CLI Guidelines（clig.dev）设计，`--json` 输出配 JSON Schema
+    avoid:
+      - { name: JSON 模式里混入进度条、颜色或提示, why: 无法解析 }
+    sources: [S19]
+antipatterns:
+  - { bad: "失败时返回 200 加 {success: false}", instead: 用正确的状态码和 RFC 9457 错误体 }
+  - { bad: 客户端靠匹配错误的 detail 文本判断原因, instead: 按 type 或 code 判断 }
+  - { bad: 只用缓存里 24 小时的幂等键保证付款只执行一次, instead: 幂等记录持久化 + 业务唯一约束 + 事务 }
+  - { bad: 前端回传了 ETag，服务端却先查再无条件更新, instead: 用带版本条件的原子更新 }
+  - { bad: 事件每次重发都换一个 id, instead: "重发保持同一个 (source, id)" }
+  - { bad: 默认承诺事件全局有序、恰好一次, instead: 按聚合对象排序 + 至少一次 + 消费方去重 }
+  - { bad: 验签前先把 JSON 解析再序列化, instead: 用原始请求体字节验签 }
+  - { bad: 用户填什么回调地址就往哪发, instead: 校验地址并限制重定向，防 SSRF }
+  - { bad: 在快速变化的大表上用页码 + offset 翻页, instead: 游标分页 + 确定排序 }
+  - { bad: 把 llms.txt 当成接口契约或授权依据, instead: 契约以 OpenAPI、AsyncAPI、JSON Schema 和测试为准 }
+  - { bad: 网页表单、HTTP、MCP、CLI 各写一套业务规则, instead: 共用一套领域逻辑和授权，各出口单独定契约 }
+sources:
+  - { id: S01, title: OpenAPI Specification（版本索引）, url: "https://spec.openapis.org/oas/", publisher: OpenAPI Initiative, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S02, title: Announcing OpenAPI v3.2, url: "https://www.openapis.org/blog/2025/09/23/announcing-openapi-v3-2", publisher: OpenAPI Initiative, date: 2025-09-23, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "RFC 9457: Problem Details for HTTP APIs", url: "https://www.rfc-editor.org/rfc/rfc9457.html", publisher: IETF, date: 2023-07, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: "The Idempotency-Key HTTP Header Field（Internet-Draft）", url: "https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/", publisher: IETF httpapi WG, date: 2026-10-22, kind: standard, checked: 2026-11-14 }
+  - { id: S05, title: "RFC 9110: HTTP Semantics", url: "https://www.rfc-editor.org/rfc/rfc9110.html", publisher: IETF, date: 2022-06, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: Zalando RESTful API Guidelines, url: "https://opensource.zalando.com/restful-api-guidelines/", publisher: Zalando, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S07, title: "AIP-151: Long-running operations", url: "https://google.aip.dev/151", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S08, title: "AIP-121: Resource-oriented design", url: "https://google.aip.dev/121", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S09, title: "GitHub REST API: API versions", url: "https://docs.github.com/en/rest/about-the-rest-api/api-versions", publisher: GitHub, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S10, title: "RFC 9745: The Deprecation HTTP Response Header Field", url: "https://www.rfc-editor.org/rfc/rfc9745.html", publisher: IETF, date: 2025-03, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: "RFC 8594: The Sunset HTTP Header Field", url: "https://www.rfc-editor.org/rfc/rfc8594.html", publisher: IETF, date: 2019-05, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: CloudEvents Specification, url: "https://github.com/cloudevents/spec/blob/main/cloudevents/spec.md", publisher: CNCF, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S13, title: AsyncAPI Specification, url: "https://github.com/asyncapi/spec/blob/master/spec/asyncapi.md", publisher: AsyncAPI Initiative, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S14, title: Standard Webhooks Specification, url: "https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md", publisher: Standard Webhooks, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S15, title: "MDN: Using server-sent events", url: "https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "MCP Specification: Tools", url: "https://modelcontextprotocol.io/specification/2026-07-28/server/tools", publisher: Model Context Protocol, date: 2026-07-28, kind: standard, checked: 2026-11-13 }
+  - { id: S17, title: "MCP Specification: Versioning", url: "https://modelcontextprotocol.io/specification/versioning", publisher: Model Context Protocol, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S18, title: "MCP Specification: Authorization", url: "https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization", publisher: Model Context Protocol, date: 2026-07-28, kind: standard, checked: 2026-11-14 }
+  - { id: S19, title: Command Line Interface Guidelines, url: "https://clig.dev/", publisher: clig.dev, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S20, title: Spectral, url: "https://github.com/stoplightio/spectral", publisher: Stoplight, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Redocly CLI, url: "https://github.com/Redocly/redocly-cli", publisher: Redocly, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: oasdiff, url: "https://github.com/oasdiff/oasdiff", publisher: oasdiff, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Scalar, url: "https://github.com/scalar/scalar", publisher: Scalar, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: OpenAPI Generator, url: "https://github.com/OpenAPITools/openapi-generator", publisher: OpenAPI Tools, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "tus: Resumable upload protocol", url: "https://tus.io/protocols/resumable-upload", publisher: tus, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S26, title: "GraphQL: Learn", url: "https://graphql.org/learn/", publisher: GraphQL Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Connect: Introduction", url: "https://connectrpc.com/docs/introduction/", publisher: Connect, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: Microsoft Azure REST API Guidelines, url: "https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md", publisher: Microsoft, date: null, kind: case, checked: 2026-11-13 }
+open_questions:
+  - Spectral、Redocly CLI、oasdiff、Scalar、Redoc、OpenAPI Generator、AsyncAPI CLI 的许可证本次未联网核实，以各仓库 LICENSE 为准
+  - MCP 2026-07-28 版工具规范中 isError、structuredContent、outputSchema 可为任意 JSON 类型、工具注解不可信等细节本次未逐条联网复核
+  - 原报告称 HTTP QUERY 方法已于 2026-06 成为 RFC 10008，未核实；核实前不把 QUERY 写进规则
+  - 新接口 JSON 字段默认 camelCase 是本主题的裁决（依据 Microsoft 指南和前端生态），Zalando 等指南用 snake_case；需与 02 再确认口径
+  - 待补调研：模拟服务器（mock server）和消费者驱动契约测试工具的选型（与 04 协调）
+  - 待补调研：webhook 发送端的现成库或服务（含可私有化部署的方案）
+  - 待补调研：Connect、GraphQL 各语言实现与许可证；字段选择与过滤参数的业界约定
