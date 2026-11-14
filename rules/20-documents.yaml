@@ -1,0 +1,561 @@
+id: "20"
+slug: documents
+title: 文档解析与内容处理
+summary: 安全、可追溯地解析和转换不可信文件：PDF、Office、图片、压缩包、HTML、邮件、音视频；OCR 与版面分析；格式转换；解析器隔离运行；结构化输出。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - PDF、Office、图片、压缩包、HTML、邮件、音视频的解析
+    - OCR（光学字符识别）、版面分析、表格抽取
+    - 格式转换（LibreOffice 无头模式、Pandoc、HTML 转 PDF 等）
+    - 解析器的隔离运行：沙箱、资源上限、超时、禁网
+    - 压缩炸弹、路径穿越、宏、XML 外部实体（XXE）的防护
+    - 解析结果的结构化输出与出处定位
+    - 解析组件（代码、模型权重、字体、编解码器）的许可证标注
+  excludes:
+    - { what: 上传入口的通用安全规则（鉴权、存储、杀毒、文件名）、SSRF、SBOM 与依赖扫描, see: "25" }
+    - { what: RAG 切块策略、检索、多模态模型选择, see: "24" }
+    - { what: 前端文件预览组件、富文本展示, see: "07" }
+    - { what: 开源许可的使用口径、许可扫描工具、数据出境, see: "27" }
+    - { what: 容器镜像、资源配额的部署配置, see: "26" }
+    - { what: 黄金样本、视觉回归等测试方法的通用口径, see: "04" }
+overview: |
+  1. **上传的文件一律当恶意输入。** 先按内容签名识别真实类型，再按类型设大小、解压比、条目数、页数、像素、时长上限，超限即停。
+  2. **解析器关在笼子里跑。** 独立进程或容器，非 root、默认禁网、只读根文件系统、有超时和内存上限；超时杀掉整个进程组。
+  3. **文件里的「活」内容不执行。** XML 类输入关掉 DTD 和外部实体；Office 宏、PDF 脚本不执行；渲染 HTML 不加载外部资源；外部命令用参数数组，不经 shell。
+  4. **原生格式先原生读。** Office 用结构库，有文字层的 PDF 直接读文字和坐标，只有扫描页才 OCR。
+  5. **存原件和结构化结果，Markdown 只是派生视图。** 每个块记下出处位置（页+坐标、单元格范围、幻灯片、时间码），以及源文件哈希和解析器版本。
+  6. **失败要说出来。** 失败、部分成功、成功分开标，不静默返回空；模型补出来的内容单独标注；没有置信度就留空。
+  7. **选型靠自己的样本实测。** Docling 作通用默认；中文复杂 PDF、公式、表格拿 MinerU、Marker 一起对比，厂商榜单只作参考。
+  8. **许可证分开审代码、权重、字体、编解码器。** PyMuPDF、MuPDF、Ghostscript 是 AGPL；MinerU 是 Apache-2.0 加附加条款；Marker 代码 Apache-2.0、权重有商业门槛。独立工具和随产品分发的组件要求不同，口径见 27。
+  9. **离线要真断网测过才算。** 模型、语言包、字体、浏览器预置进镜像，在禁网容器里跑通端到端冒烟测试。
+rules:
+  # ── 输入识别与资源上限 ──
+  - id: FILE-001
+    title: 按文件内容签名识别真实类型再选解析器；类型与声明不符或不在允许清单里时拒绝，不凭扩展名或客户端给的 MIME 选解析器
+    level: hard
+    check: auto
+    how: 测试集放入扩展名与内容不符的样本（如改名为 .pdf 的 ZIP），断言被拒绝或按真实类型处理
+    applies: [all]
+    why: 扩展名和 MIME 都由上传方控制，按它们选解析器会把文件送进错误的、往往更脆弱的代码路径。
+    detail: |
+      - 识别工具：Apache Tika、libmagic（`file` 命令）。
+      - OOXML、ODF、EPUB 都是 ZIP 容器，签名一样，要再看容器内的清单文件才能确定子类型。
+      - 上传入口的通用校验（大小、文件名、存储位置、杀毒）见 25。
+    sources: [S01, S14]
+    see: ["25"]
+  - id: FILE-002
+    title: 解析前配置并强制执行资源上限：原始大小、解压后总大小、压缩比、条目数、嵌套层数、页数、解码后像素、音视频时长
+    level: hard
+    check: auto
+    how: 配置检查确认每项上限都有值；测试集放入压缩炸弹、XML 实体炸弹、超大像素图片、超长音视频，断言在上限处停止并报错
+    applies: [all]
+    why: 压缩炸弹和解码炸弹用很小的文件耗尽内存和磁盘，是解析服务最常见的拒绝服务手段。
+    detail: |
+      - 解压时边解边计数，不要先信压缩包目录里声明的大小。
+      - 图片在解码前先读头部拿宽高，超过像素上限直接拒绝（Pillow 的 `MAX_IMAGE_PIXELS`、ImageMagick 的 `policy.xml`）。
+      - 音视频先用 `ffprobe` 读时长、轨道、编码，再决定是否处理。
+    ref_value: 具体数值按业务定，没有通用标准；ImageMagick 官方示例策略给出的参考是单图宽高 8K 像素、内存 512MiB、处理时间 30 秒。
+    sources: [S01, S23, S24]
+  - id: FILE-003
+    title: 解压压缩包时拒绝绝对路径、含 `..`、符号链接和硬链接的条目，解到本任务独立的临时目录，并校验解压后的路径仍在该目录内
+    level: hard
+    check: auto
+    how: 测试集放入路径穿越（Zip Slip）和符号链接样本，断言不会写出临时目录；静态扫描查找未校验路径的解压调用
+    applies: [all]
+    why: 压缩包里的文件名由攻击者控制，不校验就能覆盖任意文件。
+    detail: |
+      - 解压后的文件用程序生成的名字保存，原文件名只作为元数据。
+      - Python 的 `tarfile` 用 `filter="data"`；`zipfile` 自己校验 `os.path.realpath` 结果在目标目录内。
+    sources: [S30, S01]
+  - id: FILE-004
+    title: 大文件流式读取或按页处理，不把整个文件一次读进内存
+    level: soft
+    check: semi
+    how: 评审时查找对不可信文件的整文件读取（如 `read()` 不带长度）；压测时看峰值内存
+    applies: [all]
+    why: 整文件读取让内存占用随输入线性增长，单个大文件就能拖垮进程。
+  # ── 隔离运行 ──
+  - id: FILE-005
+    title: 不可信文件的解析和转换必须在独立进程或容器里运行，并设墙钟超时、CPU、内存、临时盘和并发上限；超时杀掉整个进程组
+    level: hard
+    check: auto
+    how: 部署配置检查资源上限字段；故障注入测试（死循环样本、超大样本）断言进程被杀、子进程不残留
+    applies: [kind:service]
+    why: 文档解析器（尤其是 C/C++ 写的 PDF、图像、Office 后端）漏洞多，放在主服务进程里，一个畸形文件就能让服务崩溃或被控制。
+    detail: |
+      - LibreOffice、Chromium、Ghostscript 都会派生子进程，只杀父进程会留下孤儿进程。
+      - 容器资源上限的写法见 26。
+    sources: [S01]
+    see: ["26"]
+  - id: FILE-006
+    title: 解析进程以非 root 运行、默认禁止网络、根文件系统只读、只挂载本任务的临时目录；需要联网的例外写明原因并经批准
+    level: hard
+    check: auto
+    how: 部署策略检查（如 Kubernetes 的 securityContext 与 NetworkPolicy、`docker run --network none --read-only`）；运行时抓取网络连接，断言无外联
+    applies: [kind:service]
+    why: 即使解析器被攻破，也要让攻击者拿不到网络和其他任务的文件。
+    sources: [S01, S23]
+    see: ["25", "26"]
+  - id: FILE-007
+    title: 解析和渲染过程中不主动获取外部资源（远程图片、样式表、字体、XInclude、链接文件）；确需抓取用户给的 URL 时按 25 的 SSRF 规则处理
+    level: hard
+    check: auto
+    how: 测试集放入引用外部地址的 HTML、SVG、DOCX、PDF，在抓包或 DNS 记录里断言无请求
+    applies: [all]
+    why: 文档里的外部引用会把内网地址、文件内容带出去，或被用来探测内网。
+    detail: |
+      - HTML 转 PDF 用 Playwright 时，拦截所有请求，只放行预置的本地资源；不可信 HTML 关闭 JavaScript。
+      - WeasyPrint 用自定义 `url_fetcher` 拒绝远程地址和 `file://`。
+    sources: [S28]
+    see: ["25"]
+  # ── 活动内容与注入 ──
+  - id: FILE-008
+    title: 解析 XML 类输入（XML、OOXML、ODF、SVG、XHTML、XMP）时禁用 DTD、外部实体和 XInclude
+    level: hard
+    check: auto
+    how: 测试集放入 XXE 和实体炸弹样本；静态扫描（Semgrep 等）查找未加固的 XML 解析器构造
+    applies: [all]
+    why: XML 外部实体可以读服务器文件、发起内网请求，实体嵌套可以耗尽内存。
+    detail: |
+      - Python：用 defusedxml 包装标准库解析器；openpyxl 官方建议安装 defusedxml。
+      - Java：打开 `disallow-doctype-decl`，并关闭外部通用实体和参数实体（写法见 OWASP XXE 速查表）。
+      - .NET：`XmlReaderSettings.DtdProcessing = Prohibit`。
+      - 用了 Office 库也要确认它底层的 XML 解析是否已加固。
+    sources: [S02, S22, S43]
+  - id: FILE-009
+    title: 不执行 Office 宏、嵌入脚本、OLE 对象，不执行 PDF 中的 JavaScript 和启动动作；LibreOffice 转换时宏安全级别设为最高
+    level: hard
+    check: semi
+    how: 测试集放入带宏、带自动执行动作的样本，审计转换进程有无派生意外子进程或外联
+    applies: [all]
+    why: 宏和嵌入的活动内容是 Office 文件最常见的攻击载体。
+    sources: [S03]
+  - id: FILE-010
+    title: 调用外部转换工具时用参数数组传参，不经 shell；用户控制的值不拼进命令字符串，文件名用程序生成的临时名
+    level: hard
+    check: auto
+    how: Semgrep、Bandit、gosec 等规则禁止 `shell=True`、`exec` 字符串拼接
+    applies: [all]
+    why: 文件名和参数里的特殊字符会变成命令注入。
+    detail: 参数可能以 `-` 开头时，在它前面加 `--`，避免被当成选项。
+    sources: [S01]
+    see: ["25"]
+  - id: FILE-011
+    title: 用 ImageMagick 处理不可信图片时启用受限的 policy.xml：禁用外部委托程序，禁止读入 MSL、URL、MVG、PS、PDF、SVG、XPS 等格式
+    level: hard
+    check: auto
+    how: "`magick identify -list policy` 输出与要求的策略对比；测试集放入 MVG、PS 伪装的图片"
+    applies: [all]
+    why: ImageMagick 会按内容把文件交给 Ghostscript 等外部程序解释，默认配置下攻击面很大。
+    detail: 能用 Pillow、Sharp 或 libvips 满足需求时优先用它们，攻击面更小。
+    sources: [S23]
+  - id: FILE-012
+    title: 用 Pandoc 处理不可信输入时加 `--sandbox`，不启用不可信的过滤器和 Lua 脚本
+    level: hard
+    check: auto
+    how: 检查调用 Pandoc 的命令参数含 `--sandbox`；测试集放入含 include 指令、引用本地文件的样本
+    applies: [all]
+    why: Pandoc 官方说明，处理不可信输入时应使用沙箱选项，否则读写器可能读取命令行以外的文件。
+    detail: 沙箱只限制读写器的文件访问，不限制过滤器和 PDF 生成，这两者仍要靠进程隔离。
+    sources: [S17]
+  - id: FILE-013
+    title: 不把不可信的 PostScript、EPS 交给 Ghostscript；确需处理时保持 SAFER 模式并在隔离环境里运行
+    level: soft
+    check: semi
+    how: 评审时检查调用 Ghostscript（含经 ImageMagick、OCRmyPDF 间接调用）的路径和参数
+    applies: [all]
+    why: PostScript 是完整的编程语言，Ghostscript 历史上多次出现沙箱逃逸漏洞。
+    see: ["FILE-005"]
+  - id: FILE-014
+    title: HTML 的正文抽取和安全净化分两步做；要展示或回传 HTML 时必须经过专用净化库，Markdown 转换不算净化
+    level: hard
+    check: semi
+    how: 测试集放入 XSS 样本，断言输出中不含可执行脚本；评审时确认净化步骤存在
+    applies: [all]
+    why: 正文抽取只去掉导航和广告，不保证安全；Markdown 也能夹带原始 HTML。
+    detail: 净化库：浏览器端 DOMPurify，Python nh3，Rust ammonia。前端展示规则见 07。
+    sources: [S35, S36]
+    see: ["07", "25"]
+  - id: FILE-015
+    title: 邮件按 MIME 解码后，正文 HTML 先净化且不加载外链，附件按同一套类型识别和隔离流程分别处理
+    level: soft
+    check: semi
+    how: 测试集放入带远程图片、嵌套附件的邮件样本
+    applies: [all]
+    why: 邮件是多种不可信格式的容器，外链图片还会泄露「已读」信息。
+  # ── 解析路线 ──
+  - id: FILE-016
+    title: 原生格式先原生读：Office 用结构库，有文字层的 PDF 直接读文字和坐标；先按页检测有无文字层，OCR 只用于没有文字层或文字层损坏的页或区域
+    level: soft
+    check: semi
+    how: 路由逻辑的单元测试覆盖数字 PDF、扫描 PDF、混合 PDF；统计每页是否用了 OCR
+    applies: [all]
+    why: 全部转图片再 OCR 会丢掉可复制的文字、表单对象和精度，还更慢更贵。
+  - id: FILE-017
+    title: 选解析器或 OCR 引擎前，用自己的真实样本（中文、扫描件、复杂表格、公式等）对比候选，不只看厂商榜单
+    level: soft
+    check: manual
+    how: 选型记录里附样本构成、指标（字符错误率、表格结构、阅读顺序、耗时、峰值内存）和结果
+    applies: [all]
+    why: 不同类型的文档排名会反转，厂商自测数据和自己的文档差别很大。
+    detail: 字符错误率（CER）= 编辑距离 ÷ 标注字符数；中文优先看 CER。阈值按业务风险定，不设通用数值。
+    see: ["04"]
+  - id: FILE-018
+    title: 升级解析器、OCR 引擎或模型前，在固定样本集上与当前版本对比质量和资源指标，有退步不上线
+    level: soft
+    check: semi
+    how: CI 或发布流程里跑对比，记录新旧结果
+    applies: [all]
+    why: 新版本不一定更准，升级常常悄悄改变阅读顺序、表格结构和坐标。
+    see: ["04"]
+  # ── 结构化输出 ──
+  - id: FILE-019
+    title: 保存原件和结构化中间结果；Markdown、纯文本只作派生视图，不作唯一的存储格式
+    level: soft
+    check: semi
+    how: 评审存储结构，确认原件与结构化结果都有保存
+    applies: [all]
+    why: Markdown 会丢坐标、合并单元格和块类型，丢了就无法再精确引用或重新切块。
+  - id: FILE-020
+    title: 需要引用出处的场景，每个输出块必须带可回溯的位置：页码和坐标框（注明坐标系）、工作表和单元格范围、幻灯片和形状、DOM 路径或音视频时间码
+    level: hard
+    check: auto
+    how: 往返测试：按块记录的位置回原文取内容，断言与块内容一致
+    applies: [all]
+    why: 没有精确位置，引用就无法被核对，也无法在原文上高亮或批注。
+    detail: |
+      - 不同解析器的坐标原点、单位、旋转处理不同，统一转换到一个约定的坐标系，并写在输出里。
+      - 块编号由源文件哈希、规范化位置和块类型计算，重新解析后的变化用映射关联旧编号。
+    sources: [S29]
+  - id: FILE-021
+    title: 输出记录源文件 SHA-256、大小、识别出的类型，以及解析器和模型的名称、版本、配置摘要；同一输入同一配置重试时结果一致
+    level: soft
+    check: auto
+    how: 用 JSON Schema 校验输出字段；同一样本重复解析，比较输出哈希
+    applies: [all]
+    why: 解析器版本一变结果就可能变，记下这些才能复现、比较和回滚。
+  - id: FILE-022
+    title: 解析结果必须显式标出状态（未尝试、失败、部分成功、成功）和警告；不得在失败时静默返回空内容
+    level: hard
+    check: auto
+    how: 错误注入测试（损坏文件、加密文件、超时），断言状态和警告字段正确
+    applies: [all]
+    why: 空结果被当成「文件里没内容」，下游检索和问答会给出错误答案且无人察觉。
+  - id: FILE-023
+    title: 需要保留表格结构的场景，保留合并单元格、行列顺序、表头和原始数值类型，不只存显示出来的字符串
+    level: soft
+    check: auto
+    how: 含合并单元格、跨页表格、数字和日期的样本做比对测试
+    applies: [all]
+    why: 只存字符串会丢掉数值精度和行列关系，统计和问数会出错。
+  - id: FILE-024
+    title: OCR 和语音转写结果记录引擎、语言、位置或时间码；引擎不提供置信度时字段留空，不编造数值；「用了 OCR」和「质量低」分开记
+    level: hard
+    check: auto
+    how: 用 schema 校验字段；检查置信度只来自引擎原始输出
+    applies: [all]
+    why: 编造的置信度会让下游错误地信任或丢弃内容。
+  - id: FILE-025
+    title: 由模型（视觉模型、大模型）补出或推测的内容单独标注来源，不混作从原文抽取的事实
+    level: hard
+    check: semi
+    how: 输出 schema 区分「抽取」与「生成」；人工抽查生成内容是否被标注
+    applies: [all, kind:llm]
+    why: 模型可能编造表格数字和文字，混进原文后无法追责也无法纠错。
+    see: ["24"]
+  - id: FILE-026
+    title: 切块时保留每块的出处位置和父级标题路径；切块策略见 24
+    level: soft
+    check: auto
+    how: 每块回原文反查位置
+    applies: [kind:llm]
+    why: 切块丢了出处，检索出来的内容就无法引用。
+    see: ["24"]
+  # ── 生成与转换 ──
+  - id: FILE-027
+    title: 生成 Office 文件用该语言的原生库，不用改扩展名的 CSV 冒充 XLSX；公式、日期、数值类型做往返测试
+    level: soft
+    check: auto
+    how: 生成后用同一库或另一种库读回，比对单元格类型和值
+    applies: [all]
+    why: 伪装的文件在 Excel 里打开会丢精度、错日期，或弹出格式警告。
+  - id: FILE-028
+    title: LibreOffice 无头转换每个任务使用独立的用户配置目录和临时目录，任务结束后清理，不同任务不共享配置
+    level: soft
+    check: semi
+    how: 检查调用参数含 `-env:UserInstallation=file:///...` 且路径按任务生成
+    applies: [all]
+    why: 共享配置目录会引起锁冲突、状态串扰，一个任务的宏设置或缓存会影响别的任务。
+    sources: [S16]
+  - id: FILE-029
+    title: 生成或转换 PDF 时预置并嵌入 CJK 字体；转换后检查页数、能否抽出文字、关键页截图对比，不只看命令返回码
+    level: soft
+    check: semi
+    how: 转换流水线里跑文本抽取和截图对比测试
+    applies: [all]
+    why: 缺字体时转换照样返回成功，但输出是方块字或空白页。
+    detail: 字体许可与软件许可是两回事，可分发的字体如 Noto CJK / 思源系列。
+    see: ["04"]
+  # ── 离线与数据 ──
+  - id: FILE-030
+    title: 要求离线部署的项目，模型权重、OCR 语言包、字体、浏览器、编解码器预置进镜像，并在禁网容器里跑通端到端冒烟测试；生产环境不在运行时从公网下载模型
+    level: hard
+    check: auto
+    how: CI 用 `docker run --network none` 跑解析、OCR、转换的冒烟测试；同时检查 DNS 和连接记录
+    applies: [kind:onprem]
+    why: 很多解析库第一次运行时会悄悄下载模型，镜像能启动不等于能离线工作。
+    detail: 关闭各库的自动下载与遥测（如 Hugging Face 的离线环境变量），模型从内部制品库加载。
+    see: ["26"]
+  - id: FILE-031
+    title: 真实文件上传到云端 OCR 或文档识别服务前，必须完成数据分类和审批；要求断网的项目不得使用
+    level: hard
+    check: manual
+    how: 评审时核对审批记录，包括数据类型、服务所在地域、保留期限
+    applies: [all]
+    why: 文件里常有个人信息和商业机密，上传云端可能违反合同或数据出境规定。
+    see: ["27"]
+  - id: FILE-032
+    title: 解析产生的临时文件和中间产物在任务结束或超时后删除；日志只记哈希、大小、类型，不记文件正文
+    level: soft
+    check: semi
+    how: 生命周期测试检查临时目录被清空；日志抽查
+    applies: [all]
+    why: 残留的临时文件和日志会变成没人管的敏感数据副本。
+    see: ["25"]
+  # ── 许可证 ──
+  - id: FILE-033
+    title: 解析组件的代码、模型权重、字体、编解码器分别核对许可证；AGPL、GPL、带商业门槛或非商用条款的组件，在随产品分发或对外提供服务前按 27 审批
+    level: hard
+    check: semi
+    how: 许可扫描工具找出候选，人工核对官方仓库的 LICENSE 和模型许可文件，留审批记录
+    applies: [all]
+    why: 文档解析领域双许可、附加条款、代码与权重许可不同的情况特别多，只看代码许可会漏掉义务。
+    detail: |
+      - PyMuPDF、MuPDF、Ghostscript：AGPL-3.0 或商业许可。作为独立工具内部使用和随产品分发、对外提供网络服务，义务不同。
+      - MinerU：Apache-2.0 加附加条款，月活超 1 亿或月收入超 2000 万美元需商业许可，对外提供在线服务须标明使用了 MinerU，违反则许可自动终止。
+      - Marker：代码 Apache-2.0，模型权重为修改版 OpenRAIL-M，超出研究、个人和小型创业公司范围的商用需另购许可。
+      - FFmpeg：默认 LGPL，启用 GPL 组件后整体按 GPL。
+      - Sharp 自带的 libvips 是 LGPL-2.1。
+      - 这些项目的许可在近年变过不止一次，每次升级都要重新核对。
+    sources: [S06, S08, S09, S18, S19, S20, S21]
+    see: ["27"]
+  - id: FILE-034
+    title: 解析相关的依赖、模型和字体记入台账（版本、许可、哈希），并订阅它们的安全公告和许可变更
+    level: soft
+    check: auto
+    how: SBOM 和许可扫描在 CI 里运行；依赖更新工具提醒新版本
+    applies: [all]
+    why: 解析器漏洞多、许可常变，没有台账就不知道受不受影响。
+    see: ["25", "27"]
+choices:
+  - category: 多格式结构化解析（PDF、Office、HTML 统一出结构）
+    pick: Docling
+    when: 需要版面、表格、阅读顺序和出处位置的通用场景
+    alternatives:
+      - { name: MinerU, when: 中文复杂 PDF、学术论文、公式；须与 Docling、Marker 用自己的样本对比，并接受其附加许可条款 }
+      - { name: Marker, when: PDF 转 Markdown/JSON、需要多种速度档位时；模型权重商用有门槛 }
+      - { name: Unstructured（开源库）, when: 来源杂、需要按元素分区的数据接入；高精度模式依赖较重的模型 }
+    avoid:
+      - { name: 只抽纯文本, why: 丢掉版面、表格和出处，事后无法补回 }
+      - { name: 不经实测就定一个「最好的」解析器, why: 不同文档类型排名会反转 }
+    license: Docling 代码 MIT，官方模型 Apache-2.0 / CDLA-Permissive-2.0；MinerU 为 Apache-2.0 加附加条款（商业门槛、在线服务标识义务）；Marker 代码 Apache-2.0、权重修改版 OpenRAIL-M；Unstructured 开源库 Apache-2.0，所用模型另查
+    notes: 「开源库」和同名的商业托管服务是两回事；私有化部署要预置模型。
+    sources: [S04, S05, S06, S07, S08, S15]
+  - category: 文件类型识别与元数据
+    pick: Apache Tika
+    alternatives:
+      - { name: libmagic（file 命令及各语言绑定）, when: 只要类型识别、不想引入 Java 运行时 }
+    avoid:
+      - { name: 按扩展名判断, why: 上传方可以随意伪造 }
+    license: Apache-2.0
+    notes: Tika 对复杂表格和公式不够，不宜当唯一的解析引擎。
+    sources: [S14]
+  - category: 数字 PDF 的文字和坐标
+    pick: pdfplumber（Python）
+    alternatives:
+      - { name: Apache PDFBox, when: Java 项目，或需要程序式生成 PDF }
+      - { name: pypdf, when: 合并、拆分、表单、元信息等页面级操作 }
+      - { name: pdfcpu, when: Go 项目的 PDF 处理 }
+      - { name: PyMuPDF, when: 需要高性能渲染与几何操作，且已按 27 处理 AGPL 或购买商业许可 }
+    avoid:
+      - { name: 对有文字层的 PDF 直接 OCR, why: 比原生文字更不准、更慢 }
+      - { name: 未经许可审查默认使用 PyMuPDF, why: AGPL-3.0，随产品分发或对外提供服务会带来开源义务 }
+    license: pdfplumber MIT；PDFBox Apache-2.0；pypdf BSD-3-Clause；pdfcpu Apache-2.0；PyMuPDF AGPL-3.0 或商业许可
+    sources: [S09, S10, S39]
+  - category: OCR（中文为主）
+    pick: PaddleOCR
+    alternatives:
+      - { name: RapidOCR, when: 想用 ONNX 运行时轻量部署、不装 Paddle 框架 }
+      - { name: Tesseract, when: 拉丁文字为主、依赖要最轻 }
+      - { name: OCRmyPDF, when: 给扫描 PDF 加可搜索的文字层；它会调用 Ghostscript，注意 AGPL }
+    avoid:
+      - { name: 用 Tesseract 单独处理中文手写和复杂表格, why: 效果差，需要专门模型 }
+    license: PaddleOCR、RapidOCR、Tesseract 代码均为 Apache-2.0，模型权重另查；OCRmyPDF MPL-2.0
+    notes: 默认在 CPU 上能跑，GPU 只作性能扩展。
+    sources: [S11, S12, S13, S40]
+  - category: Office 读写（Python）
+    pick: openpyxl、python-docx、python-pptx
+    alternatives:
+      - { name: XlsxWriter, when: 只生成、不读取的大表 }
+    avoid:
+      - { name: 把 pandas DataFrame 当格式保真工具, why: 丢样式、公式和单元格类型 }
+      - { name: 自己解压 OOXML 手写 XML, why: 关系、命名空间、兼容性复杂，还容易引入 XXE }
+    license: 均为 MIT
+    notes: openpyxl 官方建议同时安装 defusedxml。
+    sources: [S43]
+  - category: Office 读写（Java）
+    pick: Apache POI
+    alternatives:
+      - { name: FastExcel, when: 大批量 Excel 读写、原先用 EasyExcel 的项目迁移 }
+    avoid:
+      - { name: EasyExcel, why: 官方仓库已归档，新项目不要用 }
+    license: POI Apache-2.0；FastExcel Apache-2.0
+    sources: [S32, S25, S26]
+  - category: Office 读写（Go）
+    pick: Excelize
+    avoid:
+      - { name: 自己拼 OOXML, why: 公式、样式、兼容性成本高 }
+    license: BSD-3-Clause
+    sources: [S31]
+  - category: Office 读写（Node）
+    pick: ExcelJS（Excel）、PptxGenJS（生成 PPT）
+    alternatives:
+      - { name: SheetJS 社区版, when: 要读很多种老旧表格格式；从官方渠道安装并锁定哈希 }
+    avoid:
+      - { name: npm 上的 xlsx 包, why: 官方已不在 npm 发布新版，npm 上的版本过旧 }
+    license: ExcelJS MIT；PptxGenJS MIT；SheetJS 社区版 Apache-2.0
+    notes: ExcelJS 发布频率低，复杂需求可改为调用隔离的 Python 或 Java 解析服务。
+    sources: [S27]
+  - category: Office 转 PDF 或图片
+    pick: LibreOffice 无头模式（作为独立进程调用）
+    avoid:
+      - { name: 承诺转换结果与 Office 排版完全一致, why: 字体和排版引擎不同，必然有差异 }
+    license: MPL-2.0（含其他开源组件）
+    sources: [S16]
+  - category: 标记类格式互转（Markdown、HTML、DOCX、EPUB 等）
+    pick: Pandoc（作为独立命令行工具调用，加 --sandbox）
+    avoid:
+      - { name: 把 Pandoc 作为库链接进闭源产品分发, why: GPL 许可要求随之开源 }
+    license: GPL-2.0 或更高版本
+    sources: [S17]
+  - category: HTML 转 PDF
+    pick: Playwright + Chromium
+    alternatives:
+      - { name: WeasyPrint, when: 不需要 JavaScript、以打印样式排版的服务端报表 }
+    avoid:
+      - { name: 截图拼成 PDF, why: 文字不可搜索、不可复制，也没有无障碍信息 }
+    license: Playwright Apache-2.0；WeasyPrint BSD-3-Clause
+    notes: 需预置浏览器和 CJK 字体，并拦截外部请求（见 FILE-007）。
+    sources: [S28, S38]
+  - category: 网页正文抽取
+    pick: trafilatura（Python）、Mozilla Readability（JS）
+    avoid:
+      - { name: 用正则剥 HTML, why: 不可靠，也不安全 }
+      - { name: 把整页 HTML 塞给下游, why: 导航、广告干扰内容 }
+    license: 均为 Apache-2.0
+    notes: 抽取后仍需净化（见 FILE-014）。
+    sources: [S33, S34]
+  - category: HTML 安全净化
+    pick: DOMPurify（浏览器/JS）、nh3（Python）、ammonia（Rust）
+    avoid:
+      - { name: 把 Markdown 转换当净化, why: Markdown 不是安全边界 }
+    license: DOMPurify Apache-2.0 或 MPL-2.0；nh3 MIT；ammonia MIT 或 Apache-2.0
+    sources: [S35, S36]
+  - category: XML 安全解析
+    pick: Python 用 defusedxml；Java 和 .NET 按 OWASP XXE 速查表关闭 DTD
+    license: defusedxml 为 PSF-2.0
+    notes: defusedxml 最近一次提交在 2024 年，更新慢但仍可用。
+    sources: [S02, S22]
+  - category: 图片解码与转换
+    pick: Pillow（Python）、Sharp（Node）
+    alternatives:
+      - { name: libvips, when: 大图、低内存的批量处理 }
+      - { name: ImageMagick, when: 需要它独有的格式；必须配受限 policy.xml（见 FILE-011） }
+    avoid:
+      - { name: 把高分辨率原图直接交给模型, why: 成本高，也可能触发解码炸弹 }
+    license: Pillow MIT-CMU；Sharp Apache-2.0（自带 libvips，LGPL-2.1）；libvips LGPL-2.1
+    sources: [S21, S24, S37]
+  - category: 音视频探测与转码
+    pick: FFmpeg + ffprobe（独立进程调用）
+    alternatives:
+      - { name: faster-whisper 或 whisper.cpp, when: 离线语音转写，两者用自己的样本对比 }
+    avoid:
+      - { name: 默认把录音上传外部转写接口, why: 数据边界不清，见 FILE-031 }
+    license: FFmpeg 默认 LGPL-2.1 或更高，启用 GPL 组件后为 GPL；faster-whisper、whisper.cpp 代码 MIT，模型权重另查
+    sources: [S18, S41, S42]
+  - category: 间接引入的 PDF 和图像后端（许可提示）
+    pick: 引入前查清依赖链里有没有 Ghostscript、MuPDF、Poppler、libvips
+    license: Ghostscript AGPL-3.0（另有商业许可）；MuPDF AGPL-3.0（另有商业许可）；libvips LGPL-2.1；Poppler 待核实
+    notes: OCRmyPDF、ImageMagick、部分 PDF 转图片工具会在背后调用这些后端，许可义务按实际分发方式判断，口径见 27。
+    sources: [S19, S20, S21]
+antipatterns:
+  - { bad: 按扩展名决定用哪个解析器, instead: 按内容签名识别真实类型，类型不符就拒绝 }
+  - { bad: 在主服务进程里直接解析用户上传的 PDF 和 Office, instead: 放进独立进程或容器，限资源、禁网、设超时 }
+  - { bad: 所有文件一律转图片再 OCR, instead: 原生格式先原生读，OCR 按页按需启用 }
+  - { bad: 只存 Markdown 或纯文本, instead: 存原件和带位置的结构化结果，Markdown 只作派生视图 }
+  - { bad: 解析失败时返回空字符串, instead: 标明失败或部分成功，并附警告 }
+  - { bad: 引用只记文件名和页码, instead: 记源文件哈希和页码加坐标、单元格范围或时间码 }
+  - { bad: 用 shell 字符串拼 FFmpeg 或 soffice 命令, instead: 参数数组调用，文件名用程序生成的临时名 }
+  - { bad: 多个转换任务共用一个 LibreOffice 配置目录, instead: 每个任务独立配置目录，用完删除 }
+  - { bad: PDF 转换只看命令返回 0, instead: 检查页数、文字可抽取、关键页截图 }
+  - { bad: 镜像能启动就当作支持离线, instead: 在禁网容器里跑通端到端冒烟测试 }
+  - { bad: 只看代码许可就认定「开源可商用」, instead: 代码、权重、字体、编解码器分别核对 }
+  - { bad: 用模型补全解析失败的内容且不标注, instead: 标为生成内容，或交人工复核 }
+sources:
+  - { id: S01, title: OWASP File Upload Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S02, title: OWASP XML External Entity Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S03, title: Macros from the internet are blocked by default in Office, url: "https://learn.microsoft.com/en-us/microsoft-365-apps/security/internet-macros-blocked", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: Docling, url: "https://github.com/docling-project/docling", publisher: Docling Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: Docling models, url: "https://huggingface.co/docling-project/docling-models", publisher: Docling Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: MinerU Open Source License, url: "https://github.com/opendatalab/MinerU/blob/master/LICENSE.md", publisher: OpenDataLab, date: 2026-04-17, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: Marker, url: "https://github.com/datalab-to/marker", publisher: Datalab, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: Marker MODEL_LICENSE, url: "https://github.com/datalab-to/marker/blob/master/MODEL_LICENSE", publisher: Datalab, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: PyMuPDF, url: "https://github.com/pymupdf/PyMuPDF", publisher: Artifex, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: pdfplumber, url: "https://github.com/jsvine/pdfplumber", publisher: pdfplumber, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: PaddleOCR, url: "https://github.com/PaddlePaddle/PaddleOCR", publisher: PaddlePaddle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: RapidOCR, url: "https://github.com/RapidAI/RapidOCR", publisher: RapidAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: Tesseract OCR, url: "https://github.com/tesseract-ocr/tesseract", publisher: Tesseract OCR, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: Apache Tika, url: "https://github.com/apache/tika", publisher: Apache Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: Unstructured, url: "https://github.com/Unstructured-IO/unstructured", publisher: Unstructured, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: LibreOffice Licenses, url: "https://www.libreoffice.org/about-us/licenses/", publisher: The Document Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: Pandoc User's Guide（--sandbox）, url: "https://pandoc.org/MANUAL.html", publisher: Pandoc, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: FFmpeg License and Legal Considerations, url: "https://ffmpeg.org/legal.html", publisher: FFmpeg, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: Ghostscript（ghostpdl 仓库 LICENSE）, url: "https://github.com/ArtifexSoftware/ghostpdl", publisher: Artifex, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: MuPDF, url: "https://github.com/ArtifexSoftware/mupdf", publisher: Artifex, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: libvips, url: "https://github.com/libvips/libvips", publisher: libvips, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: defusedxml, url: "https://github.com/tiran/defusedxml", publisher: defusedxml, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: ImageMagick Security Policy, url: "https://imagemagick.org/security-policy/", publisher: ImageMagick, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: "Pillow: Image module（MAX_IMAGE_PIXELS）", url: "https://pillow.readthedocs.io/en/stable/reference/Image.html", publisher: Pillow, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S25, title: EasyExcel（已归档）, url: "https://github.com/alibaba/easyexcel", publisher: Alibaba, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: FastExcel, url: "https://github.com/fast-excel/fastexcel", publisher: FastExcel, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: "SheetJS: Node.js installation", url: "https://docs.sheetjs.com/docs/getting-started/installation/nodejs/", publisher: SheetJS, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "Playwright: Page API", url: "https://playwright.dev/docs/api/class-page", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: Docling Documentation, url: "https://docling-project.github.io/docling/", publisher: Docling Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: "CWE-22: Path Traversal", url: "https://cwe.mitre.org/data/definitions/22.html", publisher: MITRE, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S31, title: Excelize, url: "https://github.com/qax-os/excelize", publisher: Excelize, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: Apache POI, url: "https://poi.apache.org/", publisher: Apache Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: trafilatura, url: "https://github.com/adbar/trafilatura", publisher: trafilatura, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: Mozilla Readability, url: "https://github.com/mozilla/readability", publisher: Mozilla, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: DOMPurify, url: "https://github.com/cure53/DOMPurify", publisher: Cure53, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: nh3, url: "https://github.com/messense/nh3", publisher: nh3, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: sharp, url: "https://github.com/lovell/sharp", publisher: sharp, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S38, title: WeasyPrint, url: "https://github.com/Kozea/WeasyPrint", publisher: Kozea, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S39, title: pypdf, url: "https://github.com/py-pdf/pypdf", publisher: py-pdf, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S40, title: OCRmyPDF, url: "https://github.com/ocrmypdf/OCRmyPDF", publisher: OCRmyPDF, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S41, title: faster-whisper, url: "https://github.com/SYSTRAN/faster-whisper", publisher: SYSTRAN, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S42, title: whisper.cpp, url: "https://github.com/ggml-org/whisper.cpp", publisher: ggml-org, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S43, title: openpyxl documentation, url: "https://openpyxl.readthedocs.io/en/stable/", publisher: openpyxl, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - Poppler 的许可（据了解为 GPL-2.0 或 GPL-3.0），本次未从官方仓库核实
+  - PaddleOCR、RapidOCR 各模型权重的许可未逐个核实；Unstructured 高精度模式所用模型的许可未核实
+  - Marker 代码许可于 2026-07 由 GPL-3.0 改为 Apache-2.0，MinerU 在 2026 年 3–4 月间多次在 AGPL-3.0 与 Apache-2.0 之间变更、最终为 Apache-2.0 加附加条款；两者变化频繁，每次升级须重新核对 LICENSE
+  - 程序式 PDF 生成的选型（ReportLab、PDFKit、pdf-lib、QuestPDF 等）及其许可、维护状态未核实，暂未写入选型
+  - LibreOffice 各发布分支的停止支持日期未核实
+  - 待补调研：Ghostscript、Poppler、MuPDF、libvips 被间接引入时的许可风险与替代方案
+  - 待补调研：OFD、WPS 专有格式、老式 .doc/.xls/.ppt、带电子签章的 PDF 的解析与转换
+  - 待补调研：Go、Rust 的 Office 写入和 PDF 处理库；.NET 的 Office 与 PDF 库许可（QuestPDF、ImageSharp 等）
+  - 待补调研：国产 CPU 与操作系统（ARM64、龙芯、统信、麒麟）上解析器、OCR、LibreOffice、Chromium 的可用性
+  - 待补调研：云端 OCR 与文档识别服务（国内外）的数据驻留和私有化部署选项
