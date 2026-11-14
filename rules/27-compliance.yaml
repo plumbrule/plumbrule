@@ -1,0 +1,567 @@
+id: "27"
+slug: compliance
+title: 合规、隐私与许可
+summary: 把法规和许可证要求落到工程上要做的事：开源许可证怎么分「工具」和「组件」来管、发布物要带哪些许可材料、个人信息怎么分类、保留、删除、出境前怎么触发审查，以及中国和欧盟相关法规对工程的要求。只写工程做法和出处，法律适用由法务确认。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+legal_notice: true
+scope:
+  includes:
+    - 开源许可证政策：独立运行的工具与随产品分发的组件分别怎么管
+    - 许可扫描、SBOM 里的许可信息、第三方声明（NOTICE）与离线交付的许可材料
+    - 字体、图标、图片、数据集、模型权重的许可登记
+    - 个人信息与数据的分类、最小化、保留期、删除、个人请求处理
+    - 数据外发第三方和数据出境的触发检查
+    - 中国（个人信息保护法、数据安全法、网络安全法、网络数据安全管理条例、生成式人工智能与内容标识相关办法、数据出境相关规定）和欧盟（GDPR、AI Act、CRA）对工程的要求
+  excludes:
+    - { what: SAST、SCA 漏洞扫描、SBOM 工具总体、签名与来源证明, see: "25" }
+    - { what: 加密、网络隔离、访问控制等技术安全措施, see: "25" }
+    - { what: 登录、授权、审计访问控制, see: "19" }
+    - { what: 无障碍的技术要求（EAA 等法规对应的 WCAG / EN 301 549 做法）, see: "09" }
+    - { what: 漏洞响应、事故响应流程与值班, see: "26" }
+    - { what: 移动端平台细节（权限、SDK 接入、上架流程）, see: "28" }
+    - { what: 模型选择、模型网关与数据外发的技术实现, see: "24" }
+    - { what: 数据保留与删除在数据库里的建模与备份恢复, see: "17" }
+overview: |
+  > 本页只写工程上要做的事并注明出处，**不构成法律意见**。法律是否适用、适用哪条，由法务确认。
+
+  1. **法律判断交给人。** 自动检查只能发现「可能触发」，不能判「已满足」。备案、出境机制、copyleft 范围、GDPR 角色这类问题一律标「需要法务确认」，由具名负责人签字，Agent 不得自行判为通过。
+  2. **许可证先看怎么用，再看是什么许可。** 同一个 AGPL 软件，在 CI 里独立运行和打进产品镜像，处理完全不同。依赖登记里必须写明使用方式。
+  3. **许可证政策（默认口径）：**
+
+     | 许可类别 | 独立运行的工具（只在开发、构建、运维时用，不随产品分发） | 随产品分发、链接进产品或作为产品一部分对外提供服务的组件 |
+     |---|---|---|
+     | 宽松：MIT、BSD、Apache-2.0、ISC、Zlib、PostgreSQL 等 | 允许 | 允许；保留版权声明、许可原文、上游 NOTICE |
+     | 弱 copyleft：MPL-2.0、LGPL、EPL-2.0 等 | 允许 | 需审查：记录链接方式、是否修改、源码提供方式 |
+     | 强 copyleft：GPL | 允许（不修改、不分发） | 禁止进入闭源分发物；例外需要法务确认 |
+     | AGPL | 允许（不修改、只内部用）；修改后对外提供网络服务时需审查 | 禁止；例外需要法务确认 |
+     | 源码可见与商业附加条款：SSPL、BSL、FSL、ELv2、Commons Clause、各种「开源 + 附加条款」 | 需审查：看是否限制生产使用、规模、竞争用途 | 需审查，批准前阻断；产品本身就是在托管该软件的功能时禁止 |
+     | 商业许可、闭源工具 | 需审查：订阅条款与使用规模 | 需审查：采购合同覆盖分发方式 |
+     | 无许可、许可未知、许可冲突 | 需审查 | 禁止 |
+
+     工具一旦被打进产品镜像或安装包，或把自身代码（运行时库、模板）复制进产物，就按组件对待。「放进单独容器」不是免责理由。
+  4. **SBOM 不等于许可交付包。** 每个版本对实际产物生成带许可信息的 SBOM，并附第三方声明、许可原文、触发时的对应源码；离线交付包里断网也能看。
+  5. **素材和模型单独登记。** 字体、图标、图片、数据集、模型权重的许可和代码不同；CC-NC/ND 和来历不明的素材不进商业发布物。
+  6. **个人信息默认有期限。** 每个数据对象登记用途、分类、负责人、保留期和删除方式；删除要覆盖索引、缓存、Agent 记忆、导出和供应商副本；日志按类别分别设保留期。
+  7. **外发和出境是单独的决策。** 客户数据默认不发外部模型；接收方在境外就触发出境审查，经境内网关转发不等于没出境；出境人数按自然人去重统计。
+  8. **关键日期（已核实）：** 中国《人工智能生成合成内容标识办法》2025-09-01 施行；《网络安全法》修改决定 2026-01-01 施行；《个人信息出境认证办法》2026-01-01 施行。欧盟 AI Act 经 Digital Omnibus 修订后：Article 50 透明度 2026-08-02 起适用（之前已上市的生成系统机器可读标记到 2026-12-02），附件 III 高风险 2027-12-02，附件 I 高风险 2028-08-02；CRA 报告义务 2026-09-11 起适用，其余义务 2027-12-11。
+rules:
+  # ── 流程：谁判断、怎么留痕 ──
+  - id: LGL-001
+    title: 每个交付项目维护一份合规档案，写明法域、交付方式、各方角色、处理的数据类别、是否用外部模型、是否向公众提供 AI 内容、负责人
+    level: soft
+    check: auto
+    how: CI 用 JSON Schema 校验档案存在且必填字段非空；缺失时阻断发布
+    applies: [all]
+    why: 后面几乎每条规则都以「是否适用」为前提，没有档案就只能逐次猜。
+    detail: |
+      - 字段示例：`jurisdictions`、`delivery`（内部自用 / 私有化 / 离线 / SaaS / 移动端 / 公众 AI 服务）、`roles`（控制者、处理者、AI 提供者、部署者）、`data_classes`、`external_models`、`ai_publication`、`owners`。
+      - 拿不准的字段填「需要法务确认」，不填「不适用」。
+      - 目标市场、数据类别、外部模型、公开 AI 功能任一变化，档案要重新评审。
+  - id: LGL-002
+    title: 法律适用问题（备案、出境机制、copyleft 范围、GDPR 角色、AI Act 风险分类）标「需要法务确认」并由具名负责人签字，Agent 和自动检查不得判为通过
+    level: hard
+    check: semi
+    how: 合规检查结果只有「通过 / 失败 / 需要法务确认」三种；CI 检查「需要法务确认」项都关联了签字记录，否则阻断发布
+    applies: [all]
+    why: 法律适用取决于事实、角色和合同，机器只能发现候选问题；把判断交给 Agent 等于没人负责。
+    detail: 签字记录写明结论、依据（法规名、条款、版本日期）、适用范围和复核日期。Agent 的输出要区分官方事实、工程建议和待法务确认事项。
+    see: ["23"]
+  - id: LGL-003
+    title: 合规例外写明批准人、理由、证据、适用范围和到期日；到期后阻断发布，不跨项目或跨版本继承
+    level: soft
+    check: auto
+    how: 例外文件用 schema 校验必填字段；CI 比较到期日，过期即失败
+    applies: [all]
+    why: 没有到期日的例外会悄悄变成长期默认。
+  - id: LGL-004
+    title: 每次发布前对比上一版的依赖许可、模型与服务条款、子处理者、数据存放地域和处理目的，有变化就触发审查
+    level: soft
+    check: auto
+    how: 发布流水线对基线清单做差异比较，差异项生成审查任务
+    applies: [all]
+    why: 上游换许可证、供应商换地域都不会主动通知你，只有每次比较才能发现。
+  - id: LGL-005
+    title: 合规说明文档写明依据（法规名、条款、版本或生效日期）、最后复核日期和下次复核日期
+    level: soft
+    check: auto
+    how: 文档头部字段 lint
+    applies: [all]
+    why: 法规更新快，不标日期的说明会被当成现行有效。
+    ref_value: 复核周期参考：法规类至少每季度、发布前和进入新市场前；第三方模型条款每月或每次换供应商。来自原调研的工程建议，没有法定出处。
+
+  # ── 开源许可证 ──
+  - id: LGL-006
+    title: 每个依赖登记使用方式：独立运行的工具，还是随产品分发、链接进产品、作为产品一部分对外提供服务的组件
+    level: hard
+    check: semi
+    how: 依赖清单里 `usage` 字段必填；评审时核对镜像、安装包、前端打包产物里是否出现了标为「工具」的东西
+    applies: [all]
+    why: 许可证义务大多由「分发」「组合成一个程序」「通过网络提供服务」触发，不登记使用方式就没法套用许可政策。
+    detail: |
+      - **独立运行的工具**：只在开发、测试、构建、CI、运维时运行，不进入交付给客户的产物，也不作为产品功能对外提供。例如 CI 里的扫描器、lint、压测工具、依赖更新机器人。
+      - **组件**：进入安装包、容器镜像、离线介质、App、桌面客户端、发给浏览器的前端代码、SDK；或在 SaaS 后端作为产品的一部分运行。
+      - 独立程序的正常聚合和组合成一个程序是两回事，进程间通信也要看结合程度；判断不了就标「需要法务确认」。
+    sources: [S18]
+  - id: LGL-007
+    title: 随产品分发或链接进产品的组件按许可政策处理：宽松许可允许；弱 copyleft 需审查；GPL、AGPL 禁止，例外需要法务确认；源码可见类需审查，批准前阻断
+    level: hard
+    check: auto
+    how: 在许可扫描器（ScanCode / ORT）的策略文件里配置允许、需审查、禁止三档；需审查和禁止项没有关联审批记录时 CI 失败
+    applies: [all]
+    why: 组件随产品交付后，许可证义务（保留声明、提供源码、限制用途）就落到了发布方身上，事后补救成本很高。
+    detail: |
+      - 宽松许可也有义务：保留版权声明和许可原文；Apache-2.0 要带上游 NOTICE 并说明修改。
+      - MPL-2.0 是文件级 copyleft，修改过的 MPL 文件要提供源码；LGPL 要记录动态还是静态链接、是否修改、用户如何替换该库，静态链接更复杂。
+      - GPL 带例外条款的（如 Classpath Exception、GCC 运行库例外）单独审查，不按普通 GPL 一刀切。
+      - 只做 SaaS 不分发时，GPL 一般不因远程访问触发源码义务，但一旦交付镜像、客户端或插件就是分发；AGPL 对修改后通过网络与用户交互的情形另有源码义务。
+      - 许可类别的完整表格见本页一页结论。
+    sources: [S18, S19, S20, S21, S30]
+  - id: LGL-008
+    title: 独立运行的工具按许可政策处理：宽松、弱 copyleft、GPL、AGPL 可直接使用；修改 AGPL 工具后对外提供网络服务、源码可见或商业许可的工具、无许可的工具需审查
+    level: hard
+    check: semi
+    how: 许可扫描对标为「工具」的依赖使用单独的策略；需审查项要有审批记录
+    applies: [all]
+    why: 只在内部运行、不分发的工具通常不触发 copyleft 的源码义务；把 AGPL 开发工具一律拦掉会误伤（如 Renovate、k6）。
+    detail: |
+      - 「不修改、只内部用」是前提；把 AGPL 工具改了以后给外部用户通过网络使用，要按 AGPL 第 13 条审查。
+      - 源码可见类和商业许可的工具，即使只在内部用也可能有限制：生产使用、规模上限（如按 vCPU）、竞争用途、按公司规模收费的订阅条款。
+    sources: [S18, S19, S20, S21]
+  - id: LGL-009
+    title: 工具被打进产品镜像或安装包，或把自身代码（运行时库、模板、生成代码中的固定片段）复制进产物时，按组件重新判定许可
+    level: hard
+    check: semi
+    how: 对发布产物的 SBOM 做扫描，出现标为「工具」的条目即报警；代码生成器的输出许可在引入时评审
+    applies: [all]
+    why: 工具和组件的界线由「是否进入交付物」决定，而不是由它叫什么决定。
+    detail: 典型情况：调试工具留在生产镜像里；把扫描器或数据库客户端打进离线安装包；解析器生成器把自带的运行时代码写进生成文件。
+    sources: [S18]
+  - id: LGL-010
+    title: 无许可、许可未知、许可冲突的代码不得进入发布物，也不得按 MIT 或其他宽松许可推定
+    level: hard
+    check: auto
+    how: 许可扫描结果为 NOASSERTION、Unknown、无 LICENSE 或表达式冲突时 CI 失败
+    applies: [all]
+    why: 公开可读不等于获得复制和分发的许可；没有明示授权就没有授权。
+    sources: [S18, S22]
+  - id: LGL-011
+    title: SSPL、BSL、FSL、ELv2 等源码可见许可不称为开源；登记具体条款（附加使用授权、变更日期、竞争用途、托管限制），按版本审批
+    level: hard
+    check: semi
+    how: 许可策略把这些标识列为需审查；审批记录写明版本和条款摘要，版本变化后旧审批失效
+    applies: [all]
+    why: 这些许可各自限制不同用途：SSPL 第 13 条针对把软件作为服务对外提供，ELv2 禁止托管服务，BSL 看各项目的附加使用授权和变更日期，FSL 禁止竞争用途、两年后才转为 MIT 或 Apache。
+    detail: |
+      - 「以后会变成 MIT」不等于现在可以按 MIT 用。
+      - 同一软件可能有多种发行包、多种许可（如源码可选 AGPL、官方发行包是 ELv2），按实际用的发行包核对。
+      - 既不一律禁止，也不一律放行：普通业务把 SSPL 数据库当后端，和对外提供该数据库托管服务，审查结论不同。
+    sources: [S19, S20, S21, S30]
+  - id: LGL-012
+    title: 依赖登记精确版本、来源（purl 或仓库地址加提交）、SPDX 许可表达式、使用方式、分发方式、是否修改
+    level: hard
+    check: auto
+    how: 从锁文件和产物 SBOM 生成清单，缺字段时 CI 失败
+    applies: [all]
+    why: 许可义务跟具体版本走，上游换许可证往往只在某个版本之后。
+    detail: |
+      - 许可用 SPDX 标识和表达式（`AND`、`OR`、`WITH`），不写「MIT-ish」这类自造写法；SPDX 列表里没有的用 `LicenseRef-`。
+      - 多许可组件（`A OR B`）记录实际选用的那一个，不默认取最宽松的。
+      - 修改过的开源组件保存补丁，便于判断源码义务。
+    sources: [S22, S27]
+  - id: LGL-013
+    title: 复制第三方代码片段或素材时记录来源链接、提交或版本、许可和署名；不复制无许可代码和竞品源码
+    level: hard
+    check: semi
+    how: PR 模板有「第三方来源」栏；许可扫描识别出与已知开源代码匹配的片段时要求补登记
+    applies: [all]
+    why: 复制来的代码带着原作者的许可义务，Agent 生成的也一样。
+    detail: |
+      - 可以研究公开的功能、接口和一般设计思路，但不复制、翻译、改编其源码。
+      - 做相似产品时，研究者先写行为规格，实现者只看规格不看对方源码。
+      - Agent 生成的代码与已知开源代码高度相似时人工审查；相似度低不代表没有问题。
+    sources: [S18]
+    see: ["23"]
+  - id: LGL-014
+    title: 仓库自己的源码文件用 SPDX 头或 REUSE 声明写明版权和许可
+    level: soft
+    check: auto
+    how: CI 运行 `reuse lint`
+    applies: [kind:library, kind:cli]
+    why: 文件级声明让下游的扫描器能准确识别，也避免 vendor 目录、测试数据、图片被误当成和主仓库同一许可。
+    sources: [S26]
+
+  # ── 扫描、SBOM、第三方声明 ──
+  - id: LGL-015
+    title: CI 运行许可扫描并按许可策略阻断；策略文件纳入版本管理，修改要指定负责人批准
+    level: hard
+    check: auto
+    how: 每个 PR 跑许可扫描；策略文件路径写进 CODEOWNERS
+    applies: [all]
+    why: 依赖每天都在变，只有自动扫描才跟得上；策略文件被随手放宽，扫描就失去意义。
+    detail: 各语言自带的许可检查工具（如 license-checker、go-licenses、pip-licenses、cargo-deny）可用于开发时快速提示，发布门禁以统一的扫描加产物 SBOM 为准。
+    sources: [S23, S24]
+    see: ["03", "AGT-011"]
+  - id: LGL-016
+    title: 对实际发布产物（容器镜像、安装包、App）生成带许可信息的 SBOM，并与产物摘要绑定，每个版本重新生成
+    level: hard
+    check: auto
+    how: 发布流水线按镜像摘要生成 SBOM，校验可解析、覆盖产物且每个组件有许可字段
+    applies: [all]
+    why: 源码依赖清单漏掉基础镜像、系统包和打包时加入的文件，而这些同样要履行许可义务。
+    detail: SBOM 工具、格式与签名的总体要求见 25；本条只管其中的许可信息。
+    sources: [S25, S27]
+    see: ["25"]
+  - id: LGL-017
+    title: 发布物附第三方声明文件、各组件许可原文和上游 NOTICE；触发源码义务时附对应源码或书面提供方式
+    level: hard
+    check: semi
+    how: 发布校验检查声明文件覆盖 SBOM 中的全部组件、上游 NOTICE 原文没丢；源码义务由许可审查人确认
+    applies: [all]
+    why: 再分发时保留声明和许可原文是宽松许可也有的义务；GPL、LGPL、MPL 等还要提供源码。
+    detail: |
+      - 建议目录：`THIRD-PARTY-NOTICES`、`licenses/<组件>/<版本>/`、`sources-required/`（仅放确实触发源码义务的组件）、`model-licenses/`、素材署名清单。
+      - 声明由工具生成后人工复核再锁版本，不把所有 LICENSE 拼成一个文件交差。
+    sources: [S18, S24, S35]
+  - id: LGL-018
+    title: 私有化和离线交付包内带齐许可原文、第三方声明和 SBOM，断网时本地可查看
+    level: hard
+    check: auto
+    how: 在断网环境安装交付包，自动检查这些文件可以打开且与产物版本一致
+    applies: [kind:onprem]
+    why: 客户在内网里打不开在线许可页面，等于没有交付这些材料。
+    sources: [S35]
+
+  # ── 素材与模型 ──
+  - id: LGL-019
+    title: 字体、图标、图片、音视频、数据集和模型权重与代码分开登记许可、来源、版本和署名要求
+    level: hard
+    check: auto
+    how: 素材清单 lint：仓库里的素材文件都在清单里，且许可字段非空
+    applies: [all]
+    why: 素材的权利类型和代码不同，按包管理器的 LICENSE 扫描发现不了。
+    detail: |
+      - 字体优先 SIL OFL，注意保留字体名限制和嵌入条款。
+      - 图标库每一套单独登记；SVG 里的品牌标志、商标不随图标库授权。
+      - 图片注意肖像权、商标和可识别场景。
+    sources: [S28, S29]
+    see: ["08"]
+  - id: LGL-020
+    title: CC-NC、CC-ND 许可和来源不明的素材不进入商业发布物
+    level: hard
+    check: auto
+    how: 素材许可策略把 NC、ND 和无来源条目设为禁止，命中时发布校验失败
+    applies: [all]
+    why: NC 限制商业使用，ND 限制改编；来源不明就无法证明有授权。
+    detail: CC-BY、CC-BY-SA 可以商用但要署名，SA 还要求改编后以相同许可共享。
+    sources: [S28]
+  - id: LGL-021
+    title: 模型权重、分词器、训练和评测数据集分别登记许可、使用政策、具体版本和哈希，不因框架代码是宽松许可就推定权重也是
+    level: hard
+    check: semi
+    how: 模型清单 lint 检查必填字段；新模型引入时由许可审查人确认使用政策
+    applies: [kind:llm]
+    why: 模型仓库常对代码、权重、数据、输出分别授权，并附可接受使用政策和用途、规模、地域限制。
+    detail: 公开数据集还要同时核对个人信息和网站条款；「网站能访问」不等于允许抓取训练。
+    sources: [S32]
+    see: ["24"]
+
+  # ── 个人信息与数据 ──
+  - id: LGL-022
+    title: 每个持久化数据对象登记用途、数据类别与分级、负责人、来源、存放地域、接收方、保留期及起算事件、删除方式
+    level: hard
+    check: auto
+    how: 数据清单 schema lint；数据库迁移或新存储出现未登记对象时 CI 失败
+    applies: [all]
+    why: 分类分级、目的限制、保存期限和接收方告知都要求先知道「有什么数据、在哪、给了谁」。
+    detail: |
+      - 默认分级示例：公开、内部、机密（私有代码、合同、未发布设计）、受限（敏感个人信息、已认定的重要数据、合同特别保护的数据）。
+      - 内部分级不等于法律上「重要数据」的认定；重要数据以主管部门和行业目录为准，需要法务确认。
+      - 处理活动台账要能导出，供个人信息保护合规审计使用。
+    sources: [S01, S02, S31, S07]
+    see: ["17"]
+  - id: LGL-023
+    title: 个人信息字段不得默认永久保存；每类绑定有限的保留期，依法必须保留的写明依据
+    level: hard
+    check: auto
+    how: schema lint：标为个人信息的对象必须有保留策略键，且不能是「永久」
+    applies: [all]
+    why: 个人信息保护法要求保存期限为实现处理目的所必要的最短时间，GDPR 有同样的存储限制原则。
+    sources: [S01, S10]
+  - id: LGL-024
+    title: 新增个人信息字段写明用途并只收集该用途必需的；新增敏感个人信息、未成年人数据、重要数据或高风险用途时触发影响评估审查
+    level: hard
+    check: semi
+    how: CI 检测 schema 或数据清单中新增的敏感分类，自动创建审查任务；合并前要有评估记录或「不需要」的签字结论
+    applies: [all]
+    why: 最小必要是个人信息保护法和 GDPR 的基本原则；敏感个人信息、自动化决策、委托处理、向他人提供、出境等情形，法规要求事前做影响评估。
+    detail: CI 只能提示「可能触发评估」，是否必须做、怎么做由隐私负责人和法务确认。
+    sources: [S01, S10, S32]
+  - id: LGL-025
+    title: 按用途记录处理依据，不把「用户同意」当作所有处理的唯一依据；需要同意或单独同意的场景单独建模并支持撤回
+    level: soft
+    check: semi
+    how: 数据清单的处理依据字段必填；评审时核对同意场景有记录、可撤回
+    applies: [all]
+    why: 个人信息保护法第 13 条和 GDPR 第 6 条都列了同意之外的处理依据；一个勾选框覆盖全部处理既不准确也难以撤回。
+    sources: [S01, S10]
+  - id: LGL-026
+    title: 删除覆盖主库、搜索索引、对象存储、缓存、Agent 记忆、导出副本和供应商副本；备份写明到期时间和恢复后重新删除的做法；删除状态可查
+    level: hard
+    check: auto
+    how: 多存储集成测试：删除一个用户后，各存储里都查不到其数据；备份列入待到期清单
+    applies: [all]
+    why: 只删主表就宣布删除完成，是最常见的虚假删除。
+    detail: |
+      - 删除是异步任务，状态示例：已请求、主数据已删、派生数据已清、等待备份到期、完成或例外。
+      - 不承诺立即擦除不可变备份；依法必须保留的数据限制处理并写明理由。
+      - 拒绝删除必须展示原因和申诉途径，例外不能由 Agent 自行推断。
+    sources: [S01, S10]
+    see: ["17"]
+  - id: LGL-027
+    title: 处理个人信息的产品提供查阅、复制、更正、删除、可携带等请求入口和负责人，记录每个请求的状态、时限和结果；时限按适用法规配置，不硬编码
+    level: hard
+    check: semi
+    how: 端到端测试请求入口可用；请求流转记录有状态、截止时间和结果
+    applies: [all]
+    why: 个人信息保护法和 GDPR 都规定了个人权利和处理者的响应义务；GDPR 通常要求一个月内答复，各法域时限不同。
+    sources: [S01, S10, S14]
+  - id: LGL-028
+    title: 日志按类别分别设保留期，不用同一个过期时间覆盖网络日志、向第三方提供数据的记录和 AI 标识例外记录
+    level: hard
+    check: auto
+    how: 保留策略 lint：这几类日志各有独立策略，且不短于下列最低期限
+    applies: [kind:service]
+    why: 不同法规对这几类记录规定了不同的最低期限，统一一个 TTL 要么不满足最低期限，要么保留过多。
+    detail: |
+      - 网络运行日志：网络安全法要求留存不少于六个月。
+      - 向其他处理者提供或委托处理个人信息、重要数据的处理记录：网络数据安全管理条例要求至少保存三年。
+      - 应用户要求提供不带显式标识的 AI 生成内容时：标识办法要求留存提供对象等日志不少于六个月。
+      - 这些是最低期限；上限仍受「必要」原则约束。条款号见待确认。
+    sources: [S08, S02, S06]
+    see: ["26"]
+  - id: LGL-029
+    title: 客户的代码、文档、会话和个人信息发往外部模型或第三方服务前必须有策略批准；默认关闭，按供应商、地域、数据类别白名单放行
+    level: hard
+    check: auto
+    how: 出站策略单元测试：离线和私有化配置下所有外发被拒绝；未登记的供应商或地域被拒绝
+    applies: [all]
+    why: 把数据交给第三方处理，涉及委托处理、向他人提供和合同保密义务；供应商「声称不训练」不等于零留存、境内处理、可删除。
+    detail: 外发控制的技术实现见 24 和 25；本条只定「默认拒绝、批准后放行」的口径。
+    sources: [S01, S02]
+    see: ["24", "25"]
+  - id: LGL-030
+    title: 第三方服务和模型供应商登记服务地域、子处理者、训练使用、数据留存、人工审核访问，保存条款快照；任一项变化重新审查
+    level: soft
+    check: semi
+    how: 供应商清单缺字段时阻断启用；条款快照与上次比对，有差异生成审查任务
+    applies: [all]
+    why: 供应商条款随时会改，没有快照就说不清当时批准的是什么。
+    ref_value: 复核频率参考每月或每次换模型、换供应商；为原调研的工程建议。
+    see: ["24"]
+  - id: LGL-031
+    title: 数据流向登记写明接收方的实际所在地（含备份、日志、技术支持访问）；境外有接收或访问即触发出境审查，记录适用机制或豁免判定并由负责人签字
+    level: hard
+    check: semi
+    how: 数据流向清单中出现境外地域时自动创建出境审查任务；启用前要有签字记录
+    applies: [all]
+    why: 是否出境看数据实际被谁在哪里接收和访问，不看接口域名；经境内网关转发不等于没出境。
+    detail: |
+      - 中国个人信息出境的机制：安全评估、标准合同、认证（《个人信息出境认证办法》2026-01-01 施行），以及《促进和规范数据跨境流动规定》中的豁免情形。
+      - 豁免了机制不等于豁免告知、单独同意（适用时）、影响评估等其他义务。
+      - 关键信息基础设施运营者、重要数据出境另有要求，需要法务确认。
+      - 欧盟个人数据出欧洲经济区的转移机制见 LGL-033。
+    sources: [S01, S03, S04]
+  - id: LGL-032
+    title: 个人信息出境人数按当年 1 月 1 日起累计、按自然人去重统计，敏感个人信息单独计数；不用请求次数代替，不拆分规避
+    level: hard
+    check: semi
+    how: 统计逻辑写单元测试（同一个人多次请求只算一人）；统计结果由合规负责人复核
+    applies: [all]
+    why: 出境机制的门槛按人数而不是次数设定，且明确禁止通过拆分数量规避。
+    detail: 门槛（非关键信息基础设施运营者、不含重要数据时）：不满 10 万人非敏感个人信息可豁免机制；10 万至不满 100 万人非敏感、或不满 1 万人敏感个人信息走标准合同或认证；更多的走安全评估。具体适用需要法务确认。
+    sources: [S03, S04]
+  - id: LGL-033
+    title: 处理欧盟个人数据的产品记录控制者或处理者角色、处理依据、处理活动记录、接收方和第三国转移机制及证据
+    level: hard
+    check: semi
+    how: 合规档案中法域含欧盟时，CI 检查这些记录存在；转移机制由法务确认
+    applies: [all]
+    why: GDPR 第 6 条（处理依据）、第 28 条（处理者合同）、第 30 条（处理活动记录）、第五章（向第三国转移）都要求有书面依据；标准合同条款要针对实际数据流落实。
+    sources: [S10, S14, S15]
+
+  # ── AI 与产品安全法规 ──
+  - id: LGL-034
+    title: 向中国境内公众提供生成式 AI 服务或功能前，触发备案、登记和安全评估的适用性审查；备案号和上线编号只能来自真实登记结果
+    level: hard
+    check: manual
+    how: 发布审批清单包含适用性结论和签字；评审时核对页面展示的编号与登记记录一致
+    applies: [kind:llm]
+    why: 《生成式人工智能服务管理暂行办法》第 2 条把未向境内公众提供服务的研发和应用排除在外，但对公众服务有备案等要求；个人信息、数据安全等其他法律对内部应用照样适用。
+    detail: 「调用了已备案的大模型」不等于自己的应用不需要登记；具体路径以主管部门公告为准，需要法务确认。
+    sources: [S05]
+  - id: LGL-035
+    title: 适用 AI 生成合成内容标识办法的服务，同时加显式标识和文件元数据隐式标识，复制、下载、导出时不丢失
+    level: hard
+    check: auto
+    how: 用导出样例做自动测试：界面和导出文件都带显式标识，文件元数据带隐式标识
+    applies: [kind:llm]
+    why: 《人工智能生成合成内容标识办法》自 2025-09-01 起施行，配套强制性国家标准《网络安全技术 人工智能生成合成内容标识方法》同步实施，要求显式和隐式两类标识。
+    detail: 内部辅助草稿和向公众传播的内容适用情况不同，先判定适用性。欧盟 AI Act 第 50 条的机器可读标记见 LGL-036，可以共用一套元数据写入实现。
+    sources: [S06]
+  - id: LGL-036
+    title: 在欧盟提供或使用 AI 系统时，记录角色（提供者、部署者、通用模型提供者）和用途风险分类，并按各阶段适用日期准备交互告知、生成内容标记和高风险义务
+    level: hard
+    check: semi
+    how: 合规档案中法域含欧盟且有 AI 功能时，CI 检查角色和风险分类字段；分类结论由法务确认
+    applies: [kind:llm]
+    why: AI Act 的义务按角色和用途风险分层，不是所有聊天机器人都是高风险；Digital Omnibus 修订后各阶段日期已变，不能沿用旧时间表。
+    detail: |
+      - 2025-02-02：禁止行为和 AI 素养要求开始适用。
+      - 2025-08-02：通用目的 AI 模型义务开始适用。
+      - 2026-08-02：第 50 条透明度义务适用（与 AI 交互要告知，生成内容要机器可读标记）；2026-08-02 前已上市的生成系统，第 50(2) 条标记义务到 2026-12-02。
+      - 2026-12-02：新增的非自愿性深度伪造、儿童性虐待内容相关禁止条款适用。
+      - 2027-12-02：附件 III 独立高风险系统（如招聘筛选、信用评分）适用。
+      - 2028-08-02：附件 I 嵌入受监管产品的高风险系统适用。
+      - 用于筛选员工、评价学生、信贷评分、关键基础设施的功能，先查高风险目录。
+    sources: [S11, S12, S13]
+  - id: LGL-037
+    title: 在欧盟市场提供含软件的产品的制造商，准备好在 24 小时内向 ENISA 单一报告平台报告被积极利用的漏洞和严重安全事件
+    level: hard
+    check: manual
+    how: 演练记录：从发现被利用的漏洞到提交早期预警的流程、负责人、平台账号都已就绪
+    applies: [all]
+    why: 欧盟网络韧性法案（CRA）的报告义务自 2026-09-11 起适用，覆盖当日已在市场上的产品；其余义务（含 CE 标志）自 2027-12-11 起适用。
+    detail: 是否属于 CRA 范围内的「带数字元素的产品」、自己是否是制造商，需要法务确认。漏洞处理与事故响应流程见 25 和 26。
+    sources: [S16]
+    see: ["25", "26"]
+
+  # ── 其他 ──
+  - id: LGL-038
+    title: 中国境内面向公众的 App 上架前判定 App 备案适用性；商店隐私披露（Apple 隐私信息、Google Play 数据安全表）与实际 SDK 数据流一致
+    level: hard
+    check: semi
+    how: 发布清单检查备案结论；把 SDK 清单与商店申报逐项对账
+    applies: [platform:mobile]
+    why: 工信部通知要求在境内提供服务的 App 履行备案；Apple 和 Google 要求披露与实际行为一致，不一致会被下架。
+    detail: 企业内部分发的 App 适用情况不同，需要法务确认。平台细节见 28–30。
+    sources: [S09, S33, S34]
+    see: ["28"]
+  - id: LGL-039
+    title: 面向加州居民的服务触发 CCPA 审查：删除、知情、更正、选择退出请求和全局隐私控制信号，自动化决策技术义务按阶段核对
+    level: soft
+    check: semi
+    how: 合规档案法域含美国加州时创建审查任务；选择退出流程做端到端测试
+    applies: [kind:service]
+    why: 加州隐私保护局的新规 2026-01-01 起生效，自动化决策技术相关义务分阶段适用；不是所有 AI 调用都算自动化决策。
+    sources: [S17]
+  - id: LGL-040
+    title: 面向欧盟消费者的产品和服务触发欧洲无障碍法（EAA）适用性审查，技术要求按 09 执行
+    level: soft
+    check: manual
+    how: 合规档案法域含欧盟且面向消费者时，发布清单包含 EAA 适用性结论
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: 无障碍是法规要求而不只是体验问题；适用范围由法务确认，具体怎么做在 09 统一定。
+    see: ["09"]
+choices:
+  - category: 许可扫描（源码、依赖与 vendor 代码）
+    pick: ScanCode Toolkit
+    when: 默认。识别文件级许可和版权，能发现 vendor 进来的代码和不在包管理器里的文件；可离线运行
+    alternatives:
+      - { name: OSS Review Toolkit（ORT）, when: 多语言、多仓库，需要统一的许可策略、审批流程和报告时；底层可以调用 ScanCode }
+      - { name: 各语言自带的许可检查（license-checker、go-licenses、pip-licenses、cargo-deny）, when: 开发时快速提示；发布门禁仍以统一扫描和产物 SBOM 为准 }
+    avoid:
+      - { name: 只看 package.json 等清单里的 license 字段, why: 漏掉 vendor 代码、文件级许可和多许可表达式 }
+      - { name: 自己写许可识别引擎, why: 现成工具已覆盖常见能力，自写只做薄层策略和报告 }
+    license: ScanCode Toolkit、ORT 为 Apache-2.0（ScanCode 的许可数据另有许可）；均作为独立运行的工具使用
+    sources: [S23, S24]
+  - category: 产物 SBOM 中的许可信息
+    pick: Syft 扫描实际镜像和安装包，许可字段用 SPDX 标识与表达式
+    when: 默认。SBOM 工具、格式和签名的总体选择见 25；本条只要求许可字段完整、用 SPDX 写法
+    alternatives:
+      - { name: ORT 导出 SBOM, when: 已用 ORT 做许可治理时，避免两套清单 }
+    avoid:
+      - { name: 自造许可写法（如「MIT-ish」「Apache?」）, why: 下游工具和客户无法解析 }
+    license: Syft 为 Apache-2.0，作为独立运行的工具使用
+    sources: [S22, S25, S27]
+  - category: 仓库源码的版权与许可声明
+    pick: REUSE 规范与 REUSE 工具
+    when: 开源库、SDK、对外发布源码的项目
+    alternatives:
+      - { name: 仅在根目录放 LICENSE, when: 内部小项目、没有混入第三方文件时 }
+    avoid:
+      - { name: 纯人工核对, why: 新增文件容易漏 }
+    license: REUSE 工具为 GPL-3.0-or-later；作为独立运行的工具使用，不影响被检查项目自身的许可
+    sources: [S26]
+  - category: 第三方声明（NOTICE）生成
+    pick: ORT 报告模板生成，再人工复核并绑定版本
+    alternatives:
+      - { name: ScanCode 输出加自定义模板, when: 没用 ORT 时 }
+    avoid:
+      - { name: 把所有依赖的 LICENSE 拼成一个文件, why: 漏掉上游 NOTICE、多许可的实际选择和源码义务 }
+    sources: [S24, S35]
+antipatterns:
+  - { bad: 把 AGPL 或 GPL 的开发工具一律拦掉, instead: 先登记使用方式，独立运行的工具按工具政策处理 }
+  - { bad: 认为 GPL 或 AGPL 组件「放进单独容器跑就没事」, instead: 按实际组合和分发方式审查，需要法务确认 }
+  - { bad: 只做 SaaS 所以 AGPL 无所谓, instead: AGPL 对修改后通过网络提供服务另有源码义务 }
+  - { bad: SSPL、ELv2、BSL 一律禁止或一律放行, instead: 按具体条款、版本和使用场景逐项审批 }
+  - { bad: 仓库根目录有 LICENSE 就认为所有文件都是这个许可, instead: 文件级扫描，素材、字体、权重单独登记 }
+  - { bad: 用漏洞扫描「零高危」证明许可没问题, instead: 漏洞和许可分别设门禁 }
+  - { bad: 公开在 GitHub 上的代码就让 Agent 直接复制, instead: 没有许可就没有授权；复制要登记来源和许可 }
+  - { bad: 只删主表一行就宣布删除完成, instead: 删除编排覆盖索引、缓存、记忆、副本和备份 }
+  - { bad: 所有日志统一永久保存或统一一个过期时间, instead: 按类别分别设保留期 }
+  - { bad: 用请求次数统计出境人数, instead: 按自然人去重、敏感信息单独统计 }
+  - { bad: 经境内网关转发给境外模型就说没出境, instead: 按实际接收和访问地判断 }
+  - { bad: 所有生成式 AI 功能都按需要备案处理，或调用了已备案模型就认为不用登记, instead: 先判定是否向公众提供，再由法务确认路径 }
+  - { bad: Agent 回复「已完成合规」, instead: 检查结果只分通过、失败、需要法务确认 }
+sources:
+  - { id: S01, title: 中华人民共和国个人信息保护法, url: "https://www.samr.gov.cn/zw/zfxxgk/fdzdgknr/bgt/art/2023/art_f374e8245320413181742e6d1baf4366.html", publisher: 全国人大常委会（市场监管总局转载）, date: 2021-08-20, kind: standard, checked: 2026-11-13 }
+  - { id: S02, title: 网络数据安全管理条例（国务院令第 790 号）, url: "https://xzfg.moj.gov.cn/front/law/detail?LawID=1734", publisher: 国务院（司法部行政法规库）, date: 2024-09-24, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: 促进和规范数据跨境流动规定, url: "https://www.cac.gov.cn/2024-03/22/c_1712776611775634.htm", publisher: 国家互联网信息办公室, date: 2024-03-22, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: 国家网信办、市场监管总局联合公布《个人信息出境认证办法》, url: "https://www.cac.gov.cn/2025-10/17/c_1762449728518762.htm", publisher: 国家互联网信息办公室, date: 2025-10-17, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: 生成式人工智能服务管理暂行办法, url: "https://cqca.miit.gov.cn/zwgk/zcwj/flfg/art/2026/art_27b7613aa2b8419384caa6c31fbdd7f0.html", publisher: 国家网信办等七部门（重庆市通信管理局转载）, date: 2023-07-10, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: 人工智能生成合成内容标识办法, url: "https://www.cac.gov.cn/2025-03/14/c_1743654684782215.htm", publisher: 国家网信办、工信部、公安部、国家广电总局, date: 2025-03-14, kind: standard, checked: 2026-11-14 }
+  - { id: S07, title: 个人信息保护合规审计管理办法, url: "https://www.cac.gov.cn/2025-02/14/c_1741233507681519.htm", publisher: 国家互联网信息办公室, date: 2025-02-14, kind: standard, checked: 2026-11-13 }
+  - { id: S08, title: 中华人民共和国网络安全法（2025 年修正）, url: "https://sdca.miit.gov.cn/zwgk/fgbz/art/2026/art_4815dd4ec11d454783b83a91502a3cc7.html", publisher: 全国人大常委会（山东省通信管理局转载）, date: 2025-10-28, kind: standard, checked: 2026-11-14 }
+  - { id: S09, title: 工业和信息化部关于开展移动互联网应用程序备案工作的通知, url: "https://www.miit.gov.cn/zwgk/zcwj/wjfb/tz/art/2023/art_920db564162e4312916a01bed6540ad8.html", publisher: 工业和信息化部, date: 2023-08-04, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "Regulation (EU) 2016/679 (GDPR)", url: "https://eur-lex.europa.eu/eli/reg/2016/679", publisher: European Union, date: 2016-04-27, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: AI Act implementation timeline, url: "https://ai-act-service-desk.ec.europa.eu/en/ai-act/eu-ai-act-implementation-timeline", publisher: European Commission AI Act Service Desk, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "AI Act Article 50: Transparency obligations", url: "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-50", publisher: European Commission AI Act Service Desk, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "The AI Act Implementation Timeline: What Changes Under the AI Omnibus?", url: "https://fpf.org/blog/the-ai-act-implementation-timeline-what-changes-under-the-ai-omnibus", publisher: Future of Privacy Forum, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S14, title: "Dealing with requests from individuals", url: "https://commission.europa.eu/law/law-topic/data-protection/information-business-and-organisations/dealing-requests-individuals_en", publisher: European Commission, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Standard Contractual Clauses (SCC), url: "https://commission.europa.eu/law/law-topic/data-protection/international-dimension-data-protection/standard-contractual-clauses-scc_en", publisher: European Commission, date: 2021-06-04, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Cyber Resilience Act: reporting obligations", url: "https://digital-strategy.ec.europa.eu/en/policies/cra-reporting", publisher: European Commission, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: "CCPA Updates, Cybersecurity Audits, Risk Assessments, ADMT Regulations", url: "https://cppa.ca.gov/regulations/ccpa_updates.html", publisher: California Privacy Protection Agency, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: Frequently Asked Questions about the GNU Licenses, url: "https://www.gnu.org/licenses/gpl-faq.en.html", publisher: Free Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: Elastic License 2.0 FAQ, url: "https://www.elastic.co/licensing/elastic-license/faq", publisher: Elastic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: Business Source License 1.1, url: "https://mariadb.com/bsl11/", publisher: MariaDB, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Functional Source License 1.1 (MIT future license) template, url: "https://github.com/getsentry/fsl.software/blob/main/FSL-1.1-MIT.template.md", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: SPDX License List, url: "https://spdx.org/licenses/", publisher: SPDX, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S23, title: ScanCode Toolkit, url: "https://github.com/aboutcode-org/scancode-toolkit", publisher: AboutCode, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: OSS Review Toolkit, url: "https://github.com/oss-review-toolkit/ort", publisher: OSS Review Toolkit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Syft, url: "https://github.com/anchore/syft", publisher: Anchore, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: REUSE tool, url: "https://github.com/fsfe/reuse-tool", publisher: FSFE, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: SPDX Specification, url: "https://spdx.github.io/spdx-spec/", publisher: SPDX, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S28, title: Creative Commons Attribution 4.0 International, url: "https://creativecommons.org/licenses/by/4.0/deed.en", publisher: Creative Commons, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: SIL Open Font License, url: "https://openfontlicense.org/", publisher: SIL International, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: Server Side Public License FAQ, url: "https://www.mongodb.com/legal/licensing/server-side-public-license/faq", publisher: MongoDB, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: 中华人民共和国数据安全法, url: "https://nmca.miit.gov.cn/zwgk/zcwj/flfg/art/2021/art_f0fd1d0e1fc3430ca23c274bcf8d28fb.html", publisher: 全国人大常委会（内蒙古通信管理局转载）, date: 2021-06-10, kind: standard, checked: 2026-11-13 }
+  - { id: S32, title: "EDPB Opinion 28/2024 on AI models", url: "https://www.edpb.europa.eu/news/edpb-opinion-on-ai-models-gdpr-principles-support-responsible-ai_en", publisher: European Data Protection Board, date: 2024-12-18, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: App Review Guidelines, url: "https://developer.apple.com/app-store/review/guidelines/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: Google Play User Data policy, url: "https://support.google.com/googleplay/android-developer/answer/10144311?hl=en", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: Apache License 2.0（ORT 仓库中的原文副本）, url: "https://github.com/oss-review-toolkit/ort/blob/main/LICENSE", publisher: Apache Software Foundation, date: 2004-01-01, kind: standard, checked: 2026-11-13 }
+open_questions:
+  - 网络安全法修正后，网络日志「不少于六个月」所在的条号（原第二十一条，修正新增条文后条号可能变化）未核对修正后全文。
+  - 网络数据安全管理条例「处理记录至少保存三年」是否为第十二条、标识办法「例外日志不少于六个月」是否为第九条，沿用原调研，未逐条核对原文。
+  - 《数据出境安全管理政策法规问答》（2026 年 9 月）和网信办 2026-09-14 关于生成式 AI 备案与登记两条路径的公告，原调研引用，未核实。
+  - AI Act 新增禁止条款中，儿童性虐待内容相关禁止是 2026-07-27 还是 2026-12-02 起适用，二手来源说法不一；欧盟官方时间线页标为 2026-12-02。Regulation (EU) 2026/1744 正文未直接打开核对。
+  - CCPA 新规中自动化决策技术义务自 2027-01-01 起适用、网络安全审计 2028–2030 分阶段提交，沿用原调研，未核实；CPPA 获批日期原调研有 2025-09-22 和 2025-09-23 两种写法。
+  - 生成式 AI 标识配套强制性国家标准的编号未核实。
+  - 各语言许可检查工具（license-checker、go-licenses、pip-licenses、cargo-deny）的许可证和维护状态未核实；ScanCode 许可数据的具体许可未核实。
+  - Apache-2.0 原文来源引用的是 ORT 仓库副本，应换成 apache.org 原文链接。
+  - 待补调研：隐私类工具选型（个人信息识别如 Presidio、数据目录、同意管理、个人请求处理流程）。
+  - 待补调研：算法推荐管理规定与算法备案、深度合成管理规定对工程的要求。
+  - 待补调研：个人信息出境标准合同办法及备案流程、出境安全评估申报的工程准备。
+  - 待补调研：未成年人网络保护条例、生成式人工智能服务安全基本要求、数据分类分级国家标准对工程的要求。
+  - 待补调研：跨主题的组件许可登记表（18、20、22、03、04、07 等主题点名的组件许可以登记表为准）。
