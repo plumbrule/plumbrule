@@ -38,7 +38,7 @@ pnpm check        # 校验全部规则：结构、编号、引用、软措辞
 pnpm dev          # 本地预览网站
 pnpm build        # 校验 → 生成技能 → 构建网站 → 打包技能 zip（输出在 dist/site）
 pnpm pack:cli     # 生成安装器的 npm 包（dist/plumbrule-<版本>.tgz）
-pnpm deploy       # 构建并部署到 Cloudflare Workers（静态资源）
+pnpm run deploy   # 构建并部署到 Cloudflare Workers（静态资源）；注意 `pnpm deploy` 是 pnpm 自带命令，要加 run
 ```
 
 ## 改规则
