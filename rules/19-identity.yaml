@@ -1,0 +1,616 @@
+id: "19"
+slug: identity
+title: 身份认证与权限
+summary: 用户怎么登录（密码、通行密钥、单点登录），会话和令牌怎么管，谁能对什么做什么（授权模型），多租户怎么隔离，服务和 Agent 的身份怎么认，以及身份提供方怎么选。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 登录方式：密码、通行密钥（passkey）、OIDC 与 SAML 单点登录、命令行登录
+    - 密码存储算法与密码策略
+    - 会话与 Cookie 属性、CSRF 防护方案
+    - 访问令牌与刷新令牌的生命周期、轮换、撤销；API Key 与个人访问令牌
+    - 授权模型（RBAC、ABAC、ReBAC）与授权引擎选型
+    - 多租户隔离的身份与授权部分，数据库行级安全的使用口径
+    - 服务间身份、Agent 代人操作时的身份与委托判定
+    - 身份提供方选型
+  excludes:
+    - { what: 前端令牌存储禁令（不写 localStorage/sessionStorage）, see: "07" }
+    - { what: 行级安全的实现细节、租户字段的建模与迁移, see: "17" }
+    - { what: 租户隔离模型（共享表、每租户库、每客户一套部署）的架构取舍, see: "01" }
+    - { what: MCP 服务端的授权协议实现, see: "16" }
+    - { what: 接入第三方账号的 OAuth 客户端、接收第三方回调, see: "21" }
+    - { what: 密钥管理、签名密钥保管、密钥扫描, see: "25" }
+    - { what: 登录接口的限流实现, see: "18" }
+    - { what: Agent 的操作审批流程与工具权限, see: "23" }
+    - { what: 审计日志中个人信息的留存与合规, see: "27" }
+overview: |
+  1. **不自己造认证轮子。** 密码校验、OAuth/OIDC 发证、SAML 解析、WebAuthn 验证都用成熟的身份提供方（IdP）或库。应用自己要写的是会话层和业务授权层。
+  2. **登录用 OIDC 授权码 + PKCE。** OIDC 是建在 OAuth 上的登录协议；PKCE 是防授权码被截用的校验。隐式授权和密码授权不用。SAML 只用来对接存量企业单点登录。命令行用系统浏览器回调，没有浏览器时用设备码，绝不在命令行里收密码。OAuth 2.1 截至 2026-11-14 仍是草案，现行要求以 RFC 9700（OAuth 2.0 安全最佳实践）为准。
+  3. **外部账号用 `(issuer, sub)` 关联。** 内部用户 ID 不可变；邮箱、手机号不当主键，也不当自动合并账号的依据。
+  4. **密码规则按 NIST SP 800-63B-4。** 单独使用的密码至少 15 位，不强制字符组合、不定期强制改密，要查泄露黑名单。存储用 Argon2id（OWASP 最低参数：19 MiB 内存、2 次迭代、并行度 1）。能上通行密钥就上。
+  5. **有后端的 Web 用服务端会话。** Cookie 设 `Secure`、`HttpOnly`、`SameSite`，优先 `__Host-` 前缀；用 Cookie 鉴权就要防 CSRF。
+  6. **令牌短期、有受众、可撤销。** API 只收签发给自己的访问令牌，不收 ID Token；JWT 每项都校验；公有客户端的刷新令牌必须轮换或绑定发送方。撤权后敏感操作要实时重查。
+  7. **默认拒绝，每个对象都检查。** 列表、搜索、导出、批量、异步任务一个不漏；持有令牌、同一租户都不等于能访问这个对象。授权引擎出错时拒绝。
+  8. **租户来自可信上下文。** 租户标识从认证结果和成员关系里取，不从请求参数里取；行级安全只作第二道防线。
+  9. **服务和 Agent 有自己的身份。** 服务间用独立的客户端凭据或工作负载证书；Agent 代人操作时，有效权限是委托人当前权限、Agent 自身能力、委托范围三者的交集。
+  10. **授权引擎按需升级。** 从「带作用域的 RBAC + 对象检查」起步；关系共享复杂了再上 OpenFGA，条件策略多了再上 Cerbos 或 OPA。不要一开始全装上。
+  11. **开源不等于宽松许可。** Keycloak 是 Apache-2.0；ZITADEL 从 v3 起改为 AGPL-3.0-only，集成分发前要按 27 评估。
+rules:
+  # ── 登录与身份来源 ──
+  - id: IAM-001
+    title: 不自己实现密码校验、OAuth/OIDC 令牌签发、SAML 断言解析和 WebAuthn 验证；用成熟的身份提供方或库，例外写 ADR 并经安全评审
+    level: hard
+    check: manual
+    how: 评审时检查是否有自写的令牌签发、XML 签名校验、WebAuthn 签名校验代码；依赖清单里有对应的成熟实现，或有经过安全评审的 ADR
+    applies: [all]
+    why: 这些协议细节多、攻击面大，自写实现的漏洞往往是整类的（签名绕过、算法混淆），而现成实现已被大量审查和修补。
+    detail: |
+      - 应用仍然要自己写：会话层（登录后的会话管理）、内部用户映射、业务授权。
+      - 「登录表单校验成功后自己签发一个 JWT」不等于实现了 OIDC：缺少发现文档、密钥轮换、注销、联邦、MFA。
+  - id: IAM-002
+    title: 交互式登录用 OIDC 授权码流程加 PKCE；公有客户端必须用 PKCE；不用隐式授权，不用密码授权
+    level: hard
+    check: auto
+    how: 扫描 IdP 的客户端配置，确认未启用 implicit 和 password 授权类型；集成测试抓取授权请求，确认带 `code_challenge`
+    applies: [kind:service, platform:web, platform:mobile, platform:desktop]
+    why: RFC 9700 规定公有客户端必须用 PKCE、密码授权不得使用、隐式授权不应使用；它们会泄露令牌或让应用接触用户密码。
+    detail: |
+      - 机密客户端（有后端、能保管密钥的）也推荐用 PKCE。
+      - OAuth 本身是授权框架，「用 OAuth 登录」要落到 OIDC 上才有标准的身份断言。
+      - OAuth 2.1 仍是草案（核实于 2026-11-14 为第 17 稿），可以按它设计，但不要写成「已是正式 RFC」。
+    sources: [S01, S02, S03]
+  - id: IAM-003
+    title: 重定向地址在授权服务器上精确匹配登记值，不用通配符或前缀匹配；只有本机回环地址允许端口可变
+    level: hard
+    check: auto
+    how: 协议负例测试：用登记地址加路径、换子域、换端口（非回环）发起授权，都必须被拒绝
+    applies: [kind:service]
+    why: RFC 9700 要求精确比较；模糊匹配会让攻击者把授权码或令牌引到自己控制的地址。
+    sources: [S01]
+  - id: IAM-004
+    title: OIDC 登录必须校验 ID Token 的签名、iss、aud、exp 和 nonce，并校验授权响应的 state；校验失败一律拒绝
+    level: hard
+    check: auto
+    how: 负例测试：篡改签名、换 issuer、换 audience、过期、重放 nonce、错 state，都必须登录失败
+    applies: [kind:service, platform:web, platform:mobile, platform:desktop]
+    why: 这些字段是 OIDC Core 规定的校验项，漏一项就可能接受伪造、过期或发给别的应用的身份断言。
+    detail: 授权服务器在授权响应里返回 `iss` 时，客户端要核对它与预期的 issuer 一致，防止多个授权服务器之间的混淆攻击。
+    sources: [S03, S01]
+  - id: IAM-005
+    title: SAML 只用于对接已有的企业单点登录；用成熟库校验签名、受众、Recipient/Destination、InResponseTo 和有效期
+    level: soft
+    check: semi
+    how: 负例测试：未签名断言、换受众、过期、重放的断言都被拒绝；评审依赖里有成熟的 SAML 库
+    applies: [kind:service]
+    why: SAML 基于 XML 签名，自写解析极易出现签名包裹类漏洞；新项目选 OIDC 更简单。
+    detail: IdP 元数据和签名证书要能轮换，轮换期内新旧证书同时有效。
+  - id: IAM-006
+    title: 命令行工具登录用系统浏览器加本机回环回调和 PKCE；没有浏览器时用设备码流程；不在命令行里收集用户密码
+    level: hard
+    check: semi
+    how: 评审命令行登录实现，检查没有读取用户密码的输入；集成测试走浏览器或设备码流程
+    applies: [kind:cli]
+    why: 让命令行收密码等于密码授权，RFC 9700 明确禁止；设备码流程（RFC 8628）专为没有浏览器的设备设计。
+    sources: [S01, S04]
+  - id: IAM-007
+    title: 外部身份用 `(issuer, sub)` 唯一关联内部不可变的用户 ID；邮箱、姓名、手机号不当主键，也不作为自动合并账号的依据
+    level: hard
+    check: auto
+    how: 数据库对 `(issuer, subject)` 建唯一约束；检查用户表主键不是邮箱或手机号；测试同邮箱、不同 issuer 的两个账号不会自动合并
+    applies: [kind:service]
+    why: OIDC 只保证 `sub` 在同一 issuer 内唯一且不变；邮箱会改、会被回收，不同 IdP 下还可能重复，按邮箱合并会导致账号被接管。
+    detail: 确需关联两个外部身份时，由用户在两边都完成登录，或由管理员核验后关联，并记审计。
+    sources: [S03]
+  - id: IAM-008
+    title: 员工离职、调岗、停用时，通过 SCIM 或目录同步及时停用账号和收回成员关系，停用后已有会话和令牌失效
+    level: soft
+    check: semi
+    how: 演练：在 IdP 停用测试账号后，检查应用内会话、刷新令牌、API Key 是否在约定时间内失效
+    applies: [kind:service]
+    why: 只在 IdP 停用而应用不知道，离职人员可能靠旧会话或长期令牌继续访问。
+    detail: 目录同步失败时要告警，不能默默保留旧的成员关系。
+    sources: [S05]
+  # ── 密码与多因素 ──
+  - id: IAM-009
+    title: 需要自己管理密码时，单独使用的密码至少 15 位、作为多因素之一时至少 8 位，最长允许至少 64 位；不强制字符组合，不定期强制改密，新密码要比对泄露和常用密码黑名单
+    level: hard
+    check: auto
+    how: 表单与接口测试：14 位密码被拒、64 位密码可用、无组合要求；检查没有定期过期策略；用已知泄露密码注册被拒
+    applies: [kind:service]
+    why: NIST SP 800-63B-4 对这些用的是 SHALL/SHOULD；强制组合和定期改密只会让用户选更弱、更好猜的密码。
+    detail: |
+      - 允许粘贴和密码管理器自动填充，完整校验整个密码，不截断。
+      - 不允许存储对未登录者可见的密码提示，不用安全问题（基于知识的认证）。
+      - 发现密码已泄露时要求修改。
+      - 登录输入框的无障碍要求见 09。
+    sources: [S06]
+    see: ["09"]
+  - id: IAM-010
+    title: 密码用 Argon2id 哈希存储，参数不低于 19 MiB 内存、2 次迭代、并行度 1；不可用时用 scrypt；要求 FIPS 时用 PBKDF2-HMAC-SHA256；bcrypt 只用于存量系统
+    level: hard
+    check: auto
+    how: 代码扫描查找 MD5、SHA-1、SHA-256 直接哈希密码的写法；单元测试读出哈希串里的算法与参数并断言不低于下限
+    applies: [kind:service]
+    why: 快速哈希可被显卡大规模暴力破解；OWASP 密码存储备忘单给出了各算法的最低参数。
+    ref_value: OWASP 最低参数：Argon2id m=19 MiB、t=2、p=1（或同等强度的其他组合）；scrypt N=2^17、r=8、p=1；PBKDF2-HMAC-SHA256 60 万次迭代；bcrypt 工作因子不低于 10，且输入超过 72 字节会被截断。参数应随硬件变化定期上调。
+    detail: |
+      - 用语言生态里的成熟库（各语言的库见 10–14），不自己拼盐和迭代。
+      - 可以额外加 pepper（单独保管的全局密钥）做纵深防御，但不能替代慢哈希；pepper 的保管见 25。
+      - 用户下次登录时按新参数重新哈希，逐步升级旧哈希。
+    sources: [S07]
+    see: ["25"]
+  - id: IAM-011
+    title: 登录、找回密码、MFA 验证接口必须限制连续失败次数；找回密码不泄露账号是否存在，重置链接一次性且短期有效
+    level: hard
+    check: auto
+    how: 测试连续错误尝试后被限速或要求额外验证；存在与不存在的账号在找回密码时返回相同提示；重置链接用过一次或过期后失效
+    applies: [kind:service]
+    why: 不限制失败次数，在线猜密码和撞库就没有成本；返回不同提示等于给攻击者一份有效账号清单。
+    detail: 限流的实现方式见 18。锁定账号要防止被人恶意锁死别人，优先用逐步加长的等待或额外验证。
+    sources: [S06]
+    see: ["18"]
+  - id: IAM-012
+    title: 多因素认证优先支持通行密钥（passkey/WebAuthn），用 TOTP 或硬件密钥兜底；短信验证码不作为唯一的强因素；提供有身份核验的恢复流程
+    level: soft
+    check: manual
+    how: 评审 IdP 的认证器配置和恢复流程
+    applies: [kind:service]
+    why: 通行密钥绑定域名，能抵抗钓鱼；短信可被换卡、拦截。恢复流程是最常被绕过的环节。
+    detail: |
+      - 可同步的通行密钥（私钥可在设备间同步）在 NIST 800-63B-4 中不能用于最高保证级别 AAL3，一般业务可用。
+      - 私有化部署先实测：RP ID（依赖方域名）与内网域名、员工终端和浏览器的支持、恢复方式。可同步通行密钥的跨设备同步依赖厂商云服务，已在设备上的凭据不依赖。
+    sources: [S06]
+  - id: IAM-013
+    title: 修改密码或邮箱、增删认证器、授予权限、创建 API Key 和委托前，要求近期认证或加强认证（step-up）
+    level: hard
+    check: auto
+    how: 端到端测试：会话认证时间超过设定窗口后执行这些操作，必须先重新认证
+    applies: [kind:service]
+    why: 会话被盗或设备被借用时，这些操作能把临时控制变成长期控制。
+    ref_value: 近期认证窗口没有统一标准，参考值为 5–15 分钟，按业务风险定。
+  # ── 会话与 Cookie ──
+  - id: IAM-014
+    title: 会话 Cookie 必须设 Secure、HttpOnly 和 SameSite（Lax 或 Strict）；优先用 `__Host-` 前缀，不设 Domain，Path 为 /
+    level: hard
+    check: auto
+    how: 端到端测试或响应头检查，断言登录后设置的会话 Cookie 带这些属性
+    applies: [platform:web, kind:service]
+    why: 没有 HttpOnly，页面上的 XSS 能直接读走会话；没有 Secure，会话可能经明文连接泄露；设了 Domain，子域能读写它。
+    sources: [S08]
+  - id: IAM-015
+    title: 有后端的 Web 应用用服务端会话，或由为前端服务的后端（BFF）持有令牌；浏览器只拿会话 Cookie
+    level: soft
+    check: manual
+    how: 评审登录架构，检查浏览器端是否持有访问令牌或刷新令牌
+    applies: [platform:web]
+    why: 浏览器里的令牌一旦被 XSS 拿到就能在别处使用；会话 Cookie 带 HttpOnly 后脚本读不到。
+    detail: 前端令牌存储的禁令见 WEB-022。纯前端应用确需持有令牌时，只放内存、缩短有效期。
+    sources: [S08]
+    see: ["WEB-022"]
+  - id: IAM-016
+    title: 登录成功和权限提升后必须更换会话 ID，注销时在服务端销毁会话
+    level: hard
+    check: auto
+    how: 测试登录前后会话 ID 不同；注销后用旧会话 ID 访问返回未认证
+    applies: [kind:service]
+    why: 不换会话 ID 会被会话固定攻击利用；只在客户端删 Cookie，旧会话在服务端依然有效。
+    sources: [S08]
+  - id: IAM-017
+    title: 用 Cookie 鉴权的服务，所有改变状态的请求必须有 CSRF 防护；GET 请求不改状态
+    level: hard
+    check: auto
+    how: 测试从跨站来源、不带 CSRF 令牌或 Origin 不符的写请求都被拒绝
+    applies: [platform:web, kind:service]
+    why: 浏览器会自动带上 Cookie，没有 CSRF 防护，别的网站就能以用户身份发起操作。
+    detail: |
+      - SameSite 是一层防护，不单独依赖：同站的子域仍可发起请求，部分场景（如顶层 GET 导航）也会带 Cookie。
+      - 推荐做法：同步令牌或双提交令牌，加上校验 `Origin` 头或 Fetch Metadata（`Sec-Fetch-Site`）。
+      - CORS 配置不能代替 CSRF 防护。
+    see: ["WEB-022"]
+  - id: IAM-018
+    title: 会话必须同时有空闲超时和绝对超时，并由服务端判定
+    level: hard
+    check: auto
+    how: 测试会话在空闲超时和绝对超时后都需要重新认证；超时由服务端判断，不靠客户端计时
+    applies: [kind:service]
+    why: 没有超时的会话被盗后永久有效；只靠客户端计时可以被绕过。
+    ref_value: NIST SP 800-63B-4 对 AAL2（多因素级别）的建议是空闲超时不超过 1 小时、总时长不超过 24 小时；具体值按业务风险定，敏感后台可更短。
+    sources: [S06, S08]
+  - id: IAM-019
+    title: 注销、强制下线、修改密码、停用账号后，服务端会话和该用户的刷新令牌必须失效
+    level: hard
+    check: auto
+    how: 端到端测试：执行这些操作后，用旧会话和旧刷新令牌访问都失败
+    applies: [kind:service]
+    why: 用户改密码往往是因为怀疑被盗，旧凭据还能用就等于没改。
+    detail: 接入了企业 IdP 时，评估支持 OIDC 的后端通道注销（back-channel logout），让 IdP 端的注销传到应用。
+    sources: [S01]
+  # ── 令牌 ──
+  - id: IAM-020
+    title: 业务 API 只接受受众（aud）是自己的访问令牌；不把 ID Token 当 API 凭据
+    level: hard
+    check: auto
+    how: 负例测试：用发给其他服务的访问令牌、用 ID Token 调用 API，都必须返回 401
+    applies: [kind:service]
+    why: ID Token 的受众是客户端应用，只证明「谁登录了」；不限受众的令牌被一个服务拿到后，可以拿去调用另一个服务。
+    sources: [S01, S03, S09]
+  - id: IAM-021
+    title: 校验 JWT 时用固定的算法白名单（拒绝 none），用可信的密钥验签，并校验 iss、aud、exp、nbf 和所需的 scope；任何一项失败都拒绝
+    level: hard
+    check: auto
+    how: 单元测试和负例测试：alg=none、换算法、篡改签名、错 issuer、错 audience、过期、缺 scope 都被拒绝
+    applies: [kind:service]
+    why: 未经校验的 JWT 内容只是用户可以随意编写的 JSON；算法混淆是 JWT 最常见的伪造方式。
+    detail: |
+      - 用成熟的 JWT 库，不手写解析。
+      - 公钥从授权服务器的 JWKS 获取；签名密钥轮换期间新旧密钥同时可用，遇到未知 `kid` 时有节制地刷新缓存，取不到密钥时拒绝而不是放行。
+      - 不透明令牌用令牌内省（introspection）校验；内省服务不可用时拒绝。
+    sources: [S09]
+  - id: IAM-022
+    title: 访问令牌设短有效期；公有客户端的刷新令牌必须每次使用后轮换或绑定发送方，发现旧刷新令牌被重用时撤销整条令牌链
+    level: hard
+    check: auto
+    how: 测试刷新后旧刷新令牌失效；用已用过的刷新令牌再刷新时，新旧令牌都被撤销
+    applies: [kind:service]
+    why: RFC 9700 规定公有客户端的刷新令牌必须轮换或绑定发送方；不轮换的刷新令牌一旦泄露就长期可用。
+    ref_value: 访问令牌有效期没有统一标准，常见取值为 5–15 分钟；越长，撤权生效越慢。
+    detail: 绑定发送方的机制有 DPoP（RFC 9449）和双向 TLS；RFC 9700 建议访问令牌也尽量绑定发送方。
+    sources: [S01, S10]
+  - id: IAM-023
+    title: 令牌、会话 ID、API Key 不放在 URL 里，不写进日志、链路追踪、错误信息和大模型提示词
+    level: hard
+    check: semi
+    how: 代码扫描查找把令牌放进查询参数的写法；对日志样本跑密钥扫描
+    applies: [all]
+    why: URL 会进浏览器历史、代理日志和 Referer 头；进了日志的令牌，能读日志的人都能用。
+    detail: 日志脱敏、密钥扫描的通用规则见 25；提示词与 Agent 日志见 AGT-008。
+    sources: [S01]
+    see: ["25", "AGT-008"]
+  - id: IAM-024
+    title: 撤销权限后，敏感操作必须实时重查权限，不能只看旧 JWT 里的角色或旧的授权缓存；撤权生效的最长时限要写明
+    level: hard
+    check: auto
+    how: 时序测试：移除成员或撤销分享后立即执行敏感写操作，必须被拒绝；只读操作在写明的时限内生效
+    applies: [kind:service]
+    why: JWT 在过期前一直能离线验签通过，离线验签不等于没被撤销；授权缓存同理。
+    detail: |
+      - 做法：令牌只带身份，不带完整权限；敏感操作向授权服务实时判定；用权限版本号或缓存失效通知。
+      - 用 ReBAC 引擎时，按操作敏感度选一致性级别（例如 SpiceDB 的 ZedToken 可以保证读到不早于某次写入的结果），避免撤权和资源变更之间的「新敌人问题」。
+    sources: [S11]
+  - id: IAM-025
+    title: API Key 和个人访问令牌用密码学安全随机数生成，只在创建时显示一次，只存哈希；每个都带所有者、作用域、过期时间、状态和最后使用时间，可撤销、可轮换
+    level: hard
+    check: auto
+    how: 检查凭据表里没有可还原的明文列；测试撤销后立即失效、过期后失效；创建后的查询接口不再返回完整值
+    applies: [kind:service]
+    why: 明文存储的 Key 在数据库泄露时全部失守；没有作用域和过期的 Key 等于永久的全权凭据。
+    detail: |
+      - 推荐 `前缀.密钥` 格式：前缀可公开，用来识别和查找，也方便密钥扫描工具认出泄露的 Key。
+      - 作用域只是粗粒度能力，不能代替对象级授权（IAM-028）。
+      - 需要拿去调用第三方的刷新令牌不能只存哈希，要加密保存，见 21、25。
+    see: ["21", "25"]
+  # ── 授权 ──
+  - id: IAM-026
+    title: 授权默认拒绝：没有显式策略的接口和操作一律拒绝；授权引擎超时、出错、策略缺失、租户上下文缺失时也拒绝
+    level: hard
+    check: auto
+    how: 测试遍历所有路由，确认每个受保护路由都有对应策略；故障注入让授权服务超时，受保护操作必须失败
+    applies: [kind:service]
+    why: 默认允许时，新加的接口忘了配权限就是公开的；出错时放行，攻击者只要让引擎出错就能绕过。
+    sources: [S12]
+  - id: IAM-027
+    title: 授权在服务端执行；授权逻辑集中在一个模块或授权服务里，各接口调用它，不在每个控制器里各写一套条件
+    level: soft
+    check: semi
+    how: 代码检索散落在控制器里的角色判断；评审时检查新接口是否调用统一的授权入口
+    applies: [kind:service]
+    why: 条件散落各处，改一条规则要改很多地方，总会漏一处。
+    detail: 前端隐藏按钮不是访问控制，见 WEB-024。「做决定」集中，「执行检查」仍落在每条写入路径上，见 01。
+    sources: [S12]
+    see: ["WEB-024", "01"]
+  - id: IAM-028
+    title: 读、改、删、列表、搜索、下载、导出、批量和异步任务，每一次都做对象级授权；持有令牌、作用域匹配或同属一个租户都不等于能访问该对象
+    level: hard
+    check: auto
+    how: 越权矩阵测试：用户 A 用自己的身份访问用户 B 的私有对象，每个接口、每种动作都必须被拒绝
+    applies: [kind:service]
+    why: 对象级授权缺失（BOLA）是 OWASP API 安全十大风险的第一位；不可猜的 ID 会泄露，不是授权。
+    detail: |
+      - 批量操作里只要有一个无权对象，按接口约定整体拒绝或逐项过滤，不能悄悄成功。
+      - 异步任务在执行前和下载结果时都要再校验，任务创建后权限可能已被撤销。
+      - 预签名下载链接、WebSocket/SSE 订阅也要在签发和建立时校验。
+    sources: [S13, S14]
+  - id: IAM-029
+    title: 列表、搜索、计数、聚合和导出必须先按权限确定可见范围再查询，不先查出全部再在内存里过滤，返回的总数和摘要也只算可见对象
+    level: hard
+    check: auto
+    how: 差分测试：两个权限不同的用户查同一列表，返回的条数、总数、摘要只包含各自可见的对象
+    applies: [kind:service]
+    why: 先查后滤会通过总数、分页、搜索摘要和错误信息泄露无权数据的存在和内容。
+    sources: [S12, S14]
+  - id: IAM-030
+    title: 通用的更新接口不允许修改所有者、租户、角色、审批状态这类受保护字段；接受的字段用白名单定义
+    level: hard
+    check: auto
+    how: 属性模糊测试：在更新请求里加入 owner_id、tenant_id、role 等字段，确认被忽略或拒绝且数据没变
+    applies: [kind:service]
+    why: 对象属性级越权（批量赋值）是 OWASP API 安全十大风险之一，自动绑定请求体时最容易出现。
+    detail: 转移所有者、调整角色走单独的接口和单独的授权检查。
+    sources: [S13]
+  - id: IAM-031
+    title: 角色授予必须绑定具体范围（租户、组织、项目等），不存在没有范围的全局业务角色；层级继承规则要写明能否继承、有无显式拒绝、冲突如何处理
+    level: hard
+    check: semi
+    how: 数据模型中角色绑定表的范围字段非空；策略单元测试覆盖在 org-1 是管理员、切到 org-2 不保留管理权的情况
+    applies: [kind:service]
+    why: 没有范围的角色会在不同项目、组织之间外溢；继承规则不写清楚，每个开发者理解都不一样。
+    detail: 平台运维用的超级管理员是单独的身份，与业务角色分开管理并单独审计。
+  - id: IAM-032
+    title: 授权模型从「带范围的 RBAC + 资源归属检查」起步；出现实例级分享、嵌套团队、跨组织协作或大量「列出我能看的资源」时再引入 ReBAC 引擎；条件规则多时再引入策略引擎
+    level: soft
+    check: manual
+    how: 引入授权引擎前写 ADR，说明现有模型解决不了的具体场景
+    applies: [kind:service]
+    why: 授权引擎的部署、数据同步和一致性都有成本；问题没到那一步就引入，只增加故障点。
+    detail: |
+      - RBAC 按角色授权；ABAC 按主体、资源、环境的属性判定；ReBAC 按「谁和什么有什么关系」判定，适合文档分享、层级继承。
+      - 关系图与条件策略可以互补，但同时上两套引擎要有明确需要。
+      - 需要在多个引擎之间换用或跨语言统一接口时，可评估 OpenID AuthZEN 授权接口 1.0。
+    sources: [S15]
+  - id: IAM-033
+    title: 授权策略和角色定义作为代码与业务代码一起版本管理，有正例和反例测试并在 CI 中运行
+    level: hard
+    check: auto
+    how: CI 运行策略测试（如 `opa test`、`cerbosctl` 的策略测试、OpenFGA 的断言测试或项目自己的授权单测），策略变更不带测试时不能合并
+    applies: [kind:service]
+    why: 权限回归通常不会报错，只会悄悄放行或误拒，只有测试能发现。
+  - id: IAM-034
+    title: 每个新的受保护资源或操作，至少有四类负例测试：同租户横向越权、跨租户访问、撤权后访问、伪造主体身份
+    level: hard
+    check: semi
+    how: 评审时检查新增资源的测试是否覆盖这四类；可以配合 Schemathesis、OWASP ZAP 做接口层补充
+    applies: [kind:service]
+    why: 越权漏洞大多出在这四类场景，只测「未登录返回 401」发现不了。
+    sources: [S14]
+    see: ["04"]
+  # ── 多租户 ──
+  - id: IAM-035
+    title: 租户标识从服务端已认证的上下文和成员关系中取得，不信任请求参数或前端切换的值；所有读写都带租户约束；跨租户访问只能通过显式的分享或成员关系
+    level: hard
+    check: auto
+    how: 跨租户矩阵测试：用租户 A 的身份、带租户 B 的 ID 访问，接口、后台任务、导出全部失败
+    applies: [kind:service]
+    why: 只靠 URL 里的租户 ID 或角色做隔离，改一个参数就能串租户；同邮箱、同名组织不是授权依据。
+    detail: |
+      - 跨租户协作不改资源的租户字段，而是建立双方都能撤销和审计的分享记录或访客成员关系。
+      - 数据库行级安全（RLS）只作第二道防线，不替代应用层的检查；它涉及连接池上下文残留、绕过角色、后台任务等问题，实现细节见 17。不是所有数据库都支持等价能力，不能把它写成跨数据库的必需依赖。
+      - 缓存键、搜索索引、对象存储、事件的隔离要求见 ARC-031。
+    sources: [S14]
+    see: ["ARC-031", "17"]
+  # ── 服务与 Agent 身份 ──
+  - id: IAM-036
+    title: 服务间调用用独立的工作负载身份（OAuth 客户端凭据、双向 TLS 或 SPIFFE），按服务和环境分开；不用个人账号或个人长期令牌充当服务账号
+    level: hard
+    check: semi
+    how: 凭据扫描查找配置中的个人令牌；评审服务账号清单，每个服务、每个环境一个身份
+    applies: [kind:service]
+    why: 个人令牌会随人离职失效或被继续滥用，共享后无法区分是谁在调用。
+    detail: 工作负载身份证明「哪个进程在调用」，不能证明「用户同意它做什么」；代表用户的操作还要走委托判定（IAM-037）。
+    sources: [S16]
+  - id: IAM-037
+    title: Agent 和自动化程序有自己可认证的身份；代表用户操作时，先校验委托记录（范围、目标、有效期、撤销状态）和委托人当前的权限，有效权限取委托人权限、Agent 能力和委托范围的交集；不信任请求里自报的用户 ID
+    level: hard
+    check: auto
+    how: 负例测试：请求体里伪造 user_id 或 actor_id 不改变认证身份；委托撤销、过期、越出范围后的调用都被拒绝；委托人被移出项目后 Agent 也失去访问
+    applies: [kind:service, kind:llm]
+    why: 身份由请求自报就等于没有认证；委托只在授予那一刻有效、不随委托人权限变化，就会变成永久的全权代理。
+    detail: |
+      - RFC 8693（令牌交换）可以在令牌里表达「谁代表谁」（`act` 声明），但它不替你做业务授权。授权服务器不支持时，用服务端的委托记录实现，不要伪造一个自称符合标准的令牌。
+      - 无人值守的定时任务用明确的服务身份和资源权限，不要伪装成「某个管理员代表它」。
+      - 人工审批和授权是两件事：审批只对具体的操作和参数有效，流程见 23。
+    sources: [S17]
+    see: ["23"]
+  - id: IAM-038
+    title: 委托设过期时间并可随时撤销；默认不允许转委托，子 Agent 不自动继承父 Agent 的全部授权
+    level: soft
+    check: auto
+    how: 测试委托过期、撤销后失效；转委托请求在未显式允许时被拒绝
+    applies: [kind:service, kind:llm]
+    why: 不过期、可层层转授的委托会让权限无限扩散，出事后也查不清是谁授的。
+    detail: Agent 运行时间超过用户会话时，二选一：随会话或任务结束失效；或经用户明确同意的持续委托，有限期、可查看、可撤销，每步重查最新权限。
+  - id: IAM-039
+    title: MCP 认证通过只说明令牌能访问这个服务，工具调用仍要按 IAM-028 做对象级授权；不把收到的令牌原样转发给下游
+    level: hard
+    check: auto
+    how: 测试持有有效令牌但对目标对象无权时，工具调用被拒绝；抓包确认调用下游服务时用的是单独取得的令牌
+    applies: [kind:service, kind:llm]
+    why: MCP 的授权只校验令牌受众和作用域，不知道业务对象和委托范围；转发令牌会造成代理混淆攻击。
+    detail: |
+      - MCP 服务端授权协议的实现（受保护资源元数据、受众校验、客户端注册方式）见 API-035。
+      - 工具在列表里不可见不等于不能调用，调用时必须再检查。
+    see: ["API-035", "16"]
+  # ── 审计与选型 ──
+  - id: IAM-040
+    title: 登录、令牌签发与撤销、权限授予与撤销、委托、授权拒绝和敏感操作都产生结构化审计事件，实际执行者和被代表者分开记录
+    level: hard
+    check: auto
+    how: 端到端测试断言审计事件的字段齐全：事件类型、时间、结果、租户、主体、执行者、客户端、对象、动作、原因、请求 ID
+    applies: [kind:service]
+    why: Agent 的调用如果记成「用户本人操作」，出事后无法追责；缺少租户和对象字段的记录查不了越权。
+    detail: |
+      - 授权判定结果带上策略版本和判定 ID，便于复核。
+      - 审计里不存凭据本体和完整请求体（IAM-023）；IP、User-Agent 属于个人信息，留存要求见 27。
+    sources: [S12, S17]
+    see: ["27"]
+  - id: IAM-041
+    title: 选身份提供方和授权引擎时，在 ADR 中记录许可证、能否私有化和断网运行、协议互通情况和替换路径
+    level: soft
+    check: manual
+    how: 评审选型 ADR 是否包含这四项
+    applies: [kind:service, kind:onprem]
+    why: 身份系统替换代价极高；许可证变化（如 ZITADEL 改为 AGPL）和云 IdP 不能离线，都要在选型时就看到。
+    detail: |
+      - 云托管的 IdP 不会因为业务应用部署在内网就能离线使用；承诺断网交付的产品要有本地身份源。
+      - 上级 IdP 故障或断网时用的应急管理员账号（break-glass）要单独保管、使用即告警并审计。
+    sources: [S18, S19, S20]
+    see: ["27"]
+choices:
+  - category: 私有化部署的身份提供方
+    pick: Keycloak
+    when: 需要企业单点登录（OIDC、SAML）、对接 AD/LDAP、身份联邦，要求私有化或断网
+    alternatives:
+      - { name: authentik, when: 更看重登录门户和应用接入的灵活配置；注意企业版模块是单独的商业许可 }
+      - { name: Logto, when: 新建的面向开发者的产品，需要组织与多租户模型 }
+      - { name: Casdoor, when: 需要对接国内协作平台的登录；上线前做协议互通实测 }
+      - { name: Ory Hydra + Kratos, when: 只要一个 OAuth/OIDC 服务器，用户库和登录界面自己掌控 }
+      - { name: ZITADEL, when: 看重多组织模型且已完成 AGPL 评估或购买商业许可 }
+    avoid:
+      - { name: 自研完整身份提供方, why: 协议、MFA、密钥轮换、联邦的维护成本极高，漏洞风险大 }
+      - { name: 登录表单自己签发 JWT, why: 缺少 OIDC 发现、注销、轮换、联邦等能力 }
+    license: Keycloak 为 Apache-2.0；ZITADEL 自 v3 起为 AGPL-3.0-only（proto、文档目录为 Apache-2.0，登录界面和客户端包为 MIT）；其余见 open_questions
+    notes: 集成进产品一起分发时，许可证口径按 27 评估。
+    sources: [S18, S19, S20, S21, S22, S23, S24]
+  - category: 公网 SaaS 的身份提供方
+    pick: 已采购的云 IdP（如 Entra ID、Okta、Auth0）
+    when: 应用在公网、组织已有云身份体系
+    avoid:
+      - { name: 把云 IdP 当成离线可用, why: 断网后新登录和刷新都不可用 }
+  - category: 企业已有 AD/LDAP
+    pick: 由身份提供方做目录联邦或同步，应用只对接身份提供方
+    alternatives:
+      - { name: 应用直连目录, when: 只有一个极简内部应用 }
+    avoid:
+      - { name: 每个应用各自用 LDAP 校验密码, why: 密码在多处流转，MFA 和停用难以统一 }
+  - category: 国内协作平台登录（飞书、钉钉、企业微信）
+    pick: 平台官方的登录或免登接口 + 内部会话 + 内部用户映射
+    alternatives:
+      - { name: 身份提供方自带的平台适配器, when: 适配器经过实测 }
+    avoid:
+      - { name: 把平台的 user_id 当全局账号, why: 不同应用、不同企业下的 ID 规则不同 }
+      - { name: 默认平台提供标准 OIDC, why: 多数是私有协议，接口变化快 }
+    notes: 以各平台官方开发者文档为准，按应用类型（企业内部应用、第三方应用）分别实测。
+    sources: [S25]
+  - category: 命令行登录
+    pick: 系统浏览器 + 本机回环回调 + PKCE
+    alternatives:
+      - { name: 设备码流程（RFC 8628）, when: SSH 远程或没有浏览器的环境 }
+    avoid:
+      - { name: 在命令行收集用户密码, why: 等于密码授权，RFC 9700 禁止 }
+    sources: [S01, S04]
+  - category: 多因素认证
+    pick: 通行密钥（WebAuthn）+ TOTP 兜底
+    alternatives:
+      - { name: 企业现有的 MFA, when: 已通过企业 IdP 统一提供 }
+    avoid:
+      - { name: 自己实现 WebAuthn 验证, why: 用 IdP 或成熟库 }
+      - { name: 短信作为唯一强因素, why: 可被换卡和拦截 }
+    sources: [S06]
+  - category: 密码哈希算法
+    pick: Argon2id
+    alternatives:
+      - { name: scrypt, when: 环境里没有 Argon2id }
+      - { name: PBKDF2-HMAC-SHA256, when: 要求 FIPS 140 合规 }
+      - { name: bcrypt, when: 只用于已有系统 }
+    avoid:
+      - { name: MD5、SHA 系列直接哈希（含加盐）, why: 速度太快，可被大规模暴力破解 }
+    sources: [S07]
+  - category: 简单授权
+    pick: 带范围的 RBAC + 资源归属检查，集中在一个授权模块里（数据库查询实现）
+    alternatives:
+      - { name: Casbin, when: 想要现成的嵌入式 ACL/RBAC/ABAC 模型，不引入独立服务 }
+    avoid:
+      - { name: 前端隐藏按钮当授权, why: 后端接口仍可被直接调用 }
+    license: Casbin 为 Apache-2.0（待核实，见 open_questions）
+    sources: [S26]
+  - category: 关系型授权（ReBAC）
+    pick: OpenFGA
+    alternatives:
+      - { name: SpiceDB, when: 对授权一致性要求高，需要细粒度控制「读到不早于某次写入」 }
+      - { name: Ory Keto, when: 已在用 Ory 全家 }
+    avoid:
+      - { name: 把全部 ACL 塞进 JWT, why: 令牌过大，撤权和分享变化不生效 }
+      - { name: 每类资源自写一套 ACL 算法, why: 继承和分享规则很快失控 }
+    license: OpenFGA、SpiceDB、Ory Keto 均为 Apache-2.0（待核实，见 open_questions）
+    sources: [S27, S28, S11]
+  - category: 条件策略（ABAC、策略即代码）
+    pick: Cerbos
+    alternatives:
+      - { name: OPA, when: 跨服务、网关、Kubernetes 等基础设施统一策略，团队能接受 Rego }
+    avoid:
+      - { name: 每个控制器复制一遍条件分支, why: 改一条规则要改很多处 }
+      - { name: 手写复杂策略却没有策略测试, why: 权限回归不可预测 }
+    license: Cerbos 开源 PDP 为 Apache-2.0，Cerbos Hub 是商业服务；OPA 为 Apache-2.0（待核实，见 open_questions）
+    sources: [S29, S30]
+  - category: 服务间身份
+    pick: 每个服务独立的 OAuth 客户端凭据
+    alternatives:
+      - { name: SPIFFE/SPIRE, when: 服务多、跨集群，需要自动签发和轮换的工作负载证书 }
+    avoid:
+      - { name: 共用人类管理员令牌, why: 无法区分调用者，随人离职失效或被滥用 }
+    license: SPIRE 为 Apache-2.0（待核实，见 open_questions）
+    sources: [S16, S31]
+  - category: Agent 代人操作
+    pick: Agent 自己的身份 + 服务端委托记录 + 每次调用时的交集判定
+    alternatives:
+      - { name: RFC 8693 令牌交换, when: 授权服务器支持，需要在令牌里携带「谁代表谁」 }
+    avoid:
+      - { name: 把用户的长期 API Key 交给 Agent, why: 长期、不可细分、无法单独审计 }
+      - { name: 请求带 userId 就视为用户本人, why: 身份冒充 }
+    sources: [S17]
+antipatterns:
+  - { bad: 看到两边邮箱相同就自动合并账号, instead: "按 (issuer, sub) 关联，确需合并时两边都登录或管理员核验" }
+  - { bad: 用 ID Token 调用业务 API, instead: 申请受众是该 API 的访问令牌 }
+  - { bad: 所有权限写在 JWT 的角色列表里，撤权要等令牌过期, instead: 令牌只带身份，敏感操作实时查权限 }
+  - { bad: 只给增删改查路由做权限检查，搜索、导出、下载没管, instead: 所有数据出口都做对象级授权并先限定可见范围 }
+  - { bad: 用角色来做租户隔离, instead: 租户成员关系 + 所有查询带租户约束 }
+  - { bad: 用不可猜的 UUID 代替授权检查, instead: 每次访问都做对象级判定 }
+  - { bad: 强制密码含大小写数字符号、每 90 天必须改, instead: 按 NIST 要求加长度、查泄露黑名单、上通行密钥 }
+  - { bad: 用 SHA-256 加盐存密码, instead: Argon2id 等慢哈希 }
+  - { bad: 小项目一次装齐 Keycloak、OpenFGA、OPA、SPIRE, instead: 一个身份提供方 + 简单授权模块，按需升级 }
+  - { bad: MCP 服务把客户端的令牌原样转给下游 SaaS, instead: 对下游单独取得授权 }
+  - { bad: 审计表里只记「用户操作成功」, instead: 分开记执行者、被代表者、租户、对象、判定结果 }
+sources:
+  - { id: S01, title: "RFC 9700: Best Current Practice for OAuth 2.0 Security", url: "https://www.rfc-editor.org/rfc/rfc9700.html", publisher: IETF, date: 2025-01, kind: standard, checked: 2026-11-14 }
+  - { id: S02, title: "The OAuth 2.1 Authorization Framework (draft-ietf-oauth-v2-1)", url: "https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/", publisher: IETF, date: 2026-10-30, kind: standard, checked: 2026-11-14 }
+  - { id: S03, title: "OpenID Connect Core 1.0", url: "https://openid.net/specs/openid-connect-core-1_0.html", publisher: OpenID Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: "RFC 8628: OAuth 2.0 Device Authorization Grant", url: "https://www.rfc-editor.org/rfc/rfc8628.html", publisher: IETF, date: 2019-08, kind: standard, checked: 2026-11-13 }
+  - { id: S05, title: "RFC 7644: System for Cross-domain Identity Management: Protocol", url: "https://www.rfc-editor.org/rfc/rfc7644.html", publisher: IETF, date: 2015-09, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: "NIST SP 800-63B-4: Authentication and Authenticator Management", url: "https://pages.nist.gov/800-63-4/sp800-63b.html", publisher: NIST, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S07, title: "OWASP Password Storage Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S08, title: "OWASP Session Management Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S09, title: "RFC 9068: JWT Profile for OAuth 2.0 Access Tokens", url: "https://www.rfc-editor.org/rfc/rfc9068.html", publisher: IETF, date: 2021-10, kind: standard, checked: 2026-11-13 }
+  - { id: S10, title: "RFC 9449: OAuth 2.0 Demonstrating Proof of Possession (DPoP)", url: "https://www.rfc-editor.org/rfc/rfc9449.html", publisher: IETF, date: 2023-09, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: "SpiceDB: Consistency", url: "https://authzed.com/docs/spicedb/concepts/consistency", publisher: AuthZed, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "OWASP Authorization Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S13, title: "OWASP API Security Top 10 (2023)", url: "https://api-security.owasp.org/editions/2023/en/0x11-t10/", publisher: OWASP, date: "2023", kind: standard, checked: 2026-11-13 }
+  - { id: S14, title: "OWASP API1:2023 Broken Object Level Authorization", url: "https://api-security.owasp.org/editions/2023/en/0xa1-broken-object-level-authorization/", publisher: OWASP, date: "2023", kind: standard, checked: 2026-11-13 }
+  - { id: S15, title: "OpenID AuthZEN Authorization API 1.0", url: "https://openid.net/specs/authorization-api-1_0.html", publisher: OpenID Foundation, date: 2026-01-12, kind: standard, checked: 2026-11-13 }
+  - { id: S16, title: "SPIFFE Concepts", url: "https://spiffe.io/docs/latest/spiffe-about/spiffe-concepts/", publisher: SPIFFE, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "RFC 8693: OAuth 2.0 Token Exchange", url: "https://www.rfc-editor.org/rfc/rfc8693.html", publisher: IETF, date: 2020-01, kind: standard, checked: 2026-11-13 }
+  - { id: S18, title: "Keycloak", url: "https://github.com/keycloak/keycloak", publisher: Keycloak, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "ZITADEL LICENSING.md", url: "https://github.com/zitadel/zitadel/blob/main/LICENSING.md", publisher: ZITADEL, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "Zitadel v3: AGPL License, Streamlined Releases, and Platform Updates", url: "https://zitadel.com/blog/zitadel-v3-announcement", publisher: ZITADEL, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "authentik LICENSE", url: "https://github.com/goauthentik/authentik/blob/main/LICENSE", publisher: Authentik Security, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "Logto LICENSE", url: "https://github.com/logto-io/logto/blob/master/LICENSE", publisher: Silverhand, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Casdoor", url: "https://github.com/casdoor/casdoor", publisher: Casdoor, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Ory Hydra", url: "https://github.com/ory/hydra", publisher: Ory, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "飞书开放平台：应用授权登录概述", url: "https://open.feishu.cn/document/client-docs/build-login-free-system-", publisher: 飞书, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "Apache Casbin", url: "https://github.com/apache/casbin", publisher: Apache Casbin, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "OpenFGA", url: "https://github.com/openfga/openfga", publisher: OpenFGA, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: "SpiceDB", url: "https://github.com/authzed/spicedb", publisher: AuthZed, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: "Cerbos", url: "https://github.com/cerbos/cerbos", publisher: Cerbos, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "Open Policy Agent", url: "https://github.com/open-policy-agent/opa", publisher: CNCF, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: "SPIRE", url: "https://github.com/spiffe/spire", publisher: SPIFFE, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - 本轮未逐个核实的许可证：authentik（社区版 MIT、企业版模块商业许可）、Logto（MPL-2.0）、Casdoor、Ory Hydra/Kratos/Keto、OpenFGA、SpiceDB、Cerbos、OPA、SPIRE（均据报告为 Apache-2.0）；发布前按各仓库 LICENSE 核实
+  - Casbin Go 主仓库是否已迁到 apache/casbin，仓库地址和许可证待核实
+  - ZITADEL 改为 AGPL 的确切生效日期（第三方资料说法不一，官方说明以 v3 为界）
+  - NIST SP 800-63B-4 的正式发布日期，以及连续失败尝试次数上限的具体条款，待逐字核实
+  - OWASP 会话备忘单对空闲超时和绝对超时的建议区间待核实（报告给的 30 分钟 / 12 小时没有出处，已不采用）
+  - 通行密钥在信创终端、国产浏览器和内网域名下的支持情况，待补调研
+  - 待补调研：各语言的落地库（OIDC 客户端、JWT 校验、WebAuthn 服务端、会话中间件、Argon2 实现）及许可证，或交由 10–14 各语言主题
+  - 待补调研：飞书、钉钉、企业微信登录的字段映射建议；钉钉、企业微信需改用官方文档作为出处
+  - 待补调研：身份提供方与国产数据库、信创 CPU/操作系统的兼容性实测
+  - 待补调研：SAML 校验清单的权威出处
