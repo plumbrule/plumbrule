@@ -1,0 +1,11 @@
+{
+  "name": "plumbrule",
+  "version": "0.1.0",
+  "description": "准绳（Plumbrule）通用工程规范：把规范技能安装到 Claude Code、Codex 等编码 Agent",
+  "type": "module",
+  "bin": { "plumbrule": "bin/plumbrule.mjs" },
+  "files": ["bin/", "skill/"],
+  "engines": { "node": ">=18" },
+  "license": "MIT",
+  "keywords": ["agent-skills", "claude-code", "codex", "engineering-standards", "AGENTS.md"]
+}

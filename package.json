@@ -6,7 +6,9 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "check": "node tools/check.ts"
+    "check": "node tools/check.ts",
+    "gen:skill": "node tools/gen-skill.ts",
+    "pack:cli": "pnpm gen:skill && rm -rf cli/skill && cp -r dist/skill cli/skill && cd cli && npm pack --pack-destination ../dist"
   },
   "devDependencies": {
     "ajv": "^8.20.0",
