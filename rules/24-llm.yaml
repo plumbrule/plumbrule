@@ -563,8 +563,8 @@ sources:
   - { id: S04, title: LiteLLM LICENSE, url: "https://github.com/BerriAI/litellm/blob/main/LICENSE", publisher: BerriAI, date: null, kind: official, checked: 2026-11-14 }
   - { id: S05, title: "LiteLLM: Enterprise", url: "https://docs.litellm.ai/docs/enterprise", publisher: BerriAI, date: null, kind: official, checked: 2026-11-14 }
   - { id: S06, title: Why is Langfuse open source?, url: "https://langfuse.com/docs/open-source", publisher: Langfuse, date: null, kind: official, checked: 2026-11-14 }
-  - { id: S07, title: OWASP Top 10 for LLM Applications 2025, url: "https://genai.owasp.org/llm-top-10/", publisher: OWASP, date: 2024-11-18, kind: standard, checked: 2026-11-14 }
-  - { id: S08, title: "OWASP LLM01:2025 Prompt Injection", url: "https://genai.owasp.org/llmrisk/llm01-prompt-injection/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S07, title: OWASP Top 10 for LLM Applications 2026, url: "https://genai.owasp.org/llm-top-10/", publisher: OWASP, date: 2026-08-04, kind: standard, checked: 2026-11-14 }
+  - { id: S08, title: "OWASP LLM Top 10: Prompt Injection", url: "https://genai.owasp.org/llmrisk/llm01-prompt-injection/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
   - { id: S09, title: PyTorch Foundation welcomes vLLM, url: "https://pytorch.org/blog/pytorch-foundation-welcomes-vllm/", publisher: PyTorch Foundation, date: null, kind: official, checked: 2026-11-14 }
   - { id: S10, title: vLLM, url: "https://github.com/vllm-project/vllm", publisher: vLLM, date: null, kind: official, checked: 2026-11-13 }
   - { id: S11, title: SGLang, url: "https://github.com/sgl-project/sglang", publisher: SGLang, date: null, kind: official, checked: 2026-11-13 }
@@ -588,7 +588,7 @@ open_questions:
   - Ragas 的仓库地址和维护活跃度（原报告给出的仓库地址可疑），未核实
   - LiteLLM enterprise/ 目录许可的完整条款和企业版功能清单以官方为准；本次只核实到 LICENSE 的划分和部分功能
   - promptfoo 被 OpenAI 收购的交割日期，以及收购后开源许可和治理是否变化，需在下次复核时再查
-  - OWASP 大模型应用 Top 10 当前为 2025 版，未找到 2026 版；发布前到 genai.owasp.org 再确认（与 25 统一）
+  - OWASP 大模型应用 Top 10 已有 2026 版（2026-08 发布），逐条编号与 25 一起核对
   - MCP 和工具调用的安全建议（MCP 官方安全最佳实践、工具描述投毒）未逐条核实，规则只写了通用做法；协议细节以 16 为准
   - Vercel AI SDK、Pydantic AI、LangChain、LlamaIndex、SGLang、Ollama、llama.cpp 的许可证沿用原报告，未逐一从官方 LICENSE 复核
   - 待补调研：各档任务的代表模型（含国内模型）与选型方法，标注日期

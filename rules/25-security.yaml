@@ -1,0 +1,568 @@
+id: "25"
+slug: security
+title: 安全
+summary: 跨语言、跨项目的安全底线：威胁建模何时做、密钥怎么管、依赖和制品怎么防投毒、常见 Web 漏洞的通用防法、调用大模型时的提示注入与数据出网，以及每类安全工具默认用哪个。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 安全工具总体选型（密钥扫描、依赖漏洞扫描、SAST、容器镜像扫描、DAST、SBOM、签名）
+    - 威胁建模的触发条件与最小内容
+    - 密钥管理：不进仓库、不进命令行参数、登记、轮换、泄漏处置
+    - 软件供应链：锁文件、CI 第三方组件固定、SBOM、签名与来源证明（SLSA、Sigstore）
+    - 漏洞分流与修复时限、安全公告订阅、安全例外
+    - 注入、反序列化、SSRF、XSS/CSP、CSRF、开放重定向、上传入口的通用规则
+    - 提示注入、模型输出处理、模型数据出网的通用规则
+    - SECURITY.md 与协调披露
+  excludes:
+    - { what: 各语言安全工具的具体用法（govulncheck、pip-audit、cargo-deny、npm audit、Dependency-Check 等）, see: "10-15" }
+    - { what: 前端 CSP、富文本清洗的落地写法与组件选型, see: "07" }
+    - { what: 登录、会话、令牌、授权模型、多租户隔离, see: "19" }
+    - { what: 不可信文件的解析、转换与解析器隔离, see: "20" }
+    - { what: 模型网关、提示词管理、调用预算与评测, see: "24" }
+    - { what: 编码 Agent 的权限、规则文件和技能供应链, see: "23" }
+    - { what: 容器运行时加固、部署、事故响应流程与值班, see: "26" }
+    - { what: 开源许可口径、许可扫描、隐私与数据出境法规, see: "27" }
+    - { what: 本机沙箱、出口代理、进程隔离, see: "32" }
+    - { what: CI 门禁顺序、分支保护与发布流程, see: "03" }
+overview: |
+  1. **安全靠强制，不靠自觉。** 规则要落到扫描器、CI 必过检查、权限设置和网络策略上；文档里写「禁止」不算防护。
+  2. **每类工具一个默认。** 密钥扫描用 Betterleaks；依赖漏洞扫描用 OSV-Scanner；容器镜像用 Trivy；SAST 用 Semgrep 社区版引擎加自审规则；SBOM 用 Syft 生成 CycloneDX；签名用 Cosign。各语言的专用工具见 10–15。
+  3. **扫描器本身也是依赖。** 2026 年 3 月 Trivy 的发布链被入侵（CVE-2026-33634），带木马的版本和被改写的 GitHub Action 标签窃取了 CI 凭证。CI 里的第三方组件一律按完整提交 SHA 或摘要固定。
+  4. **密钥不进仓库、不进命令行参数、不进日志和提示词。** 提交前和 PR 都跑密钥扫描；疑似泄漏先撤销再清理，改写 Git 历史不算处置。
+  5. **依赖由锁文件和摘要决定。** 不可信 PR 不拿长期凭证；新版本有冷却期；发布制品带 SBOM、签名，部署按签名身份加摘要验证。
+  6. **漏洞按「是否已被利用 + 严重度 + 暴露面」分流**，不只看 CVSS 分数；修复时限给参考值，例外要有负责人和到期日。
+  7. **Web 通用底线：** SQL 参数化、命令用参数数组、不反序列化不可信对象、服务端抓 URL 防 SSRF、输出按上下文编码并配 CSP、Cookie 会话防 CSRF、上传按内容校验并隔离存储。
+  8. **模型面前的外部内容都是数据。** 提示注入挡不干净，安全边界放在模型之外：工具调用独立授权、模型输出按目标类型校验、发给外部模型的数据先分级。
+  9. **标准怎么用：** OWASP ASVS 当可验证的安全需求；Top 10:2025、LLM Top 10 2026、Agentic Top 10 当覆盖检查清单，不当验收标准。
+rules:
+  # ── 流程与治理 ──
+  - id: SEC-001
+    title: 新增对外入口、跨信任边界、处理不可信文件或 URL、新增有副作用的模型工具、处理敏感数据之前，先在仓库里写一份轻量威胁模型
+    level: soft
+    check: manual
+    how: PR 模板加「是否触及上述情况」勾选项；勾选时评审者检查威胁模型文件是否新增或更新
+    applies: [all]
+    why: 设计阶段发现的问题修起来最便宜；按触发条件做，避免每个小改动都走重流程。
+    detail: |
+      最小内容：资产（密钥、客户数据、发布能力等）、数据流和信任边界、主要威胁（可按 STRIDE 逐项过）、缓解措施、对应测试、负责人。
+      用 Markdown 加 Mermaid 数据流图放在仓库里即可，随代码一起评审；隐私威胁（LINDDUN）交 27。
+      风险的接受由人决定，Agent 可以起草，但不能批准自己找出的风险。
+    sources: [S06, S42]
+    see: ["27"]
+  - id: SEC-002
+    title: 以 OWASP ASVS 作为可验证的安全需求来源；Top 10 类清单只做覆盖检查，不当验收标准
+    level: soft
+    check: manual
+    how: 安全评审时检查需求或测试是否引用 ASVS 条目编号，而不是只写「符合 Top 10」
+    applies: [kind:service, platform:web]
+    why: Top 10 是风险排名，没有可逐条验证的要求；ASVS 每条都能写成测试。
+    sources: [S01, S02]
+  - id: SEC-003
+    title: 每条安全例外（抑制规则、忽略漏洞、放宽门禁）必须写明负责人、原因、补偿措施和到期日；不允许永久抑制
+    level: hard
+    check: auto
+    how: CI 校验例外文件（如 .gitleaksignore、osv-scanner.toml 的忽略项、.trivyignore）每条都有到期日和理由，过期即失败
+    applies: [all]
+    why: 没有到期日的例外会永久沉积成看不见的风险。
+    sources: [S06]
+  - id: SEC-004
+    title: 安全检查失败不得被吞掉：安全任务禁止用 `|| true`、continue-on-error 之类放行；扫描出错或漏洞库过期时结果记为「不确定」，不记为通过
+    level: hard
+    check: auto
+    how: "用脚本或 Actions 静态检查查找安全任务里的 `|| true`、`continue-on-error: true`；扫描器非零退出码必须让任务失败"
+    applies: [all]
+    why: 静默失败的扫描比没有扫描更危险，因为大家以为已经查过了。
+  - id: SEC-005
+    title: 对外发布或交付的仓库必须有 SECURITY.md，写明私密报告渠道和支持的版本；未修复的漏洞不在公开 issue、提交信息或 PR 描述里披露细节
+    level: hard
+    check: auto
+    how: CI 检查 SECURITY.md 存在且含联系方式；开启代码托管平台的私密漏洞报告功能
+    applies: [all]
+    why: 没有私密渠道，报告者只能公开提 issue，等于把漏洞公之于众。
+    detail: 私有化交付的项目要提供不依赖公网平台的报告渠道（客户侧联系人或交付工单）。示例邮箱上线前必须换成真实且有人值守的地址。
+    sources: [S36]
+  - id: SEC-006
+    title: 订阅所用语言生态、框架、基础镜像和安全工具自身的安全公告，并开启自动依赖安全更新
+    level: soft
+    check: semi
+    how: 仓库开启 Dependabot 或 Renovate 的安全更新；关键组件的公告列表记录在仓库文档里
+    applies: [all]
+    why: 不订阅就只能等扫描器下一次运行才发现，或者干脆不知道。
+    sources: [S41, S43]
+  - id: SEC-007
+    title: 漏洞按「是否已被利用、严重度、是否可达、暴露面」分流并给出修复期限；不只看 CVSS 分数
+    level: soft
+    check: semi
+    how: 漏洞工单记录分流依据和期限；定期报表列出超期项
+    applies: [all]
+    why: 只看分数会把精力浪费在不可达的高分漏洞上，同时漏掉正在被利用的中等漏洞。
+    ref_value: |
+      参考值（组织策略，非标准强制）：已被利用（列入 CISA KEV）且对外暴露的，立即遏制、两周内修复（参照 CISA BOD 22-01 对联邦机构的默认期限；该指令已被新指令取代，见待确认）；严重 30 天内；高 60 天内；中 90 天内；低随例行更新。
+      理由：KEV 代表真实攻击；其余档位是常见的行业做法，按自身发布节奏调整并写进安全策略。
+    sources: [S37]
+  - id: SEC-008
+    title: 主动 DAST 扫描和渗透测试只对明确授权的测试环境运行，固定目标清单和速率
+    level: hard
+    check: manual
+    how: 扫描任务配置目标白名单并只在标记为测试的环境运行；评审时核对授权记录
+    applies: [kind:service, platform:web]
+    why: 主动扫描会写数据、发请求，打到生产或第三方资产会造成真实损害和法律风险。
+    sources: [S28]
+  # ── 密钥 ──
+  - id: SEC-009
+    title: 真实密钥、令牌、密码不得出现在源码（含 Git 历史）、配置文件、镜像层、构建产物、日志、测试快照和提示词里
+    level: hard
+    check: auto
+    how: 提交前钩子和 PR 跑密钥扫描（增量）；主分支定期扫全部历史；发布前扫镜像和制品
+    applies: [all]
+    why: 进过仓库或镜像的密钥会被复制到无数地方，几乎不可能收回。
+    detail: |
+      `.gitignore` 不是防护：已提交的历史、CI 日志和缓存里仍可能有。测试用的假密钥要明显是假的（如带 EXAMPLE 字样），并在扫描配置里按路径白名单放行。
+      扫描器的「联网验证密钥是否有效」功能会主动连接外部服务，默认关闭，需要时单独批准；断网环境禁止开启。
+    sources: [S07, S08]
+    see: ["AGT-008"]
+  - id: SEC-010
+    title: 密钥不通过命令行参数传递，改用环境变量注入、权限 0600 的临时文件、标准输入或密钥管理系统
+    level: hard
+    check: semi
+    how: 评审时检查脚本和 CI 配置里是否把密钥拼进命令行（如 `--password=`、`-p<值>`）；密钥扫描规则覆盖 CI 配置文件
+    applies: [all]
+    why: 命令行参数会被同机其他用户的进程列表看到，也会进 shell 历史和 CI 日志。
+    see: ["15"]
+  - id: SEC-011
+    title: 运行时密钥由密钥管理系统或部署平台注入，不打包进镜像，不写进明文配置文件；必须随仓库版本化的少量配置用 SOPS 加密
+    level: hard
+    check: semi
+    how: 镜像扫描检查层内是否含密钥；评审时检查配置文件里没有明文密钥
+    applies: [all]
+    why: 镜像和配置文件会被分发、缓存、备份，里面的密钥等于公开。
+    detail: 加密用的私钥和密文不要放在同一个制品或同一个仓库里。
+    sources: [S07, S24]
+  - id: SEC-012
+    title: 每个凭证登记负责人、用途、权限范围、到期时间和撤销方法；优先使用短期按需签发的凭证
+    level: soft
+    check: semi
+    how: 凭证清单文件按 schema 校验；定期列出无负责人或已过期的条目
+    applies: [kind:service, kind:onprem]
+    why: 出事时找不到负责人、不知道怎么撤销，遏制就会拖延。
+    sources: [S07]
+  - id: SEC-013
+    title: 与生产相关的静态凭证要有演练过的轮换流程：签发新凭证、新旧并行、切换、撤销旧凭证、确认旧凭证失效
+    level: soft
+    check: manual
+    how: 演练记录里有「旧凭证调用失败」的证据
+    applies: [kind:service, kind:onprem]
+    why: 没演练过的轮换在真正泄漏时常常因为漏改某个服务而回退。
+    detail: 没有通用的「每 N 天轮换」规则；按影响面、泄漏风险和服务商要求定周期，但必须做到泄漏时能立即撤销。
+    sources: [S07]
+  - id: SEC-014
+    title: 疑似泄漏的密钥立即撤销或轮换，再清理 Git 历史、日志和制品里的副本；改写历史不能代替撤销
+    level: hard
+    check: manual
+    how: 泄漏工单必须记录撤销时间和「旧密钥已失效」的验证结果
+    applies: [all]
+    why: 密钥一旦暴露就要假定已被拿走，删掉副本不会让它重新变安全。
+    sources: [S07]
+  # ── 供应链 ──
+  - id: SEC-015
+    title: 正式构建的依赖集合由锁文件和摘要决定；构建和部署不使用未审核的 latest 标签或浮动版本
+    level: hard
+    check: auto
+    how: CI 用锁文件安装（如 `npm ci`、`--frozen-lockfile`、`--require-hashes`），锁文件与清单不一致即失败；镜像引用检查是否带摘要
+    applies: [all]
+    why: 浮动版本会在你不知情时换成新代码，包括被投毒的版本。
+    sources: [S34]
+    see: ["10-15", "26"]
+  - id: SEC-016
+    title: CI 里引用的第三方 Action、插件、扫描器和容器镜像必须按完整提交 SHA 或镜像摘要固定，不按可变标签引用
+    level: hard
+    check: auto
+    how: OpenSSF Scorecard 的 Pinned-Dependencies 检查，或用脚本检查工作流里 `uses:` 是否都是 40 位 SHA
+    applies: [all]
+    why: 标签可以被改写。2026 年 3 月 trivy-action 和 setup-trivy 的大部分标签被强推成窃取凭证的版本，按标签引用的流水线直接中招。
+    detail: 固定之后由 Dependabot 或 Renovate 提更新 PR，人看过再合并。扫描器下载二进制时同样要校验签名或校验和。
+    sources: [S13, S35, S23]
+  - id: SEC-017
+    title: 来自外部贡献者或不可信分支的 PR，安装依赖和运行测试时不得拿到长期凭证和生产密钥；CI 令牌默认只读
+    level: hard
+    check: auto
+    how: 检查工作流触发器（禁止在 pull_request_target 等有密钥的上下文里检出并运行 PR 代码）和令牌权限设置
+    applies: [all]
+    why: 依赖安装脚本和测试就是任意代码执行；Shai-Hulud 等 npm 攻击就是靠它窃取 CI 和云凭证。
+    sources: [S34, S35]
+    see: ["03"]
+  - id: SEC-018
+    title: 新增依赖时评估来源、维护活跃度、安装脚本、许可证和是否有更轻的替代
+    level: soft
+    check: semi
+    how: CI 在依赖清单变化时提示评审；可参考 OpenSSF Scorecard 分数
+    applies: [all]
+    why: 每个依赖都扩大攻击面；拼写仿冒、账号被盗、无人维护都是真实风险。
+    sources: [S23, S34]
+    see: ["27"]
+  - id: SEC-019
+    title: 依赖的新版本发布后先等一段冷却期再升级，紧急安全修复除外
+    level: soft
+    check: auto
+    how: 用包管理器或依赖更新机器人的最小发布时长设置（具体配置见 10–15）
+    applies: [all]
+    why: 多数恶意版本在发布后几天内被发现并下架，冷却期能避开这段窗口。
+    ref_value: 参考值数天到一周。理由：近年 npm 投毒事件多在几天内被发现处置；太长会拖慢安全修复，所以安全更新例外。
+    sources: [S34]
+    see: ["10-15"]
+  - id: SEC-020
+    title: PR 对变更的依赖跑依赖漏洞扫描，主分支定期全量扫描；存在不可接受漏洞时阻断发布
+    level: hard
+    check: auto
+    how: CI 必过检查运行 OSV-Scanner（或语言专用工具）；阻断阈值写在安全策略里，例外走 SEC-003
+    applies: [all]
+    why: 已知漏洞是最容易被批量利用的入口，修复成本也最低。
+    sources: [S11]
+    see: ["10-15"]
+  - id: SEC-021
+    title: 容器镜像在构建时和镜像仓库里定期扫描，覆盖系统包和语言依赖；基础镜像按摘要固定
+    level: hard
+    check: auto
+    how: CI 对构建出的镜像运行 Trivy，镜像仓库按计划重扫；Dockerfile 检查 FROM 是否带摘要
+    applies: [kind:service, kind:onprem]
+    why: 镜像里的系统包会持续爆出新漏洞，构建时干净不代表现在干净。
+    sources: [S12, S14]
+    see: ["26"]
+  - id: SEC-022
+    title: 对外发布或交付给客户的制品必须附带由构建产物生成的 SBOM（CycloneDX 或 SPDX）
+    level: hard
+    check: auto
+    how: 发布流水线生成 SBOM 并校验格式，SBOM 与制品一起归档
+    applies: [all]
+    why: 新漏洞公布时，要靠 SBOM 才能快速知道哪些交付物受影响；NIST SSDF 要求为每次发布保存组件来源数据。
+    detail: SBOM 是清单，不是安全结论，漏洞扫描结果要另存。断网交付时一并带上签名公钥或可信根、校验工具和漏洞库快照日期。
+    sources: [S06, S15, S16, S17]
+  - id: SEC-023
+    title: 容器镜像和对外发布的二进制必须签名；部署时按允许的签名身份加摘要验证，不信任标签
+    level: hard
+    check: auto
+    how: 发布任务用 Cosign 签名；部署前或准入控制里执行验签，失败即拒绝
+    applies: [kind:service, kind:onprem, kind:cli, kind:library]
+    why: 只比哈希挡不住「连哈希一起被替换」；验签身份才能证明是谁发布的。
+    detail: 签名只证明「谁发布了这个摘要」，不证明代码没有漏洞或上游可信。签名只在受控的发布任务里做，签名凭证不暴露给普通构建任务。
+    sources: [S18]
+  - id: SEC-024
+    title: 按 SLSA Build 轨道逐级生成构建来源证明（provenance），不口头宣称达到某个级别
+    level: soft
+    check: semi
+    how: 发布物附带来源证明并在部署时校验；宣称的级别要有对应的构建平台证据
+    applies: [kind:library, kind:cli, kind:service]
+    why: 来源证明回答「这个制品是从哪份代码、在哪台构建机上做出来的」，是追查供应链事件的依据。
+    detail: SLSA 当前版本把要求分为 Build 和 Source 两条轨道，不能混成一张证书。先做到构建平台自动生成来源证明，高风险项目再提高级别。
+    sources: [S19]
+  - id: SEC-025
+    title: 断网或私有化环境的漏洞库要本地镜像并记录库的更新日期；超过约定的陈旧期，扫描结果记为「不确定」
+    level: soft
+    check: auto
+    how: 扫描任务读取本地漏洞库的生成时间，超期时任务失败或标为不确定
+    applies: [kind:onprem]
+    why: 过期的漏洞库会让扫描「全部通过」，但新漏洞根本不在库里。
+    ref_value: 参考值一周内。理由：主流漏洞库每天更新，超过一周新公布的高危漏洞基本都会漏掉；按环境能接受的风险调整。
+    sources: [S11, S12]
+  # ── 应用安全通用规则 ──
+  - id: SEC-026
+    title: 在 PR 上运行 SAST 的高置信度规则并阻断，全量规则定期运行
+    level: soft
+    check: auto
+    how: CI 必过检查运行 Semgrep 社区版引擎和语言专用工具；误报写进带到期日的例外
+    applies: [all]
+    why: PR 只放快而准的规则，团队才不会想办法绕过；全量规则用来发现存量问题。
+    sources: [S20]
+    see: ["10-15"]
+  - id: SEC-027
+    title: 数据库查询必须参数化，动态表名和排序字段只能来自白名单映射；系统命令用参数数组调用固定程序，不拼接 shell 字符串
+    level: hard
+    check: semi
+    how: SAST 规则查找字符串拼接 SQL 和 `shell=True`、`exec` 拼接等写法；注入单测
+    applies: [all]
+    why: 注入仍是最常见、后果最严重的漏洞类别之一。
+    detail: 参数化解决不了授权问题，参数数组也挡不住危险参数（如 `--output=/etc/...`），这些还要按参数校验。模型生成的文本同样不能直接拼进 SQL 或命令。
+    sources: [S43, S44, S02]
+    see: ["17"]
+  - id: SEC-028
+    title: 不对不可信数据做可执行对象的反序列化；用 JSON 等纯数据格式，YAML 用安全加载器，禁止 pickle 和按任意类名实例化
+    level: hard
+    check: semi
+    how: SAST 规则查找 `pickle.loads`、`yaml.load`（非 safe）、Java 原生反序列化等调用
+    applies: [all]
+    why: 不安全的反序列化通常直接导致远程代码执行。
+    sources: [S39]
+  - id: SEC-029
+    title: 服务端按用户或模型给的 URL 发请求时，限定协议，解析域名后校验目标 IP（拒绝回环、内网、链路本地、云元数据地址），每次重定向都重新校验，并走受限的出口
+    level: hard
+    check: semi
+    how: 测试集覆盖内网地址、IPv6、十进制 IP、重定向到内网、DNS 重绑定等用例；评审时检查是否只用正则校验 URL
+    applies: [kind:service, kind:llm]
+    why: SSRF 能让攻击者借服务器访问内网和云元数据，拿到云凭证；只用正则校验 URL 挡不住。
+    sources: [S31]
+    see: ["32"]
+  - id: SEC-030
+    title: 输出到页面时按上下文编码，不渲染未清洗的 HTML 或 Markdown 原始 HTML；必须渲染富文本时用成熟的清洗库，并配置内容安全策略（CSP）作为纵深防御
+    level: hard
+    check: semi
+    how: lint 或 SAST 规则查找 `dangerouslySetInnerHTML`、`v-html`、`innerHTML` 等用法；检查响应头里有 CSP
+    applies: [platform:web, platform:desktop]
+    why: XSS 能在用户浏览器里冒充用户做任何事；框架默认转义只覆盖文本插值。
+    detail: CSP 不替代输出编码。脚本策略用 nonce 或 hash，不用 `unsafe-inline`；新策略先用 report-only 观察再强制。具体写法和清洗库选型见 07。
+    sources: [S30, S40]
+    see: ["07"]
+  - id: SEC-031
+    title: 用 Cookie 维持会话的应用，会修改状态的接口必须有 CSRF 防护（框架自带的令牌或校验 Origin），不能只靠 SameSite
+    level: hard
+    check: semi
+    how: 浏览器负例测试从第三方页面发起修改请求，确认被拒绝
+    applies: [platform:web, kind:service]
+    why: 浏览器会自动带上 Cookie，跨站页面就能冒用用户身份；SameSite 在部分场景和旧浏览器上不生效。
+    sources: [S33]
+    see: ["19"]
+  - id: SEC-032
+    title: 登录后跳转等重定向只允许相对路径或白名单内的域名
+    level: hard
+    check: semi
+    how: 测试用 `//evil.example`、`https://evil.example`、编码后的协议、`user@host` 等输入，确认被拒绝
+    applies: [platform:web, kind:service]
+    why: 开放重定向常被用来做钓鱼和偷 OAuth 授权码。
+    sources: [S38]
+  - id: SEC-033
+    title: 上传入口必须鉴权，限制大小和数量，按文件内容识别类型（不信扩展名和 Content-Type），用生成的名字存到网站根目录之外，下载时以附件方式返回
+    level: hard
+    check: semi
+    how: 测试集覆盖超大文件、伪造扩展名、路径穿越文件名、可执行内容；评审检查存储路径和下载响应头
+    applies: [kind:service, platform:web]
+    why: 上传是把外部文件放进系统的入口，直接用原文件名或放在可执行目录里会导致覆盖文件和代码执行。
+    detail: 有条件时用独立域名提供用户文件、对文件做病毒扫描。上传和解析进程不共享高权限凭证。文件解析、压缩炸弹和解析器隔离见 20。
+    sources: [S32]
+    see: ["20"]
+  - id: SEC-034
+    title: 生产环境关闭调试模式和目录浏览，CORS 只放行明确的来源，设置安全响应头；错误响应不返回堆栈、SQL 和密钥
+    level: hard
+    check: auto
+    how: ZAP 基线扫描检查响应头和错误信息；配置 lint 检查调试开关和 CORS 通配符
+    applies: [kind:service, platform:web]
+    why: 安全配置错误是 OWASP Top 10:2025 的第二位，调试信息常直接暴露内部结构和凭证。
+    sources: [S02, S28]
+    see: ["16"]
+  # ── 调用大模型的应用 ──
+  - id: SEC-035
+    title: 进入模型的外部内容（网页、文件、检索结果、工具返回、邮件、其他 Agent 的消息）一律当数据；它们不能改变系统指令、权限或安全策略
+    level: hard
+    check: semi
+    how: 回归测试集放入夹带指令的输入，检查模型没有越权调用工具，策略判定没有被改变
+    applies: [kind:llm, kind:agent]
+    why: 提示注入是 OWASP LLM Top 10 的第一位，而且无法靠过滤彻底防住，只能让注入成功也造不成越权。
+    detail: 不把安全过滤器或系统提示词当作唯一防线；验证方法是关掉过滤器后策略仍然成立。外部内容写入长期记忆或知识库时要记录来源，并能撤销。
+    sources: [S03, S04]
+    see: ["23", "24"]
+  - id: SEC-036
+    title: 模型输出进入命令、SQL、HTML、URL、文件路径或工具参数之前，按目标类型校验和编码，与处理用户输入一样
+    level: hard
+    check: semi
+    how: SAST 查找模型输出直接流入 `exec`、SQL 拼接、`innerHTML` 等危险调用；负例测试
+    applies: [kind:llm]
+    why: 模型输出可能被注入操纵，把它当可信输入就把注入变成了代码执行或 XSS。
+    sources: [S03]
+  - id: SEC-037
+    title: 有副作用的工具调用由模型之外的代码做授权判定和参数 schema 校验；高风险操作的人工审批绑定具体目标和参数，参数一变审批作废
+    level: hard
+    check: semi
+    how: 测试审批后篡改参数、替换目标的用例，确认执行被拒；审批界面显示系统生成的真实差异，而不只是模型的解释
+    applies: [kind:llm, kind:agent]
+    why: 模型可能被诱导滥用工具；只看模型写的说明来审批，容易被「漂亮但歪曲」的解释骗过。
+    sources: [S05]
+    see: ["19", "23"]
+  - id: SEC-038
+    title: 发往外部模型服务的数据先分级；密钥不得发送，个人敏感数据和客户数据按策略脱敏或禁止发送；要求断网的环境不调用外部模型，除非事先批准
+    level: hard
+    check: semi
+    how: 模型调用统一经过网关，网关按数据级别执行脱敏或拦截并记录发送的数据类别；断网环境用出口策略和 DNS 记录验证
+    applies: [kind:llm, kind:onprem]
+    why: 发出去的数据就脱离了控制，可能被服务方留存、用于训练或在其日志里泄漏。
+    detail: 网关和服务选型见 24，个人信息和数据出境的合规要求见 27。
+    sources: [S03]
+    see: ["24", "27", "32"]
+  - id: SEC-039
+    title: 把 MCP 服务、Agent 技能、插件、模型权重和提示词模板当作依赖管理：固定版本或摘要，变更要评审
+    level: soft
+    check: semi
+    how: 清单文件记录版本和摘要；变更走 PR 评审
+    applies: [kind:llm, kind:agent]
+    why: 工具描述和技能可以在运行时被更新或替换，是一条新的供应链。
+    sources: [S05]
+    see: ["23"]
+choices:
+  - category: 密钥扫描
+    pick: Betterleaks（提交前钩子 + PR 增量 + 主分支定期全历史）
+    when: 所有仓库
+    alternatives:
+      - { name: Gitleaks, when: 已有配置和流水线、暂不迁移时。官方 README 已声明功能冻结、只做安全补丁，作者重心转到 Betterleaks；Betterleaks 定位为可直接替换 }
+      - { name: TruffleHog, when: 需要验证密钥是否仍然有效，或要扫描 Git 之外的多种来源时；作为独立工具在 CI 里运行，许可证 AGPL-3.0，不要嵌入对外分发的产品或对外服务 }
+    avoid:
+      - { name: 用 grep 或自写正则代替, why: 覆盖面和误报都差，也没有历史扫描能力 }
+    license: Betterleaks MIT；Gitleaks MIT；TruffleHog AGPL-3.0
+    sources: [S08, S09, S10]
+  - category: 依赖漏洞扫描（SCA）
+    pick: OSV-Scanner（直接读锁文件或 SBOM，覆盖多种语言生态，数据来自 OSV 库）
+    when: 所有有第三方依赖的项目
+    alternatives:
+      - { name: 语言专用工具（govulncheck、pip-audit、cargo-deny / cargo-audit、npm audit、OWASP Dependency-Check）, when: 单一语言项目，或需要调用可达性分析（如 govulncheck）时；用法见 10–15 }
+      - { name: Trivy 或 Grype, when: 同一个流水线还要扫容器镜像和系统包时，可顺带扫依赖 }
+    avoid:
+      - { name: 自己写 CVE 匹配器, why: 版本区间、包名别名、撤回公告都很难处理对 }
+      - { name: 只按 CVSS 分数决定阻断, why: 不考虑是否被利用和是否可达，见 SEC-007 }
+    license: Apache-2.0
+    notes: 断网环境需要本地镜像漏洞库并记录日期（SEC-025）。
+    sources: [S11]
+  - category: 容器镜像扫描
+    pick: Trivy
+    when: 构建镜像时和镜像仓库定期重扫；也可扫 IaC 配置
+    alternatives:
+      - { name: Grype（配合 Syft 生成的 SBOM）, when: 已用 Syft 生成 SBOM、想基于 SBOM 扫描，或需要第二个扫描器交叉核对时 }
+    avoid:
+      - { name: 按可变标签引用扫描器的 Action 或镜像, why: 2026 年 3 月 Trivy 发布链被入侵（CVE-2026-33634），按标签引用 trivy-action 的流水线被植入窃取凭证的代码；按 SHA 或摘要固定并校验签名 }
+    license: Trivy Apache-2.0；Grype Apache-2.0
+    sources: [S12, S13, S14]
+  - category: SAST（跨语言）
+    pick: Semgrep 社区版引擎 + 团队自审的规则集
+    when: 所有项目；语言专用工具（gosec、Bandit 等）见 10–15
+    alternatives:
+      - { name: Opengrep, when: 希望引擎由社区治理、不受单一厂商政策影响时；是 Semgrep 引擎的社区分叉，同为 LGPL-2.1 }
+      - { name: CodeQL, when: 关键服务需要更深的跨过程数据流分析时；私有仓库的使用授权要先确认 }
+    avoid:
+      - { name: 没读规则就直接用云端托管扫描, why: 代码会上传到第三方，断网环境也用不了 }
+    license: 引擎 LGPL-2.1；Semgrep 官方维护的规则使用 Semgrep Rules License v1.0，限内部使用，不能用于竞争产品或作为服务对外提供，要再分发规则时另找规则来源或自写
+    notes: 作为 CI 里独立运行的工具使用，许可证口径见 27。
+    sources: [S20, S21, S22]
+  - category: SBOM
+    pick: Syft 生成 CycloneDX JSON
+    alternatives:
+      - { name: SPDX 格式, when: 客户或法规指定 SPDX 时 }
+      - { name: 构建工具原生插件（如 CycloneDX 的 Maven / Gradle 插件）, when: 需要更准确的构建期依赖关系时，见 10–15 }
+    avoid:
+      - { name: 把 `npm list` 之类的输出当 SBOM, why: 缺少哈希、purl 和制品层面的组件 }
+    license: Syft Apache-2.0；CycloneDX 规范 Apache-2.0
+    sources: [S15, S16, S17]
+  - category: 签名与来源证明
+    pick: Cosign（Sigstore）签名 + 按 SLSA Build 轨道生成来源证明
+    alternatives:
+      - { name: Cosign 私钥签名, when: 断网环境用不了无密钥签名和公共透明日志时 }
+      - { name: 代码托管平台自带的制品证明功能, when: 构建完全在该平台上进行时 }
+    avoid:
+      - { name: 只发布 SHA256 校验和, why: 校验和可以和制品一起被替换，证明不了发布者 }
+    license: Apache-2.0
+    sources: [S18, S19]
+  - category: 密钥管理
+    pick: 部署平台已有的密钥服务（云 KMS / Secrets Manager 等）；必须随仓库版本化的配置用 SOPS + age 加密
+    alternatives:
+      - { name: OpenBao, when: 需要动态签发数据库凭证、短期令牌和统一审计，且能运维一个关键服务时 }
+      - { name: HashiCorp Vault, when: 组织已在用时继续用；新版为 BUSL-1.1，不是开源许可，自建对外服务前先过法务 }
+      - { name: Infisical, when: 团队需要现成的密钥管理界面时；主体 MIT，ee 目录是商业许可，要确认所需功能不在 ee 里 }
+    avoid:
+      - { name: 明文放 Git 再靠 .gitignore, why: 历史和副本里仍会泄漏 }
+      - { name: 只为藏几个 API Key 部署多节点密钥集群, why: 运维成本和故障点远超收益 }
+    license: SOPS MPL-2.0；age BSD-3-Clause；OpenBao MPL-2.0；Vault BUSL-1.1；Infisical MIT + ee 商业许可
+    notes: 公有云 KMS 不适合物理断网环境。
+    sources: [S24, S25, S26, S27]
+  - category: DAST
+    pick: ZAP（PR 或预发跑被动 / 基线扫描，主动扫描只打授权测试环境）
+    avoid:
+      - { name: 对生产或客户资产跑主动扫描, why: 会写数据、触发告警，可能违法，见 SEC-008 }
+    license: Apache-2.0
+    sources: [S28]
+  - category: 威胁建模
+    pick: 仓库里的 Markdown 文档 + Mermaid 数据流图
+    alternatives:
+      - { name: OWASP Threat Dragon, when: 团队想用图形界面画数据流图并按 STRIDE 标注时 }
+    avoid:
+      - { name: 自造建模工具, why: 成本高，现成方案已够用 }
+    license: Threat Dragon Apache-2.0
+    sources: [S29, S42]
+  - category: 依赖与仓库安全健康度
+    pick: OpenSSF Scorecard
+    when: 评估新依赖的维护状况，以及检查自己仓库的分支保护、Action 固定、令牌权限等
+    license: Apache-2.0
+    sources: [S23]
+  - category: 安全公告与依赖安全更新
+    pick: Dependabot（托管在 GitHub 的仓库）
+    alternatives:
+      - { name: Renovate, when: 自托管代码平台、多平台或需要更细的分组与冷却期配置时；许可证 AGPL-3.0，作为独立工具运行 }
+    license: Renovate AGPL-3.0
+    sources: [S41, S43]
+antipatterns:
+  - { bad: 有 .gitignore 就认为密钥不会泄漏, instead: 提交前和 PR 跑密钥扫描，真实密钥一律由密钥服务注入 }
+  - { bad: 发现密钥泄漏后先改写 Git 历史, instead: 先撤销或轮换，确认旧密钥失效，再清理副本 }
+  - { bad: "CI 里用 `uses: 某扫描器@v1` 这样的可变标签", instead: 按完整提交 SHA 固定，由更新机器人提 PR 升级 }
+  - { bad: 外部 PR 在带仓库和云凭证的 runner 上执行 npm install 和测试, instead: 不可信 PR 在无密钥、令牌只读的环境里跑 }
+  - { bad: 把扫描「零发现」当作安全, instead: 同时看漏洞库日期、覆盖盲区，并配合负例测试和人工评审 }
+  - { bad: 用 URL 正则白名单防 SSRF, instead: 解析后校验 IP、每跳重查、走受限出口 }
+  - { bad: 把安全规则写进系统提示词就算防住了注入, instead: 权限、审批和出口控制放在模型之外强制 }
+  - { bad: 有了 SBOM 和签名就认为上游可信, instead: SBOM 是清单、签名只证明发布者，依赖仍需审查和漏洞扫描 }
+  - { bad: 所有高 CVSS 一律阻断、中危一律放行, instead: 结合是否被利用、可达性和暴露面分流 }
+  - { bad: 安全例外写进忽略文件后再没人管, instead: 每条例外有负责人和到期日，过期自动失败 }
+  - { bad: 自己实现加密、签名、SBOM 生成或 CVE 匹配, instead: 用 SOPS、Cosign、Syft、OSV-Scanner 等现成工具 }
+sources:
+  - { id: S01, title: OWASP Application Security Verification Standard (ASVS), url: "https://asvs.owasp.org/", publisher: OWASP, date: 2025-05-30, kind: standard, checked: 2026-11-13 }
+  - { id: S02, title: "OWASP Top 10:2025", url: "https://top10.owasp.org/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: OWASP GenAI Security Project unveils 2026 Top 10 for LLM Applications, url: "https://genai.owasp.org/announcement/owasp-genai-security-project-unveils-2026-top-10-for-llm-applications-new-agent-control-standard-and-sponsors-as-community-tops-30000-members/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: "OWASP LLM01: Prompt Injection", url: "https://genai.owasp.org/llmrisk/llm01-prompt-injection/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S05, title: OWASP Top 10 for Agentic Applications, url: "https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/", publisher: OWASP, date: 2025-12-09, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: "NIST SP 800-218 Secure Software Development Framework (SSDF) v1.1", url: "https://csrc.nist.gov/pubs/sp/800/218/final", publisher: NIST, date: 2022-02-03, kind: standard, checked: 2026-11-13 }
+  - { id: S07, title: OWASP Secrets Management Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S08, title: Betterleaks, url: "https://github.com/betterleaks/betterleaks", publisher: Betterleaks, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: Gitleaks README, url: "https://github.com/gitleaks/gitleaks", publisher: Gitleaks, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: TruffleHog, url: "https://github.com/trufflesecurity/trufflehog", publisher: Truffle Security, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: OSV-Scanner, url: "https://github.com/google/osv-scanner", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: Trivy, url: "https://github.com/aquasecurity/trivy", publisher: Aqua Security, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "GHSA-69fq-xp46-6x23 / CVE-2026-33634: Trivy 发布链被入侵", url: "https://osv.dev/vulnerability/GHSA-69fq-xp46-6x23", publisher: OSV, date: 2026-03-23, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: Grype, url: "https://github.com/anchore/grype", publisher: Anchore, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: Syft, url: "https://github.com/anchore/syft", publisher: Anchore, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: CycloneDX Specification, url: "https://github.com/CycloneDX/specification", publisher: OWASP CycloneDX, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S17, title: SPDX Specification, url: "https://spdx.github.io/spdx-spec/", publisher: Linux Foundation, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S18, title: Cosign, url: "https://github.com/sigstore/cosign", publisher: Sigstore, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: SLSA Specification v1.2, url: "https://slsa.dev/spec/v1.2/", publisher: OpenSSF, date: 2025-11, kind: standard, checked: 2026-11-14 }
+  - { id: S20, title: Semgrep, url: "https://github.com/semgrep/semgrep", publisher: Semgrep, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: Semgrep Rules License, url: "https://semgrep.dev/legal/rules-license", publisher: Semgrep, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: Opengrep, url: "https://github.com/opengrep/opengrep", publisher: Opengrep, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S23, title: OpenSSF Scorecard, url: "https://github.com/ossf/scorecard", publisher: OpenSSF, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: SOPS, url: "https://github.com/getsops/sops", publisher: CNCF, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S25, title: OpenBao, url: "https://github.com/openbao/openbao", publisher: OpenBao, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: HashiCorp Vault LICENSE, url: "https://github.com/hashicorp/vault/blob/main/LICENSE", publisher: HashiCorp, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: Infisical LICENSE, url: "https://github.com/Infisical/infisical/blob/main/LICENSE", publisher: Infisical, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: ZAP, url: "https://www.zaproxy.org/", publisher: ZAP, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: OWASP Threat Dragon, url: "https://github.com/OWASP/threat-dragon", publisher: OWASP, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: OWASP Cross Site Scripting Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S31, title: OWASP SSRF Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S32, title: OWASP File Upload Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S33, title: OWASP CSRF Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S34, title: "CISA: Widespread Supply Chain Compromise Impacting npm Ecosystem", url: "https://content.govdelivery.com/accounts/USDHSCISA/bulletins/3f408db", publisher: CISA, date: 2025-09-23, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: Security hardening for GitHub Actions, url: "https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: Adding a security policy to your repository, url: "https://docs.github.com/en/code-security/getting-started/adding-a-security-policy-to-your-repository", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: "CISA BOD 22-01: Reducing the Significant Risk of Known Exploited Vulnerabilities", url: "https://www.cisa.gov/news-events/directives/bod-22-01-reducing-significant-risk-known-exploited-vulnerabilities", publisher: CISA, date: 2021-11-03, kind: official, checked: 2026-11-14 }
+  - { id: S38, title: OWASP Unvalidated Redirects and Forwards Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S39, title: OWASP Deserialization Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Deserialization_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S40, title: OWASP Content Security Policy Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S41, title: Renovate, url: "https://github.com/renovatebot/renovate", publisher: Mend, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S42, title: OWASP Threat Modeling Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Threat_Modeling_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S43, title: GitHub Dependabot, url: "https://docs.github.com/en/code-security/dependabot", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S44, title: OWASP SQL Injection Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+open_questions:
+  - CISA BOD 22-01 已被撤销、由 BOD 26-04 取代（官方页面注明），新指令对 KEV 漏洞的修复期限尚未核实；SEC-007 的「两周」参考值待按新指令更新
+  - Betterleaks 2026 年 3 月才发布，第三方资料对其最新版本和许可证说法不一（官方仓库 2026-11-14 显示 MIT）；与 Gitleaks 配置的兼容程度、误报率待实测
+  - Trivy 2026 年 3 月事件（CVE-2026-33634）的处置是否彻底、后续发布是否全部带签名，待跟进官方公告；Aqua 官方博客本次未能直接打开
+  - OWASP LLM Top 10 2026 各条编号与名称（除第一位提示注入、第二位敏感信息泄露、第三位过度代理外）未逐条核对原文；正式发布日期有 2026-08-04 与随 Agent Control Standard 在 9 月发布两种说法
+  - OWASP Top 10:2025 的正式定稿日期未核实
+  - OWASP AISVS 1.0、OWASP Agent Control Standard 的内容和发布日期未核实，暂未写进规则
+  - CodeQL 用于私有商业仓库的授权条件未核实（报告给出的依据链接可疑）
+  - NIST SSDF 是否已有新修订版未核实
+  - SLSA v1.2 的确切发布日（官方博客只到 2025 年 11 月）未核实
+  - Semgrep 社区版与付费版的功能分界（如跨文件分析）未核实
+  - 待补调研：WAF 选型（自托管与云 WAF、ModSecurity/Coraza 与 OWASP CRS）
+  - 待补调研：模糊测试、策略引擎（OPA/Conftest/Kyverno）、IaC 专用扫描（Checkov、KICS）、AI 红队工具（garak、PyRIT、promptfoo 等）的选型
+  - 待补调研：OSV-Scanner、Trivy、Grype 在断网环境下的误报率与漏洞库同步方式对比
+  - 待补调研：漏洞修复时限的更多外部参照（如 PCI DSS 对严重补丁的要求）
