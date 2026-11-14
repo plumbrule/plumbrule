@@ -6,3 +6,8 @@ dist/
 .env*
 .DS_Store
 cli/skill/
+
+# 个人调研文件，不提交
+prompt_research_*.md
+*调研报告.md
+*调研结果.md
