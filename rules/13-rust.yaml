@@ -1,0 +1,612 @@
+id: "13"
+slug: rust
+title: Rust
+summary: Rust 项目的工具链与 MSRV、Cargo.lock、rustfmt 与 Clippy、unsafe、错误处理、异步（Tokio）、tracing 日志、测试工具、cargo-deny、数据库访问与迁移工具、FFI 和 HTTP 框架怎么选、怎么写。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - rustup 工具链与 rust-toolchain.toml、edition、MSRV 策略
+    - Cargo.lock 入库规则、依赖来源与 feature
+    - rustfmt、Clippy 与 Cargo.toml 的 [lints] 表
+    - unsafe 的使用、注释与审查
+    - 错误处理（thiserror / anyhow）与 panic
+    - Tokio 异步：阻塞、锁、channel、任务生命周期、超时
+    - tracing 日志与追踪的接入方式
+    - 测试工具：cargo-nextest、doctest、proptest、loom、Miri、cargo-fuzz、insta
+    - cargo-deny / cargo-audit 的用法
+    - 数据库访问库与迁移工具（SQLx 等）
+    - FFI 与跨语言绑定
+    - HTTP 服务框架与客户端选型
+  excludes:
+    - { what: 格式化与 lint 的通用原则（单一格式器、例外要有理由和到期日）、日志字段与错误传播的跨语言约定, see: "02" }
+    - { what: 测试分层、覆盖率口径、快照与验收证据的通用要求, see: "04" }
+    - { what: 接口风格、OpenAPI、错误响应格式、幂等语义（同一个键对应不同请求返回 422）、重试语义, see: "16" }
+    - { what: 迁移原则、事务与隔离级别、outbox, see: "17" }
+    - { what: 任务队列、消息队列、缓存、限流选型, see: "18" }
+    - { what: 认证、JWT 校验、授权模型, see: "19" }
+    - { what: 不可信文件（压缩包、PDF、图片）的解析与限制, see: "20" }
+    - { what: 安全总体：供应链、SCA 工具总体选型、SBOM、密钥扫描、加密库选型, see: "25" }
+    - { what: 容器镜像、停机编排、OTel 与可观测性, see: "26" }
+    - { what: 开源许可证口径与许可扫描, see: "27" }
+    - { what: Tauri 等桌面框架, see: "31" }
+overview: |
+  1. **工具链写进仓库。** 应用用 `rust-toolchain.toml` 固定到补丁版，带上 rustfmt、clippy；库用 `Cargo.toml` 的 `rust-version` 声明最低支持版本（MSRV），CI 在这个版本上实际跑一次。
+  2. **新项目用 2024 edition。** 它从 Rust 1.85 起稳定；改 edition 单独一个 PR，用 `cargo fix --edition` 迁移。
+  3. **Cargo.lock 默认入库。** 官方已不再区分库和应用，`cargo new` 默认跟踪锁文件；应用的 CI 一律 `--locked`。库的锁文件不影响下游，所以库还要另跑一次用最新依赖的构建。
+  4. **格式和 lint 交给工具。** `cargo fmt --check`、`cargo clippy -- -D warnings` 进 CI；lint 级别统一写在 `Cargo.toml` 的 `[lints]` / `[workspace.lints]` 表里。
+  5. **unsafe 是例外，要留证据。** 不需要的 crate 直接 `forbid`；每个 unsafe 块写 `// SAFETY:`，由 Clippy 检查；改动 unsafe 要指定的人审，有条件就用 Miri 跑测试。
+  6. **错误分两层。** 库暴露具体的错误类型（thiserror）；应用入口用 anyhow 加上下文。可预期的失败不用 `unwrap` / `expect` / `panic`。
+  7. **异步不阻塞。** 默认 Tokio；阻塞和重 CPU 工作交给 `spawn_blocking` 或 Rayon；同步锁不跨 `.await`；channel 有界；外部调用都有超时；`tokio::spawn` 不是持久任务。
+  8. **日志用 tracing。** 库只发事件和 span，不初始化 subscriber；应用入口初始化一次。
+  9. **测试别漏 doctest。** nextest 不跑文档测试，要另跑 `cargo test --doc`；并发原语用 loom，解析器用 proptest / cargo-fuzz，快照差异由人审。
+  10. **cargo-deny 进 CI。** 一次检查漏洞（RustSec 公告库）、许可证、重复和禁用的 crate、依赖来源；`deny.toml` 入库。
+  11. **默认组合：** Tokio、Axum + tower-http、reqwest、SQLx（迁移用 `sqlx migrate`）、serde、thiserror / anyhow、tracing、clap。async-std 已停止维护，serde_yaml 已弃用，都不要用。
+rules:
+  # ── 工具链、edition、MSRV ──
+  - id: RS-001
+    title: 应用、服务和命令行工具在仓库根目录提交 rust-toolchain.toml，把工具链固定到具体补丁版，并列出需要的组件和 target
+    level: hard
+    check: auto
+    how: CI 检查文件存在，`channel` 是完整的补丁版本号而不是 `stable`；构建日志打印 `rustc -V` 与之对照
+    applies: [lang:rust, kind:service, kind:cli]
+    why: 只写 `stable` 时，不同机器、不同日期会用不同编译器构建，Clippy 新增的告警也会让 CI 无故变红。
+    detail: |
+      - 组件至少写 `rustfmt`、`clippy`；交叉编译用到的 target 也写进 `targets`。
+      - 升级工具链单独一个 PR，同时处理新出现的 Clippy 告警。
+      - 断网环境把对应版本的工具链和 target 预置在构建镜像或内部镜像里。
+    sources: [S02]
+  - id: RS-002
+    title: 供别人引用的库在 Cargo.toml 写 rust-version 声明 MSRV，CI 用这个版本实际构建并测试
+    level: hard
+    check: auto
+    how: CI 增加一个用 MSRV 工具链的任务（或 `cargo hack check --rust-version`），失败即阻断
+    applies: [lang:rust, kind:library]
+    why: 不在 MSRV 上实测，声明的最低版本很快就会失真；用户升级依赖后才发现编不过。
+    detail: |
+      - 库不要用 rust-toolchain.toml 把下游开发者绑死在某个补丁版；仓库里放它只为本仓库的开发和 CI，不能代替 `rust-version`。
+      - 2024 edition 默认的依赖解析器（resolver 3）会参考 `rust-version` 选依赖版本，声明准确才有用。
+    sources: [S04, S05, S28]
+  - id: RS-003
+    title: 抬高库的 MSRV 要写进变更日志并说明原因，不随每次 stable 发布自动抬高
+    level: soft
+    check: semi
+    how: CI 发现 `rust-version` 变化时，要求 PR 描述和变更日志里有对应说明
+    applies: [lang:rust, kind:library]
+    why: 抬高 MSRV 会让还在用旧编译器的下游无法升级；是否算破坏性变化由项目的版本政策决定，但必须明说。
+    detail: MSRV 政策（例如「最近 N 个 stable」）写进 README；N 由项目自定，没有官方统一要求。
+    sources: [S05]
+  - id: RS-004
+    title: 新项目用当前最新的 edition；迁移 edition 单独一个 PR，用 cargo fix --edition 完成
+    level: soft
+    check: auto
+    how: CI 检查各 crate 的 `edition` 字段；迁移 PR 里只含 edition 相关改动
+    applies: [lang:rust]
+    why: 新 edition 收紧了一批容易出错的写法（如 unsafe 相关规则），和功能改动混在一起评审不清。
+    detail: 当前最新为 2024 edition，需要 Rust 1.85 及以后。Agent 和贡献者不要顺手改 edition、`rust-version` 或 target。
+    sources: [S01, S06]
+  # ── 依赖与锁文件 ──
+  - id: RS-005
+    title: 应用、服务和命令行工具必须提交 Cargo.lock，CI 和发布构建一律加 --locked
+    level: hard
+    check: auto
+    how: CI 检查 Cargo.lock 已入库；所有 `cargo build`、`cargo test`、`cargo clippy` 命令带 `--locked`，锁文件需要变化时失败
+    applies: [lang:rust, kind:service, kind:cli]
+    why: 没有锁文件，每次解析都可能拿到不同的补丁版，构建结果不可复现，也无法用 git bisect 定位问题。
+    detail: '`cargo install` 默认忽略锁文件；发布可安装的命令行工具时，文档里写 `cargo install --locked`。'
+    sources: [S03, S07]
+  - id: RS-006
+    title: 库也默认提交 Cargo.lock；另在 CI 里跑一次用最新兼容依赖的构建和测试
+    level: soft
+    check: auto
+    how: 定时任务或 PR 任务先 `cargo update` 再构建测试，失败时提醒
+    applies: [lang:rust, kind:library]
+    why: 官方已改为 `cargo new` 默认跟踪锁文件，但库的锁文件不影响下游用户，只锁住自己的 CI 会掩盖下游会遇到的问题。
+    sources: [S03, S07]
+  - id: RS-007
+    title: 依赖版本不写 `*`；git 依赖必须固定 rev；依赖只能来自批准的 registry 或镜像
+    level: hard
+    check: auto
+    how: cargo-deny 的 `[sources]` 只允许批准的 registry 和 git 地址，`[bans]` 设 `wildcards = "deny"`
+    applies: [lang:rust]
+    why: '`*` 和分支 HEAD 会在不知情时引入任意新代码，是供应链攻击的入口；crates.io 本身也拒绝发布通配版本依赖。'
+    sources: [S07, S14]
+    see: ["25"]
+  - id: RS-008
+    title: 新增依赖在 PR 里写明用途；只开需要的 feature，关掉不用的默认 feature
+    level: soft
+    check: semi
+    how: 评审时看 Cargo.toml 和 Cargo.lock 的变化；用 `cargo tree -e features` 查看实际启用的 feature，用 cargo-machete 等工具找未使用的依赖
+    applies: [lang:rust]
+    why: 全量 feature（如 `tokio` 的 `full`）会拖慢编译、扩大攻击面和许可证范围。
+    see: ["02"]
+  # ── 格式化与 lint ──
+  - id: RS-009
+    title: 代码必须通过 rustfmt；CI 跑 `cargo fmt --all -- --check`
+    level: hard
+    check: auto
+    how: CI 运行该命令，非零退出即失败；如有 rustfmt.toml 则入库
+    applies: [lang:rust]
+    why: 格式交给工具，评审只看逻辑。
+    sources: [S08]
+    see: ["02"]
+  - id: RS-010
+    title: CI 用固定的工具链跑 `cargo clippy --all-targets --locked -- -D warnings`，不得有告警
+    level: hard
+    check: auto
+    how: CI 运行该命令；feature 互斥时按 feature 组合分别跑，不硬加 `--all-features`
+    applies: [lang:rust]
+    why: Clippy 默认启用的正确性、可疑写法检查能直接拦下真实缺陷；工具链不固定时新告警会无故打断 CI。
+    detail: 不得在 crate 根写 `#![allow(warnings)]` 或整组关闭 `clippy::correctness`。
+    sources: [S09]
+  - id: RS-011
+    title: lint 级别统一写在 Cargo.toml 的 [lints] 表；多 crate 工作区写在 [workspace.lints]，各成员用 `lints.workspace = true` 继承
+    level: soft
+    check: auto
+    how: CI 检查各成员 crate 都继承了工作区 lint 配置；评审时看是否有散落在 crate 根的 `#![deny(...)]`
+    applies: [lang:rust]
+    why: lint 配置集中一处才看得清、改得动；散在各文件里容易漏改、互相矛盾。
+    detail: |
+      示例：
+      ```toml
+      [workspace.lints.rust]
+      unsafe_code = "forbid"          # 需要 unsafe 的 crate 单独放宽
+      [workspace.lints.clippy]
+      undocumented_unsafe_blocks = "deny"
+      unwrap_used = "warn"
+      expect_used = "warn"
+      dbg_macro = "warn"
+      ```
+      配合 CI 的 `-D warnings`，`warn` 实际也会阻断；希望只提示不阻断的 lint 不要放进来。
+    sources: [S04, S09]
+  - id: RS-012
+    title: pedantic、nursery 等可选 lint 组逐条评估后启用，不整组设为 deny
+    level: soft
+    check: semi
+    how: 评审时看 lint 配置里是否有整组 `pedantic = "deny"` 之类的写法
+    applies: [lang:rust]
+    why: 这些组里有风格争议和误报较多的 lint，整组开启会引来大量 `allow`，反而淹没真问题。
+    sources: [S09]
+  - id: RS-013
+    title: 局部关闭 lint 时写明理由；优先用 `#[expect(lint, reason = "...")]`，不用不带理由的 `#[allow]`
+    level: soft
+    check: auto
+    how: 启用 Clippy 的 `allow_attributes_without_reason`（和 `allow_attributes`）检查
+    applies: [lang:rust]
+    why: '`expect` 在告警消失后会反过来提醒删除，理由写在代码里，评审和日后清理都有依据。'
+    sources: [S09]
+    see: ["02"]
+  # ── unsafe ──
+  - id: RS-014
+    title: 不需要 unsafe 的 crate 设 `unsafe_code = "forbid"`；需要的 unsafe 集中在少数模块，并对外提供安全的接口
+    level: soft
+    check: auto
+    how: '[lints] 表里配置 `unsafe_code`；CI 用 grep 或 cargo-geiger 统计 unsafe 出现的位置'
+    applies: [lang:rust]
+    why: 内存安全只在 unsafe 之外由编译器保证；unsafe 越分散，越难审查。
+    sources: [S10]
+  - id: RS-015
+    title: 每个 unsafe 块前写 `// SAFETY:` 注释，说明满足了哪些前提；每个 `unsafe fn` 写 `# Safety` 文档说明调用方要满足的前提
+    level: hard
+    check: auto
+    how: Clippy 的 `undocumented_unsafe_blocks` 和 `missing_safety_doc` 设为 deny；`unsafe_op_in_unsafe_fn` 不得放宽
+    applies: [lang:rust]
+    why: unsafe 代码的正确性靠人推理，前提不写下来就无法评审，也无法在改动后重新检查。
+    detail: 2024 edition 起 `unsafe_op_in_unsafe_fn` 默认告警：`unsafe fn` 体内的不安全操作也要写在显式的 `unsafe {}` 块里。
+    sources: [S06, S09, S10]
+  - id: RS-016
+    title: 新增或修改 unsafe 代码必须由指定的评审人批准，作者不能自己批准
+    level: hard
+    check: semi
+    how: CI 检测改动里出现 `unsafe` 时打标签并要求指定评审人；集中放 unsafe 的模块写进 CODEOWNERS
+    applies: [lang:rust]
+    why: 编译器不再替 unsafe 代码把关，独立的人工审查是唯一的防线。
+    see: ["03", "23"]
+  - id: RS-017
+    title: 含 unsafe 或原始指针操作的代码，用 Miri 跑相关单元测试
+    level: soft
+    check: auto
+    how: CI 用 nightly 工具链跑 `cargo miri test`（可只跑相关模块）
+    applies: [lang:rust]
+    why: Miri 能在测试执行时发现越界、悬垂指针、数据竞争等未定义行为，普通测试发现不了。
+    detail: Miri 不支持 FFI 调用和部分系统调用，这类测试要跳过；跳过的部分改用 sanitizer。
+    sources: [S11]
+  # ── 错误处理 ──
+  - id: RS-018
+    title: 库对外暴露具体的错误类型（如用 thiserror 定义的枚举），不在公开接口里返回 anyhow::Error 或 Box<dyn Error>
+    level: soft
+    check: semi
+    how: 评审公开接口；用 cargo-semver-checks 发现错误类型的破坏性变化
+    applies: [lang:rust, kind:library]
+    why: 调用方要按错误种类分支处理，模糊的错误类型只能当字符串看；错误类型也是公开接口的一部分。
+    detail: |
+      - 错误枚举实现 `std::error::Error`，用 `#[source]` 保留底层原因；对外可能新增变体的枚举加 `#[non_exhaustive]`。
+      - 应用入口、命令行 main、任务装配层用 anyhow 加 `.context(...)` 补上下文。
+      - 同一个模块不要混用 thiserror 和 snafu 两套写法。
+      - 错误怎么映射成接口响应见 16；对外不暴露 SQL、路径、栈等内部信息。
+    sources: [S12, S13, S29]
+    see: ["02", "16"]
+  - id: RS-019
+    title: 生产代码里可预期的失败（输入、网络、文件、数据库）不得用 unwrap、expect、panic 处理
+    level: hard
+    check: semi
+    how: Clippy 开启 `unwrap_used`、`expect_used`、`panic`；clippy.toml 设 `allow-unwrap-in-tests = true`、`allow-expect-in-tests = true` 豁免测试；剩下的用 `#[expect(..., reason = "...")]` 逐处说明
+    applies: [lang:rust]
+    why: 可预期的失败变成 panic，轻则一个请求失败、重则整个进程退出，且没有可用的错误信息。
+    detail: 真正不可能失败的地方（如编译期常量的正则）可以 `expect`，在消息里写清为什么不会失败。
+    sources: [S09]
+  - id: RS-020
+    title: 公开函数会 panic 或返回错误时，在文档里写 `# Panics` 和 `# Errors` 小节
+    level: soft
+    check: auto
+    how: Clippy 开启 `missing_panics_doc`、`missing_errors_doc`
+    applies: [lang:rust, kind:library]
+    why: 调用方要知道什么情况下会失败、会不会崩溃，才能正确处理。
+    sources: [S09, S29]
+  # ── 异步与并发 ──
+  - id: RS-021
+    title: async 代码里不直接做阻塞调用或长时间 CPU 计算；阻塞操作用 spawn_blocking，CPU 密集任务交给 Rayon 或专用线程池
+    level: hard
+    check: semi
+    how: 评审时检查 async 函数里的 `std::fs`、`std::thread::sleep`、同步数据库驱动、重计算循环；压测时用 tokio-console 或 tracing 的耗时数据找长时间不让出的任务
+    applies: [lang:rust]
+    why: Tokio 的工作线程数量有限，一个阻塞任务会拖住同一线程上的所有请求，表现为尾延迟飙升。
+    sources: [S15]
+  - id: RS-022
+    title: 不在 `.await` 期间持有 std 或 parking_lot 的同步锁
+    level: hard
+    check: auto
+    how: Clippy 的 `await_holding_lock`、`await_holding_refcell_ref` 设为 deny
+    applies: [lang:rust]
+    why: 持锁让出后，同线程的其他任务再取同一把锁会死锁；锁也会被持有到不可预期的时长。
+    detail: 先缩小临界区、在 await 前释放；确实要跨 await 持有时用 `tokio::sync::Mutex`。
+    sources: [S09, S15]
+  - id: RS-023
+    title: 任务之间的 channel 默认用有界的；用无界 channel 要写明为什么不会无限增长
+    level: soft
+    check: semi
+    how: 用 grep 找 `unbounded_channel`，评审时确认理由
+    applies: [lang:rust]
+    why: 无界 channel 没有背压，生产者快于消费者时内存会一直涨到进程被杀。
+    sources: [S15]
+  - id: RS-024
+    title: spawn 出的任务要有归属：用 JoinSet 或 TaskTracker 管理，停机时发出取消并限时等待结束；需要保证完成的工作不能只靠 tokio::spawn
+    level: soft
+    check: manual
+    how: 评审时检查每个 `tokio::spawn` 的 JoinHandle 是否被持有或交给任务组；停机路径有取消信号（如 CancellationToken）
+    applies: [lang:rust, kind:service]
+    why: 没人管的任务出错无人知道，停机时被直接丢掉；进程一退出，内存里的任务就没了。
+    detail: 需要可靠执行、可重试的工作放进持久化的任务队列或 outbox（见 17、18）。在 `tokio::select!` 里使用的 future 要确认是否取消安全。
+    sources: [S15]
+    see: ["17", "18", "26"]
+  - id: RS-025
+    title: 每个外部调用都设超时；HTTP 客户端在进程内复用同一个 Client，并配置连接和整体超时
+    level: hard
+    check: semi
+    how: 评审时检查 `reqwest::Client::builder()` 是否设置了 `timeout`、`connect_timeout`；其他调用用 `tokio::time::timeout` 包裹；故障注入测试验证
+    applies: [lang:rust]
+    why: reqwest 默认没有整体超时，对端不响应时请求会一直挂着，占住连接和任务；每次新建 Client 会丢掉连接池。
+    sources: [S16]
+  - id: RS-026
+    title: 非幂等的写请求不做自动重试，除非接口支持幂等键；重试和幂等语义按 16 执行
+    level: soft
+    check: semi
+    how: 评审重试中间件（如 reqwest-retry、backon）的作用范围，确认只覆盖幂等方法或带幂等键的请求
+    applies: [lang:rust]
+    why: 超时不等于失败，盲目重试写请求会造成重复扣款、重复下单。
+    detail: 同一个幂等键对应不同请求内容时，服务端返回 422（见 16）。
+    see: ["16"]
+  # ── 日志与追踪 ──
+  - id: RS-027
+    title: 日志和追踪用 tracing；库只发事件和 span，不初始化 subscriber，只有应用入口初始化一次
+    level: soft
+    check: auto
+    how: CI 用 grep 检查库 crate 里没有 `tracing_subscriber` 的初始化调用、没有 `println!` / `eprintln!` 打日志（Clippy 的 `print_stdout`、`print_stderr`）
+    applies: [lang:rust]
+    why: 库自己初始化会和应用的配置冲突；打印到标准输出的内容没有级别和结构，收集不了。
+    detail: |
+      - 服务用 `tracing-subscriber` 输出 JSON；需要跨服务追踪时接 OpenTelemetry（见 26）。
+      - 日志字段、级别和「同一错误只在边界记一次」的约定见 02。
+      - 用 `#[instrument(skip(...))]` 时跳过大参数和敏感参数。
+    sources: [S17]
+    see: ["02", "26"]
+  - id: RS-028
+    title: 密钥和敏感字段不进日志、span 和 Debug 输出；持有密钥的类型用 secrecy 之类的包装或手写脱敏的 Debug
+    level: hard
+    check: semi
+    how: 评审时检查含密钥字段的结构体是否 `#[derive(Debug)]`；日志测试断言输出里没有测试密钥；密钥扫描见 25
+    applies: [lang:rust]
+    why: '`#[derive(Debug)]` 会把所有字段原样打印，一次 `?` 格式化或 instrument 就能把密钥写进日志。'
+    see: ["02", "25"]
+  # ── 测试 ──
+  - id: RS-029
+    title: 用 cargo-nextest 跑测试时，必须另外跑 `cargo test --doc`
+    level: hard
+    check: auto
+    how: CI 同时有 `cargo nextest run --locked` 和 `cargo test --doc --locked` 两步
+    applies: [lang:rust]
+    why: nextest 不执行文档测试，只跑它会让文档里的示例悄悄失效。
+    sources: [S18]
+  - id: RS-030
+    title: 解析器、编解码器和处理外部输入的函数，用 proptest 做属性测试；面向不可信输入的，再用 cargo-fuzz 做模糊测试
+    level: soft
+    check: semi
+    how: 评审时看这些模块是否有属性测试；模糊测试放定时任务跑，发现的崩溃样本加入回归测试
+    applies: [lang:rust]
+    why: 内存安全不等于不会 panic、不会死循环、不会耗尽内存；随机输入最容易找出这些问题。
+    sources: [S19, S20]
+    see: ["04", "20"]
+  - id: RS-031
+    title: 自己写的并发原语（原子操作、无锁结构、自定义同步）用 loom 测试
+    level: soft
+    check: semi
+    how: 评审时检查使用 `std::sync::atomic` 实现同步逻辑的模块是否有 loom 测试
+    applies: [lang:rust]
+    why: 并发缺陷依赖线程交错顺序，普通测试几乎跑不出来；loom 会穷举交错。
+    sources: [S21]
+  - id: RS-032
+    title: insta 快照的差异由人审查后接受；CI 里不自动写入或接受快照
+    level: hard
+    check: auto
+    how: CI 设 `INSTA_UPDATE=no`（或使用 `cargo insta test --check`），快照不一致即失败；快照文件改动在 PR 里单独评审
+    applies: [lang:rust]
+    why: 自动接受快照等于把回归直接写成新的预期。
+    sources: [S22]
+    see: ["04", "23"]
+  # ── 供应链 ──
+  - id: RS-033
+    title: CI 运行 cargo-deny 检查漏洞、许可证、重复与禁用的 crate、依赖来源；deny.toml 入库
+    level: hard
+    check: auto
+    how: CI 运行 `cargo deny check`，非零退出即失败；忽略某条公告时在 deny.toml 写明理由和复查日期
+    applies: [lang:rust]
+    why: 一次检查同时覆盖 RustSec 漏洞公告、许可证白名单、重复依赖和来源，比分别配多个工具省事。
+    detail: |
+      - 漏洞数据来自 RustSec 公告库；断网环境用内部镜像，并在结果里记录公告库的更新时间——离线扫描只对那份快照有效。
+      - 已在用 cargo-audit 的可以保留；两者用同一份公告库，不必叠加。
+      - 许可证白名单的口径见 27，SCA 与 SBOM 的总体要求见 25。
+    sources: [S14, S23]
+    see: ["25", "27"]
+  - id: RS-034
+    title: 断网或私有化交付的构建，用 cargo vendor 或内部 registry 镜像准备依赖，并用 `cargo build --release --locked --offline` 验证
+    level: hard
+    check: auto
+    how: CI 里有一个禁网的构建任务执行该命令
+    applies: [lang:rust, kind:onprem]
+    why: 能联网编译不代表能离线编译；vendor 只包含 crate 源码，不含工具链、原生库、protoc 等，必须在真正断网的环境里验证。
+    detail: 能离线构建不等于能离线运行，运行层的验收见 26。
+    sources: [S24]
+    see: ["26"]
+  # ── 数据库访问与迁移工具 ──
+  - id: RS-035
+    title: SQL 一律用参数绑定（`query!` 宏或 `.bind()`），不用 format! 拼接用户输入
+    level: hard
+    check: semi
+    how: 用 grep 或 Semgrep 找传给 `sqlx::query` / `query_as` 的 `format!` 结果；动态拼接的标识符只能来自白名单
+    applies: [lang:rust]
+    why: 拼接 SQL 是注入漏洞的直接来源。
+    sources: [S25]
+    see: ["17", "25"]
+  - id: RS-036
+    title: 用 SQLx 编译期检查宏且 CI 不连数据库时，提交 .sqlx 目录，CI 跑 `cargo sqlx prepare --check`
+    level: hard
+    check: auto
+    how: CI 运行 `cargo sqlx prepare --check`；构建时不设 `DATABASE_URL`，确认走的是离线缓存
+    applies: [lang:rust]
+    why: 查询或表结构改了而缓存没更新，离线构建会按旧结构校验，问题拖到运行时才暴露。
+    detail: 设了 `DATABASE_URL` 时宏仍会尝试连接数据库，CI 的离线构建步骤要确保它没被设置。
+    sources: [S25]
+  - id: RS-037
+    title: 迁移文件入库，用所选库配套的迁移工具（SQLx 用 `sqlx migrate`）执行；迁移原则按 17
+    level: soft
+    check: semi
+    how: 评审迁移文件；确认生产环境由发布流程单独执行迁移，而不是每个实例启动时各跑一遍
+    applies: [lang:rust, kind:service]
+    why: 一个项目只用一套迁移工具，迁移记录才可查；多副本启动时同时跑迁移会互相冲突。
+    see: ["17"]
+  # ── FFI 与跨语言 ──
+  - id: RS-038
+    title: FFI 边界上不让 panic 跨越 `extern "C"`；跨边界的类型用 `#[repr(C)]`，不直接传 String、Vec 或普通 Rust 结构体
+    level: hard
+    check: semi
+    how: '`improper_ctypes`、`improper_ctypes_definitions` 不得放宽；评审时检查每个导出函数是否用 `catch_unwind` 兜住 panic 或明确使用 `extern "C-unwind"`'
+    applies: [lang:rust]
+    why: Rust 的内存布局不保证稳定；panic 跨 C 边界会直接中止进程或造成未定义行为。
+    detail: |
+      - 谁分配谁释放：Rust 分配的内存提供配套的释放函数，不让对方用 free 释放。
+      - 写清字符串编码、整数宽度、空指针约定和 ABI 版本。
+      - 2024 edition 起 `extern` 块要写成 `unsafe extern`，`no_mangle` 等属性要写成 `#[unsafe(no_mangle)]`。
+      - 跨语言测试覆盖每个导出函数；条件允许时 CI 用 AddressSanitizer 跑。
+    sources: [S06, S10]
+  - id: RS-039
+    title: 给 Python、Node、C++ 写绑定用成熟的绑定库（PyO3、napi-rs、cxx），不手写一层 C ABI
+    level: soft
+    check: manual
+    how: 评审新增的跨语言模块用的绑定方式
+    applies: [lang:rust]
+    why: 手写 C ABI 要自己处理所有权、异常转换、GIL 和事件循环，绑定库已经处理好了这些边界。
+    detail: 升级绑定库时，按目标语言版本和平台矩阵重新测试，不能只看 Rust 侧能否编译。
+    sources: [S26, S27, S30]
+  # ── 公共库 ──
+  - id: RS-040
+    title: 发布库之前用 cargo-semver-checks 检查公开接口的破坏性变化，版本号按 SemVer 递增
+    level: soft
+    check: auto
+    how: 发布流程里运行 `cargo semver-checks`，发现破坏性变化而版本号未相应递增时失败
+    applies: [lang:rust, kind:library]
+    why: 公开接口的破坏性变化人眼容易漏，下游会在 `cargo update` 后突然编不过。
+    sources: [S31]
+choices:
+  - category: 工具链管理
+    pick: rustup + 仓库根目录的 rust-toolchain.toml
+    alternatives:
+      - { name: Nix 或 mise, when: 一台机器上要统一管理多种语言和系统依赖 }
+    avoid:
+      - { name: 系统包管理器自带的 rustc, why: 版本滞后、不好切换，组件和 target 不全 }
+    sources: [S02]
+  - category: lint 配置
+    pick: Cargo.toml 的 [lints] / [workspace.lints] 表 + clippy.toml（只放 lint 的参数）
+    avoid:
+      - { name: '在每个 crate 根写一串 `#![deny(...)]`', why: 分散、难统一修改 }
+    sources: [S04, S09]
+  - category: 异步运行时
+    pick: Tokio
+    when: 网络服务和需要异步 I/O 的程序；纯 CPU 计算或简单的同步命令行工具不引入异步运行时
+    alternatives:
+      - { name: smol, when: 想要更小的运行时，且用到的库不依赖 Tokio }
+    avoid:
+      - { name: async-std, why: 官方已宣布停止维护，建议迁移到 smol }
+    license: Tokio 为 MIT
+    sources: [S15, S32, S33]
+  - category: HTTP 服务框架
+    pick: Axum + tower / tower-http 中间件
+    alternatives:
+      - { name: Actix Web, when: 团队已熟悉，或已有 Actix 代码 }
+      - { name: tonic, when: 提供 gRPC 接口 }
+    avoid:
+      - { name: 普通业务服务直接基于 hyper 自己搭, why: 路由、提取器、中间件都要自己写，Axum 已在 hyper 之上做好 }
+    license: Axum 为 MIT
+    notes: 请求体大小、超时、CORS 等用 tower-http 的中间件统一配置；接口契约与 OpenAPI 见 16。
+    sources: [S34, S35]
+  - category: HTTP 客户端
+    pick: reqwest（进程内复用一个 Client，设好超时）
+    alternatives:
+      - { name: hyper 客户端, when: 需要极细的连接控制，或写底层库 }
+    avoid:
+      - { name: 每个请求新建 Client, why: 丢掉连接池，增加握手开销 }
+    sources: [S16]
+  - category: 数据库访问
+    pick: SQLx（以 SQL 为准，编译期检查查询）
+    alternatives:
+      - { name: SeaORM, when: 增删改查多、需要动态组装查询 }
+      - { name: Diesel, when: 想要强类型的查询构建器，接受同步接口或配合 diesel-async }
+      - { name: tokio-postgres + deadpool-postgres, when: 只用 PostgreSQL、需要驱动层的细粒度控制 }
+    avoid:
+      - { name: 同一项目混用多套数据库访问库, why: 事务、连接池、错误处理各成一套 }
+    license: SQLx 为 MIT OR Apache-2.0
+    sources: [S25]
+  - category: 数据库迁移工具
+    pick: sqlx-cli（`sqlx migrate`），迁移文件放 migrations/ 入库
+    when: 使用 SQLx 的项目；迁移原则见 17
+    alternatives:
+      - { name: sea-orm-migration, when: 使用 SeaORM }
+      - { name: diesel_migrations, when: 使用 Diesel }
+    avoid:
+      - { name: 在应用启动代码里手写 DDL, why: 多副本同时执行、没有记录、无法审查 }
+    sources: [S25]
+  - category: 错误处理
+    pick: 库用 thiserror 定义错误枚举；应用入口用 anyhow
+    alternatives:
+      - { name: snafu, when: 需要大量带结构化上下文的错误；同一模块不和 thiserror 混用 }
+    avoid:
+      - { name: 到处 unwrap，或把所有错误转成 String, why: 失败时没有类型可分支、没有上下文可查 }
+    sources: [S12, S13]
+  - category: 日志与追踪
+    pick: tracing + tracing-subscriber（服务输出 JSON）
+    alternatives:
+      - { name: log + env_logger, when: 很小的命令行工具，不需要 span }
+      - { name: tracing-opentelemetry, when: 需要跨服务追踪（见 26） }
+    avoid:
+      - { name: println! / eprintln! 当日志, why: 没有级别、没有结构，无法收集 }
+    sources: [S17]
+  - category: 测试执行
+    pick: cargo-nextest + `cargo test --doc`
+    alternatives:
+      - { name: 只用 cargo test, when: 测试很少、不在乎速度和隔离 }
+    sources: [S18]
+  - category: 进阶测试
+    pick: proptest（属性测试）、cargo-fuzz（模糊测试）、loom（并发交错）、Miri（未定义行为）、insta（快照）
+    notes: cargo-fuzz 和 Miri 需要 nightly 工具链，放单独的 CI 任务或定时任务跑，不影响主工具链固定。
+    sources: [S11, S19, S20, S21, S22]
+  - category: 依赖审计
+    pick: cargo-deny
+    alternatives:
+      - { name: cargo-audit, when: 只需要漏洞检查，或要用它的 `cargo audit fix` 等功能 }
+    license: cargo-deny 为 MIT OR Apache-2.0；作为 CI 里独立运行的工具使用
+    sources: [S14, S23]
+  - category: 序列化
+    pick: serde + serde_json
+    avoid:
+      - { name: serde_yaml, why: 作者已标为弃用、不再维护；YAML 的替代库见待确认 }
+    sources: [S36]
+  - category: 命令行参数
+    pick: clap（derive 写法）
+    alternatives:
+      - { name: argh、lexopt, when: 很在意二进制体积和编译时间 }
+    sources: [S37]
+  - category: 跨语言绑定
+    pick: C/C++ 用 cxx 或最薄的 `extern "C"`；Python 用 PyO3 + maturin；Node 用 napi-rs；浏览器用 wasm-bindgen
+    avoid:
+      - { name: 把 Rust 结构体的内存布局直接当 C ABI, why: 布局不稳定，析构和 panic 都无法跨边界 }
+    sources: [S26, S27, S30]
+  - category: 交叉编译
+    pick: 优先用目标架构的原生构建机；不行再用 rustup target + cross
+    alternatives:
+      - { name: cargo-zigbuild, when: 需要指定 glibc 版本，或不想依赖容器 }
+    avoid:
+      - { name: 以为加 `--target` 就能解决原生依赖, why: OpenSSL 等 C 库要对应 target 的工具链和 sysroot }
+    notes: cross 依赖 Docker 或 Podman；某个 target 能编译不代表能在目标机上运行，要在目标机做冒烟测试。target 的支持等级以官方平台支持页为准。
+    sources: [S38]
+antipatterns:
+  - { bad: 'rust-toolchain.toml 里只写 `channel = "stable"`', instead: 固定到补丁版，升级单独一个 PR }
+  - { bad: '依赖写 `git = "...", branch = "main"`', instead: 发布到 registry 的版本，或固定 `rev`，并在 cargo-deny 里登记来源 }
+  - { bad: "遇到借用检查报错就加 `'static`、`Box::leak` 或到处 `Arc<Mutex<T>>`", instead: 重新划分所有权；共享不可变状态用 `Arc<T>`，可变状态优先用消息传递 }
+  - { bad: 在 Tokio handler 里直接读大文件、调同步驱动或做重计算, instead: '`spawn_blocking`、Rayon，或拆成独立服务' }
+  - { bad: 用 `tokio::spawn` 发邮件、写审计当作可靠的后台任务, instead: 写进持久化任务队列或 outbox（见 17、18） }
+  - { bad: 只跑 `cargo nextest run`，文档示例早就编不过了, instead: 另跑 `cargo test --doc` }
+  - { bad: '`cargo insta accept` 一键接受所有快照差异', instead: 逐个查看差异，在 PR 里说明为什么预期变了 }
+  - { bad: '为了让 CI 变绿在 crate 根写 `#![allow(warnings)]`', instead: '逐处修复，确需例外时写 `#[expect(..., reason = "...")]`' }
+  - { bad: 新项目照抄旧教程引入 async-std 或 serde_yaml, instead: 用 Tokio；YAML 选仍在维护的库 }
+  - { bad: 因为「Rust 快」就把所有新服务都用 Rust 写, instead: 先确认瓶颈在计算而不是数据库或网络，再拿基准数据和团队能力做决定 }
+sources:
+  - { id: S01, title: "Announcing Rust 1.85.0 and Rust 2024", url: "https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/", publisher: Rust Project, date: 2025-02-20, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "rustup: Overrides (rust-toolchain.toml)", url: "https://rust-lang.github.io/rustup/overrides.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "Cargo FAQ: Why have Cargo.lock in version control?", url: "https://doc.rust-lang.org/cargo/faq.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Cargo Reference: The Manifest Format (lints, rust-version)", url: "https://doc.rust-lang.org/cargo/reference/manifest.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "Cargo Reference: Rust version", url: "https://doc.rust-lang.org/cargo/reference/rust-version.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "Rust Edition Guide: Rust 2024", url: "https://doc.rust-lang.org/edition-guide/rust-2024/index.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Change in Guidance on Committing Lockfiles", url: "https://blog.rust-lang.org/2023/08/29/committing-lockfiles.html", publisher: Rust Project, date: 2023-08-29, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: rustfmt, url: "https://github.com/rust-lang/rustfmt", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: Clippy Documentation, url: "https://doc.rust-lang.org/clippy/", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: The Rustonomicon, url: "https://doc.rust-lang.org/nomicon/", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: Miri, url: "https://github.com/rust-lang/miri", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: thiserror, url: "https://docs.rs/thiserror", publisher: docs.rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: anyhow, url: "https://docs.rs/anyhow", publisher: docs.rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: cargo-deny, url: "https://github.com/EmbarkStudios/cargo-deny", publisher: Embark Studios, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: Tokio documentation, url: "https://docs.rs/tokio/latest/tokio/", publisher: Tokio, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: reqwest, url: "https://docs.rs/reqwest", publisher: docs.rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: tracing, url: "https://docs.rs/tracing", publisher: Tokio, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: cargo-nextest, url: "https://nexte.st/", publisher: nextest, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: proptest, url: "https://github.com/proptest-rs/proptest", publisher: proptest, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: cargo-fuzz, url: "https://github.com/rust-fuzz/cargo-fuzz", publisher: rust-fuzz, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: loom, url: "https://github.com/tokio-rs/loom", publisher: Tokio, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: insta, url: "https://insta.rs/", publisher: insta, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: RustSec Advisory Database, url: "https://rustsec.org/", publisher: Rust Secure Code WG, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Cargo: cargo vendor", url: "https://doc.rust-lang.org/cargo/commands/cargo-vendor.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "SQLx: query! macro (offline mode)", url: "https://docs.rs/sqlx/latest/sqlx/macro.query.html", publisher: SQLx, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: PyO3 user guide, url: "https://pyo3.rs/", publisher: PyO3, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: napi-rs, url: "https://napi.rs/", publisher: napi-rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: cargo-hack, url: "https://github.com/taiki-e/cargo-hack", publisher: taiki-e, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S29, title: Rust API Guidelines, url: "https://rust-lang.github.io/api-guidelines/", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "CXX: safe interop between Rust and C++", url: "https://cxx.rs/", publisher: cxx, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: cargo-semver-checks, url: "https://github.com/obi1kenobi/cargo-semver-checks", publisher: cargo-semver-checks, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S32, title: "async-std has been discontinued", url: "https://docs.rs/async-std/latest/async_std/", publisher: async-std, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: "Tokio: LICENSE", url: "https://github.com/tokio-rs/tokio/blob/master/LICENSE", publisher: Tokio, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: axum, url: "https://github.com/tokio-rs/axum", publisher: Tokio, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: tower-http, url: "https://docs.rs/tower-http", publisher: Tower, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S36, title: serde_yaml (deprecated), url: "https://docs.rs/serde_yaml/latest/serde_yaml/", publisher: docs.rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S37, title: clap, url: "https://docs.rs/clap", publisher: clap, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S38, title: "rustc: Platform Support", url: "https://doc.rust-lang.org/rustc/platform-support.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - 原调研称 Rust 1.100（2026-11-12）稳定了依赖发布冷却（`global-min-publish-age`，且不约束 `cargo install`）、`[lints.cargo]` 未使用依赖诊断、never type；联网检索只找到间接提及，未找到正式发布说明，暂不写成规则，核实后再考虑加入「建议开启冷却」
+  - Cargo.lock：Cargo FAQ 已核实「cargo new 默认跟踪锁文件，是否入库按项目需要」；2023-08-29 官方博客的指导变化未在本次重新打开核对
+  - YAML 序列化：serde_yaml 已弃用，原调研推荐的 yaml_serde 包名和维护状态少见，需打开 crates.io 核对后再定替代库
+  - Rocket 是否已停止发布稳定版（原调研称最近稳定版停在 2024-05）未核实，暂不列入不推荐
+  - 许可证未对照官方 LICENSE 核实：thiserror、anyhow、tracing、reqwest、clap、cargo-nextest、Actix Web、SeaORM、Diesel、proptest、loom、insta、PyO3、napi-rs、cxx
+  - cargo-deny 的维护活跃度（最近发布日期）本次未能从仓库首页确认；README 未写明公告库名称，以 RustSec 为准的说法沿用既有知识
+  - 原调研的 rmcp、zip、utoipa 版本线与公开版本差距较大，若后续引用需核对
+  - 待补调研：「什么时候值得用 Rust」「编码 Agent 写 Rust 的可靠程度」缺少数据，原调研只有工程判断
+  - 待补调研：deny.toml、clippy.toml（含测试豁免）、CI feature 矩阵的可运行示例，示例须实际跑通后再发布
+  - 待补调研：openGauss 等国产数据库与 SQLx / tokio-postgres 的兼容性；国产 CPU 与操作系统 target 的实测（与 17、26 一起定）
+  - Rust 与 Tauri 桌面后端在 FFI、原生依赖打包上的分工需与 31 约定
