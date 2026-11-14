@@ -1,0 +1,605 @@
+id: "15"
+slug: scripts-config
+title: 脚本与配置语言
+summary: Shell 和 PowerShell 脚本、任务入口（just、Task、Make）、YAML/JSON/TOML 配置、.env 文件、Dockerfile、SQL 文件和 CI 配置文件怎么写、用什么工具检查。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Bash、POSIX sh、PowerShell 脚本的写法与检查（ShellCheck、shfmt、PSScriptAnalyzer）
+    - 什么时候不该再用 Shell、改用正式语言
+    - 任务入口（just、Task、Make、npm scripts）与统一任务名
+    - YAML、JSON、TOML 配置的写法、格式化与 Schema 校验
+    - .env 文件与环境变量命名约定
+    - Dockerfile 的写法与 hadolint
+    - SQL 文件的方言声明与格式化（SQLFluff）
+    - CI 配置文件（GitHub Actions、GitLab CI）的静态检查
+    - Cron 表达式的方言与时区
+  excludes:
+    - { what: 格式化与 lint 的通用原则、.editorconfig 的基本要求, see: "02" }
+    - { what: 配置的集中加载、类型校验、覆盖顺序, see: "02" }
+    - { what: CI 门禁顺序、CI 逻辑放仓库脚本、本地钩子工具, see: "03" }
+    - { what: 密钥管理与扫描、命令注入和 SQL 注入的通用防护、正则表达式拒绝服务（ReDoS）、供应链与镜像扫描、SBOM, see: "25" }
+    - { what: 容器镜像的构建发布、基础镜像策略、部署, see: "26" }
+    - { what: 表结构设计、命名、迁移、参数绑定之外的查询语义, see: "17" }
+    - { what: 定时任务的调度系统选型、重复触发与幂等, see: "18" }
+    - { what: GPL 工具随产品分发时的许可审查, see: "27" }
+overview: |
+  1. **Shell 只做胶水。** 调用现成命令、串几步操作用 Shell；出现复杂分支、并发、要解析 JSON/YAML 时，改用项目的主语言。
+  2. **先写对解释器。** 可执行脚本写 shebang（首行的 `#!` 解释器声明）；`sh` 脚本里不用 Bash 专有语法；PowerShell 单独一套工具。
+  3. **每个脚本都过 ShellCheck 和 shfmt。** 包括没有 `.sh` 后缀的可执行文件。`set -euo pipefail` 是护栏，不是异常处理。
+  4. **一个任务入口，一套任务名。** 统一的是 `dev/test/lint/format/check/build/clean` 这些名字，不统一工具；`check` 不改文件，失败不能被吞掉。
+  5. **配置先能解析，再过 Schema。** 按消费者选格式；机器读的配置配一份入库的 JSON Schema；拒绝重复键；YAML 里会被自动转类型的值加引号。
+  6. **.env 不入库。** 入库的是只含变量名和非敏感默认值的 `.env.example`；生产环境由部署平台注入。
+  7. **Dockerfile 要过 lint 也要真构建。** 固定基础镜像、非 root 运行、构建凭据走 secret 挂载、有 `.dockerignore`。
+  8. **SQL 文件声明方言。** SQLFluff 通过只说明格式和部分语法没问题，不代表能在目标数据库上执行。
+  9. **CI 配置是带权限的程序。** 跑 actionlint 和 zizmor；第三方 Action 锁到完整提交编号；权限写最小；不可信文本不拼进 `run:`。
+rules:
+  # ── Shell 与 PowerShell ──
+  - id: CFG-001
+    title: 可执行脚本首行必须写 shebang，且与实际语法一致；用 `#!/bin/sh` 的脚本里不写 Bash 专有语法
+    level: hard
+    check: auto
+    how: ShellCheck 对缺少 shebang 报 SC2148；按 shebang 判定方言后，对 sh 脚本里的 Bash 语法报 SC3xxx 系列警告
+    applies: [lang:shell]
+    why: 解释器写错时脚本在开发机上能跑、换到只有 dash 或 BusyBox 的环境里就出错，而且错误往往不在第一行就暴露。
+    detail: |
+      - Bash 脚本用 `#!/usr/bin/env bash`；需要在最小镜像或系统初始化阶段运行的才写 POSIX sh。
+      - 要跨平台运行的脚本，写明支持哪些环境并逐个实测：macOS 自带的 Bash 版本很旧、BusyBox ash、Git Bash、WSL 都不能当成同一个环境。
+      - zsh 适合交互使用，不作为自动化脚本的默认解释器。
+    sources: [S01, S03]
+  - id: CFG-002
+    title: 仓库里所有 Shell 脚本（包括没有 `.sh` 后缀的可执行文件）在 CI 上跑 ShellCheck，有告警即失败
+    level: hard
+    check: auto
+    how: 用 `shfmt -f .` 按后缀和 shebang 列出全部 Shell 文件，交给 `shellcheck` 检查
+    applies: [lang:shell]
+    why: 只查 `scripts/*.sh` 会漏掉 `bin/` 下没有后缀的脚本，而那往往是最常被执行的。
+    detail: 个别告警确实不适用时，在该行上方用 `# shellcheck disable=SCxxxx` 指明规则并写理由（见 COD-039），不整文件关闭。
+    sources: [S03, S05]
+    see: [COD-039]
+  - id: CFG-003
+    title: Shell 脚本用 shfmt 统一格式，CI 用 `shfmt -d` 检查；缩进等选项写在 `.editorconfig` 里
+    level: hard
+    check: auto
+    how: CI 运行 `shfmt -d .`，有差异即失败
+    applies: [lang:shell]
+    why: 格式交给工具，评审才不用讨论空格；shfmt 会读取 `.editorconfig`，编辑器和 CI 用同一份设置。
+    detail: 格式化只管排版，不能替代 ShellCheck 的正确性检查。
+    sources: [S05, S42]
+    see: [COD-038]
+  - id: CFG-004
+    title: 变量展开和命令替换一律加双引号；传多个参数用 `"$@"` 或数组，不拼成一个字符串
+    level: hard
+    check: auto
+    how: ShellCheck 的 SC2086（未加引号的展开）、SC2068（未加引号的 `$@`）等规则
+    applies: [lang:shell]
+    why: 不加引号时，含空格、换行或通配符的值会被拆开或展开，轻则出错，重则删错文件。
+    detail: 只有确实要做通配符展开时才不加引号，并写注释说明。遍历文件不用 `for f in $(ls)`，用 `find -print0` 配合 `while read -r -d ''`，或直接用通配符。
+    sources: [S04]
+  - id: CFG-005
+    title: Bash 脚本开头默认写 `set -euo pipefail`；预期可能失败的命令用 `if` 或显式检查退出码，不把 `-e` 当异常处理
+    level: soft
+    check: semi
+    how: 脚本扫描检查开头的 set 行；评审预期失败的命令是否显式处理
+    applies: [lang:shell]
+    why: '`-e` 在 `if` 条件、`&&`/`||` 链、部分函数调用里不会触发退出，指望它兜底会漏掉错误。'
+    detail: |
+      - `pipefail` 让管道里任何一段失败都算失败；但 `grep -q` 这类提前退出的命令会让上游收到 SIGPIPE，此时要显式处理，而不是全局关掉。
+      - 目标 sh 不一定支持 `pipefail`，写 POSIX sh 时要在目标 shell 上实测，或逐步检查返回码。
+    sources: [S02]
+  - id: CFG-006
+    title: 不可信输入不得进入 `eval`、`bash -c`、`sh -c` 或拼接出的命令字符串；命令和参数分开传
+    level: hard
+    check: semi
+    how: 扫描 `eval`、`-c` 调用作为候选，评审其参数来源
+    applies: [lang:shell]
+    why: 拼进命令字符串的外部内容会被当成代码执行，是命令注入的直接入口。
+    sources: [S06]
+    see: ["25"]
+  - id: CFG-007
+    title: 临时文件和目录用 `mktemp` 创建并用 `trap` 清理；`rm -rf` 用到的路径变量先确认非空且在受控目录内
+    level: hard
+    check: semi
+    how: ShellCheck 的 SC2115 提示用 `${var:?}` 防止变量为空时删到根目录；评审删除路径的来源
+    applies: [lang:shell]
+    why: 固定文件名的临时文件会被并发运行互相覆盖；变量为空时 `rm -rf "$dir/"*` 会删到意想不到的地方。
+    detail: |
+      ```bash
+      tmp_dir=$(mktemp -d)
+      trap 'rm -rf -- "$tmp_dir"' EXIT
+      ```
+    sources: [S01, S03]
+  - id: CFG-008
+    title: 错误信息写到标准错误，失败返回非零退出码；会改外部状态的脚本提供预演（dry-run）或先预检再执行
+    level: soft
+    check: manual
+    how: 评审时看错误输出位置、退出码和危险操作前的预检
+    applies: [lang:shell]
+    why: 调用方和 CI 靠退出码判断成败，靠标准输出拿结果；两者混在一起就没法组合使用。
+    sources: [S01]
+  - id: CFG-009
+    title: 脚本出现复杂分支、状态机、并发、重试或要读写 JSON/YAML 时，改用项目主语言写
+    level: soft
+    check: manual
+    how: 评审新增或大幅修改的脚本时判断是否还适合用 Shell
+    applies: [lang:shell]
+    why: Shell 没有可靠的数据结构和错误处理，逻辑一复杂就难测、难改。
+    detail: 只是读取或小改 JSON/YAML 时用 `jq`、`yq` 这类解析工具，不用 `sed`、`grep` 按文本改结构化数据。
+    ref_value: Google Shell 风格指南建议超过约 100 行或控制流复杂时重新考虑；这是重新评估的信号，不是硬上限。
+    sources: [S01]
+  - id: CFG-010
+    title: PowerShell 脚本在 CI 上跑 PSScriptAnalyzer，不用 ShellCheck 查 `.ps1`
+    level: hard
+    check: auto
+    how: CI 运行 `Invoke-ScriptAnalyzer -Recurse`，有错误级问题即失败
+    applies: [lang:shell]
+    why: PowerShell 是另一门语言，ShellCheck 读不懂它。
+    detail: 脚本开头写 `Set-StrictMode -Version Latest` 和 `$ErrorActionPreference = 'Stop'`，让未定义变量和非终止错误也能暴露出来。测试用 Pester。
+    sources: [S07, S41]
+  # ── 任务入口 ──
+  - id: CFG-011
+    title: 仓库根目录提供一个任务入口（justfile、Taskfile.yml、Makefile 或 package.json 脚本），能列出全部任务及说明
+    level: soft
+    check: semi
+    how: 检查根目录存在任务入口，`just --list`、`task --list` 等能列出任务；贡献说明里写明所需工具
+    applies: [all]
+    why: 新人和 Agent 不用翻文档猜命令；CI 也能调用同一套命令（见 03）。
+    sources: [S08, S09]
+    see: ["03"]
+  - id: CFG-012
+    title: 适用的任务统一用这些名字：help、dev、test、lint、format、check、build、clean；不适用的不建空壳
+    level: soft
+    check: semi
+    how: 脚本列出入口里的任务名，与约定名单比对
+    applies: [all]
+    why: 名字统一后，在任何仓库里都知道该敲什么，Agent 也不用逐个仓库摸索。
+    detail: |
+      - `lint`：静态检查，不改文件。
+      - `format`：格式化，会改文件。
+      - `check`：lint、类型检查、快速测试等只读检查的合集，CI 和本地都跑它。
+      - `clean`：只删本项目生成的文件。
+  - id: CFG-013
+    title: '`check`、`lint`、`test` 任务不得修改工作区里的文件'
+    level: hard
+    check: auto
+    how: CI 跑完 `check` 后执行 `git status --porcelain`，输出非空即失败
+    applies: [all]
+    why: 检查任务顺手改了文件，CI 就会在改过的代码上判通过，而提交上去的却是没改的版本。
+  - id: CFG-014
+    title: 任务失败必须返回非零退出码；不用 `|| true`、Make 的 `-` 前缀、Task 的 `ignore_error`、CI 的 `allow_failure` 吞掉检查失败
+    level: hard
+    check: semi
+    how: 扫描任务文件和 CI 配置里的这些写法作为候选，逐个确认有理由且不是必过检查
+    applies: [all]
+    why: 失败被吞掉后流水线一片绿，问题要到线上才暴露。
+    detail: 确实允许失败的步骤（如可选的上报），在旁边写注释说明理由。
+    see: ["03"]
+  - id: CFG-015
+    title: 部署、发布、重置数据这类有外部副作用的任务单独命名（如 `deploy-staging`、`reset-db`），不挂在默认任务、check 或 test 之下
+    level: soft
+    check: manual
+    how: 评审任务入口时检查默认任务和检查类任务的依赖链
+    applies: [all]
+    why: 敲一个看起来无害的命令却连带部署或清库，是最难追溯的事故之一。
+  - id: CFG-016
+    title: Makefile 里不对应文件的目标写进 `.PHONY`；配方用到 Bash 语法时显式设置 `SHELL` 和 `.SHELLFLAGS`
+    level: soft
+    check: semi
+    how: 评审 Makefile；检查非文件目标是否在 `.PHONY` 中
+    applies: [lang:shell]
+    why: 不声明 `.PHONY` 时，仓库里恰好有同名文件或目录，目标就会被跳过；Make 默认用 `/bin/sh`，Bash 语法会在部分系统上失败。
+    detail: 例如 `SHELL := bash` 和 `.SHELLFLAGS := -euo pipefail -c`。配方行必须用 Tab 缩进，在 `.editorconfig` 里给 Makefile 设 `indent_style = tab`。
+    sources: [S10, S42]
+  # ── 配置文件 ──
+  - id: CFG-017
+    title: 按消费者选配置格式：机器之间交换用 JSON，已有生态约定的（CI、容器编排）用 YAML，人工编辑的应用配置可用 TOML；不为统一而强行转换
+    level: soft
+    check: manual
+    how: 评审新增配置文件时确认格式是消费者原生支持的
+    applies: [all]
+    why: 格式由读它的程序决定；强行统一成一种格式，往往要多一层转换，还会丢掉注释或类型。
+    detail: 环境变量只放部署时会变的简单值和密钥引用，不把整段 JSON 塞进一个变量。
+    sources: [S11, S13]
+  - id: CFG-018
+    title: 机器读取、结构固定的配置文件配一份入库的 JSON Schema，CI 用 check-jsonschema 校验；校验时使用本地 Schema，不联网拉取
+    level: hard
+    check: auto
+    how: CI 运行 `check-jsonschema --schemafile schemas/xxx.json <配置文件>`
+    applies: [all]
+    why: 只检查「是合法的 YAML」挡不住拼错的键和错误的类型，这类错误往往到启动或运行时才暴露。
+    detail: |
+      - Schema 用 2020-12 版，写明 `required`、类型、枚举和取值范围；未知字段默认拒绝（`additionalProperties: false`），要扩展时再放开。
+      - 校验分四步：能解析 → 符合 Schema → 业务语义正确（引用存在、取值组合合理）→ 不含明文密钥。
+      - 配置结构有破坏性变化时，Schema 带版本号，并写清迁移办法。
+      - 断网环境要把 Schema 及其引用的元 Schema 放在本地。
+    sources: [S11, S12]
+    see: [COD-022, COD-023]
+  - id: CFG-019
+    title: YAML 和 JSON 配置不得出现重复键
+    level: hard
+    check: auto
+    how: YAML 用 yamllint 的 `key-duplicates` 规则（默认开启）；JSON 用能检出重复键的工具，如 pre-commit-hooks 的 `check-json` 或 Biome 的 `noDuplicateObjectKeys`
+    applies: [all]
+    why: YAML 规范要求键唯一，JSON 规范说重复键的处理结果不可预测；不同解析器有的取前一个、有的取后一个，同一份配置在两个程序里含义不同。
+    sources: [S13, S14, S16]
+  - id: CFG-020
+    title: YAML 里会被自动转换类型的值加引号，如 yes/no/on/off、像版本号的 `1.10`、带前导零的数字、`12:30` 这类时间
+    level: hard
+    check: semi
+    how: yamllint 的 `truthy` 和 `octal-values` 规则调成 error 级别；像版本号的浮点值靠评审和反序列化测试
+    applies: [all]
+    why: 不同 YAML 解析器对这些值的处理不同：`no` 可能变成 false，`1.10` 可能变成 1.1，结果是配置被悄悄改了。
+    detail: "GitHub Actions 的 `on:` 是键不是值，给 `truthy` 规则设 `check-keys: false` 避免误报。"
+    sources: [S13, S16]
+  - id: CFG-021
+    title: YAML 文件在 CI 上跑 yamllint，配置文件入库；与格式器冲突的排版规则关掉，只留格式器管不到的规则
+    level: hard
+    check: auto
+    how: CI 运行 `yamllint -s .`（`-s` 让告警也失败）
+    applies: [all]
+    why: 格式器只管排版，重复键、隐式类型、语法错误要靠 yamllint 发现。
+    detail: 同时用 Prettier 时，yamllint 的缩进、行宽等排版规则交给 Prettier，避免两个工具互相打架。
+    sources: [S15, S16]
+  - id: CFG-022
+    title: JSON 和 YAML 用同一个格式器（默认 Prettier），CI 用检查模式验证
+    level: hard
+    check: auto
+    how: CI 运行 `prettier --check "**/*.{json,yml,yaml}"`
+    applies: [all]
+    why: 一种文件只用一个格式器，不同人、不同编辑器保存后才不会产生无意义的改动。
+    detail: |
+      - TypeScript 项目已用 Biome 格式化 JSON 的，JSON 交给 Biome，Prettier 只管 YAML，不要两个都管 JSON（见 10）。
+      - 带注释的 JSONC 只用于明确支持它的文件（如 `tsconfig.json`、编辑器设置），不把它当标准 JSON 交给其他解析器。
+    sources: [S17]
+    see: [COD-038, "10"]
+  - id: CFG-023
+    title: TOML 文件用一个格式化和检查工具（默认 Tombi），CI 用检查模式验证
+    level: hard
+    check: auto
+    how: CI 运行该工具的检查模式（如 `tombi format --check` 和 `tombi lint`）
+    applies: [all]
+    why: TOML 的点号键、表数组、日期时间类型容易写错，靠肉眼发现不了。
+    detail: 已经在用 Taplo 的项目可以继续用，但它已转为个人维护、发布很少，新项目不再选它。工具通过不代表目标程序的 TOML 解析器行为一致，关键配置要用目标程序实际加载一次。
+    sources: [S18, S19]
+    see: [COD-038]
+  # ── .env 与环境变量 ──
+  - id: CFG-024
+    title: '`.env` 等本地环境文件写进 `.gitignore`，不入库；入库的 `.env.example` 只列变量名、说明和非敏感默认值'
+    level: hard
+    check: auto
+    how: CI 检查版本库里没有除 `.env.example` 以外的 `.env`、`.env.*` 文件，并对仓库跑密钥扫描（工具见 25）
+    applies: [all]
+    why: '`.env` 里通常有真实密码和令牌，一旦提交就进了历史，删文件也删不掉。'
+    detail: 代码新增或删除了环境变量，同一个改动里同步更新 `.env.example`；可以用脚本比对代码读取的变量名和示例文件。
+    sources: [S20]
+    see: ["25"]
+  - id: CFG-025
+    title: 环境变量名只用大写字母、数字和下划线，并带应用或服务前缀，如 `ORDER_SVC_DB_URL`
+    level: soft
+    check: semi
+    how: 脚本检查 `.env.example` 和配置定义里的变量名格式
+    applies: [all]
+    why: POSIX 约定工具使用的环境变量名由大写字母、数字和下划线组成；加前缀避免和系统或其他程序的变量撞名。
+    sources: [S21]
+  - id: CFG-026
+    title: .env 文件只用于本地开发；生产环境由部署平台或密钥服务注入，不把 .env 打进镜像
+    level: soft
+    check: manual
+    how: 评审部署配置和 Dockerfile，确认没有复制 .env
+    applies: [all]
+    why: 配置随部署变化、和代码分开存放；打进镜像的 .env 会随镜像四处分发。
+    detail: |
+      - .env 没有统一的语法标准，各加载库对引号、插值、多行的处理不同，只写简单的 `KEY=value`。
+      - 脚本里不要 `source` 来路不明的 .env：它会被当成 Shell 代码执行。
+    sources: [S20]
+    see: [COD-022, "26"]
+  # ── Dockerfile ──
+  - id: CFG-027
+    title: Dockerfile 在 CI 上跑 hadolint 和 `docker build --check`，并实际构建一次
+    level: hard
+    check: auto
+    how: CI 运行 `hadolint Dockerfile` 和 `docker build --check .`，再执行真实构建
+    applies: [all]
+    why: lint 能发现写法问题，但只有真的构建才能证明它能用；两者缺一不可。
+    detail: |
+      - hadolint 会对 RUN 里的 Shell 片段调用 ShellCheck。
+      - RUN 里用了管道时，先设 `SHELL ["/bin/bash", "-o", "pipefail", "-c"]`（hadolint DL4006），否则管道前段失败会被忽略。
+      - `.hadolint.yaml` 入库，忽略某条规则要写理由。
+    sources: [S24, S25]
+  - id: CFG-028
+    title: 正式发布的镜像，FROM 不用 `latest` 或不带标签的基础镜像；用标签加 digest 固定，由依赖更新机器人提 PR 升级
+    level: hard
+    check: auto
+    how: hadolint 的 DL3006（未带标签）、DL3007（用了 latest）；另用脚本检查 FROM 行是否带 `@sha256:`
+    applies: [all]
+    why: 标签会被重新指向别的内容，不固定就说不清某次构建用的是哪个基础镜像。
+    detail: 固定 digest 不等于构建可复现：包下载、时间戳、编译器、架构都可能让两次构建结果不同。基础镜像怎么选见 26。
+    sources: [S22, S25]
+    see: ["26", "25"]
+  - id: CFG-029
+    title: 最终镜像以非 root 用户运行；确实需要 root 的，写明原因和运行时的限制措施
+    level: hard
+    check: auto
+    how: hadolint 的 DL3002（最后的 USER 是 root）；构建后运行 `id` 确认
+    applies: [all]
+    why: 容器里的进程一旦被攻破，以 root 运行会让攻击者更容易逃逸或破坏宿主机挂载的数据。
+    sources: [S22, S25]
+    see: ["25"]
+  - id: CFG-030
+    title: 构建时需要的凭据用 BuildKit 的 secret 或 ssh 挂载传入，不用 ARG、ENV 或 COPY
+    level: hard
+    check: auto
+    how: '`docker build --check` 的 SecretsUsedInArgOrEnv 检查；对 Dockerfile 跑密钥扫描'
+    applies: [all]
+    why: ARG 和 ENV 的值会留在镜像元数据和构建历史里，拿到镜像就能读出来。
+    sources: [S23, S24]
+    see: ["25"]
+  - id: CFG-031
+    title: 有 Dockerfile 的目录必须有 `.dockerignore`，至少排除 `.git`、`.env*`、密钥文件、依赖和构建缓存目录
+    level: hard
+    check: auto
+    how: CI 检查 `.dockerignore` 存在并包含这些条目
+    applies: [all]
+    why: 没有它时 `COPY . .` 会把 Git 历史和本地密钥一起拷进镜像，还会让构建缓存频繁失效。
+    sources: [S27]
+  - id: CFG-032
+    title: 用多阶段构建，运行阶段只拷贝运行所需的文件；先拷依赖清单和锁文件安装依赖，再拷源码
+    level: soft
+    check: semi
+    how: 评审 Dockerfile 的阶段划分和 COPY 顺序；对比镜像体积
+    applies: [all]
+    why: 编译工具和源码留在运行镜像里既增大体积又扩大攻击面；先装依赖能让源码改动时复用依赖层缓存。
+    detail: 极简的单阶段镜像（如只拷一个静态二进制）可以例外。
+    sources: [S22, S26]
+  - id: CFG-033
+    title: 系统包安装和清理缓存放在同一个 RUN 里；CMD 和 ENTRYPOINT 用 JSON 数组写法
+    level: soft
+    check: auto
+    how: hadolint 的 DL3009（未清 apt 列表）、DL3015（未加 `--no-install-recommends`）；`docker build --check` 的 JSONArgsRecommended
+    applies: [all]
+    why: 分开写时缓存会留在上一层里；Shell 写法的 CMD 让进程收不到停止信号，容器无法优雅退出。
+    detail: 系统包是否锁具体版本（DL3008）看基础镜像的更新策略；锁了要有人定期升级，否则会因旧版本被源删除而构建失败。
+    sources: [S22, S24, S25]
+  # ── SQL 文件 ──
+  - id: CFG-034
+    title: 仓库里的 SQL 文件用 SQLFluff 检查和格式化，`.sqlfluff` 入库并写明目标方言
+    level: hard
+    check: auto
+    how: CI 运行 `sqlfluff lint`；`.sqlfluff` 里必须有 `dialect` 设置
+    applies: [all]
+    why: 不同数据库的 SQL 语法不同，不声明方言就只能按通用语法猜，结果既漏报又误报。
+    detail: |
+      - SQLFluff 通过只说明格式和它能解析的语法没问题；用了方言特有语法的 SQL 要在目标数据库的实际版本上执行测试（见 17）。
+      - 兼容 PostgreSQL 的国产数据库不等于和 PostgreSQL 完全一致，同样要在目标库上实测。
+      - 有模板的 SQL（如 dbt、Jinja）要配置对应的 templater。
+    sources: [S28, S29]
+    see: ["17"]
+  - id: CFG-035
+    title: 业务查询写明要取的列，不用 `SELECT *`；`EXISTS (SELECT 1 ...)` 这类不取列的写法除外
+    level: soft
+    check: auto
+    how: 在 `.sqlfluff` 中启用 AM04（结果列数不确定）
+    applies: [all]
+    why: 表加列或调整列顺序后，`SELECT *` 的结果会悄悄改变，调用方可能因此出错或多取敏感字段。
+    sources: [S29]
+  # ── CI 配置文件 ──
+  - id: CFG-036
+    title: GitHub Actions 的 workflow 文件在 CI 上跑 actionlint 和 zizmor；GitLab CI 配置用官方 CI Lint 校验
+    level: hard
+    check: auto
+    how: CI 运行 `actionlint` 和 `zizmor .github/workflows/`；GitLab 调用项目的 CI Lint 接口
+    applies: [all]
+    why: 通用的 YAML 检查看不懂 CI 语法和表达式；actionlint 查语法和类型，zizmor 查安全问题，两者互补。
+    detail: GitLab 的 `include`、`rules`、变量要在项目上下文里才能完整校验，所以用实例自带的 CI Lint，而不是只跑 yamllint。
+    sources: [S32, S33, S34]
+  - id: CFG-037
+    title: 第三方 Action 和可复用 workflow 锁到完整的提交 SHA（或使用平台提供的 workflow 依赖锁文件），不只写 `@v4`、`@main`
+    level: hard
+    check: auto
+    how: zizmor 的 `unpinned-uses` 检查
+    applies: [all]
+    why: 标签和分支随时可以被改指向；被投毒的 Action 会在你的流水线里用你的权限运行。
+    detail: SHA 后面加注释写明对应的版本号，交给 Renovate 或 Dependabot 升级（见 03）。GitHub 的 workflow 依赖锁文件（`.github/workflows/actions.lock`）是新功能，确认所用方案支持后再用。
+    sources: [S30, S35]
+    see: ["03", "25"]
+  - id: CFG-038
+    title: workflow 显式声明最小的 `permissions`，只给需要更高权限的 job 单独提升
+    level: hard
+    check: auto
+    how: zizmor 的 `excessive-permissions` 检查
+    applies: [all]
+    why: 默认令牌的权限可能很宽；某一步被攻破时，权限越小损失越小。
+    detail: 来自 fork 的 PR 代码不和能读密钥或写权限的 job 混跑。GitLab 的敏感变量设为 protected 和 masked。
+    sources: [S30]
+    see: ["25"]
+  - id: CFG-039
+    title: PR 标题、分支名、提交信息等不可信的事件文本不直接写进 `run:` 脚本，先放进环境变量再引用
+    level: hard
+    check: auto
+    how: zizmor 的 `template-injection` 检查
+    applies: [all]
+    why: '`${{ }}` 表达式会在脚本执行前被原样替换进去，PR 标题里的一段 Shell 代码就会被执行。'
+    detail: |
+      ```yaml
+      - env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE"
+      ```
+    sources: [S31]
+    see: ["25"]
+  # ── Cron 表达式 ──
+  - id: CFG-040
+    title: Cron 表达式旁写明由哪个调度器执行、时区和字段数；改动重要的定时任务时，用目标调度器列出接下来的若干次触发时间核对
+    level: soft
+    check: manual
+    how: 评审时检查注释和触发时间列表
+    applies: [all]
+    why: Linux cron、GitHub Actions、Quartz 的字段数和语法不同；时区不写清、遇到夏令时，任务可能不跑或跑两次。
+    detail: |
+      - GitHub Actions 的 schedule 默认用 UTC，可以加 `timezone` 指定 IANA 时区；最短间隔 5 分钟，高峰时可能延迟。
+      - Linux cron 的「日」和「星期」两个字段都有限制时，满足任一就会触发。
+      - 定时任务的重复触发、漏触发和幂等见 18。
+    sources: [S36, S37]
+    see: ["18"]
+choices:
+  - category: Shell 静态检查
+    pick: ShellCheck
+    alternatives:
+      - { name: bash -n, when: 只想快速查语法错误；不能替代 ShellCheck }
+    avoid:
+      - { name: 只靠人工评审, why: 引号、方言这类问题肉眼很难看全 }
+    license: GPL-3.0（作为独立命令行工具在 CI 里运行；要随产品分发时见 27）
+    notes: 仍在维护，代码仓库持续有提交，但正式发布间隔较长。
+    sources: [S03]
+  - category: Shell 格式化
+    pick: shfmt
+    license: BSD-3-Clause
+    sources: [S05]
+  - category: Shell 脚本测试
+    pick: bats-core
+    when: 脚本有分支逻辑、被多处调用，需要回归测试时
+    license: MIT
+    sources: [S40]
+  - category: PowerShell 检查与测试
+    pick: PSScriptAnalyzer（静态检查）+ Pester（测试）
+    avoid:
+      - { name: 用 ShellCheck 查 .ps1, why: 不是同一门语言 }
+    license: PSScriptAnalyzer 为 MIT，Pester 为 Apache-2.0
+    sources: [S07, S41]
+  - category: 任务入口
+    pick: just
+    when: 多语言仓库，主要是给一组命令起好记的名字
+    alternatives:
+      - { name: Task, when: 需要任务依赖、按输入输出跳过已完成的任务，或希望在 Windows 上不依赖 Bash 时 }
+      - { name: GNU Make, when: C/C++ 项目要按文件增量构建，或已有成熟的 Makefile }
+      - { name: npm scripts, when: 只有一个 Node 包的项目 }
+    avoid:
+      - { name: 一层套一层的包装脚本, why: 出错时找不到真正执行的命令 }
+      - { name: 为几条命令写复杂的 Makefile, why: Tab、变量展开、隐式规则带来额外的坑 }
+    license: just 为 CC0-1.0；Task 为 MIT；GNU Make 为 GPL-3.0 或更高版本
+    sources: [S08, S09, S10]
+  - category: JSON Schema 校验
+    pick: check-jsonschema
+    alternatives:
+      - { name: 应用内的 JSON Schema 校验库, when: 配置在程序启动时校验，各语言的校验库见 10–14 }
+    avoid:
+      - { name: 只检查文件是合法的 JSON 或 YAML, why: 挡不住拼错的键和错误的类型 }
+      - { name: Sourcemeta JSON Schema CLI（集成或分发时）, why: 许可证为 AGPL-3.0，分发或作为服务提供前要按 27 审查；只在 CI 里独立运行时影响较小 }
+    license: check-jsonschema 为 Apache-2.0
+    notes: check-jsonschema 自带 GitHub workflow 等常见文件的 Schema，断网时要把用到的 Schema 放在本地。
+    sources: [S12, S38]
+  - category: YAML 检查
+    pick: yamllint
+    avoid:
+      - { name: 拿 yamllint 当 CI 编排的校验, why: 它不懂 GitHub Actions 或 GitLab CI 的语义，见 CFG-036 }
+    license: GPL-3.0（独立命令行工具）
+    sources: [S15]
+  - category: JSON 与 YAML 格式化
+    pick: Prettier
+    alternatives:
+      - { name: Biome, when: TypeScript 项目已经用 Biome，JSON 交给它，YAML 仍用 Prettier }
+    avoid:
+      - { name: 同一种文件用两个格式器, why: 互相改写 }
+    license: MIT
+    sources: [S17]
+  - category: TOML 格式化与检查
+    pick: Tombi
+    alternatives:
+      - { name: Taplo, when: 存量项目已在用且没遇到问题；两者的配置不兼容，迁移要改配置 }
+    avoid:
+      - { name: 用 YAML 或通用格式器处理 TOML, why: 不懂 TOML 语法 }
+    license: Tombi、Taplo 均为 MIT
+    notes: Taplo 的原作者已于 2025 年表示退出，现由一名维护者按自己的节奏维护，最近一次正式发布在 2025 年 5 月。Tombi 更新活跃，但项目较新、主要靠少数人维护，要定期复查。
+    sources: [S18, S19]
+  - category: Dockerfile 检查
+    pick: hadolint + docker build --check
+    avoid:
+      - { name: 只 lint 不构建, why: 证明不了能构建成功 }
+    license: hadolint 为 GPL-3.0（独立命令行工具）
+    notes: 镜像漏洞扫描和 SBOM 工具见 25。
+    sources: [S24, S25]
+  - category: SQL 检查与格式化
+    pick: SQLFluff
+    alternatives:
+      - { name: pgFormatter, when: 只用 PostgreSQL、只需要格式化，不需要 lint }
+    avoid:
+      - { name: 把 SQLFluff 当成 SQL 注入检查, why: 它只看 SQL 文件本身，注入防护见 25 }
+    license: SQLFluff 为 MIT；pgFormatter 为 PostgreSQL License
+    sources: [S28, S39]
+  - category: GitHub Actions 配置检查
+    pick: actionlint（语法）+ zizmor（安全）
+    alternatives:
+      - { name: GitLab CI Lint, when: 用 GitLab CI 时 }
+    avoid:
+      - { name: 只跑 actionlint, why: 它不查权限和注入这类安全问题 }
+    license: actionlint、zizmor 均为 MIT
+    sources: [S32, S33, S34]
+antipatterns:
+  - { bad: 把 `set -e` 当 try/catch，以为任何失败都会让脚本退出, instead: 预期会失败的命令用 if 显式处理 }
+  - { bad: '`for f in $(ls)` 和不加引号的变量', instead: 加引号；用通配符或 `find -print0` }
+  - { bad: '`curl ... | bash` 安装工具', instead: 下载固定版本并校验哈希，或用包管理器 }
+  - { bad: 用 sed 或正则改 JSON、YAML, instead: 用 jq、yq 或语言里的解析库，改完用 Schema 校验 }
+  - { bad: CI 里另写一套和本地不同的 lint、构建命令, instead: CI 调用仓库的任务入口 }
+  - { bad: '`check` 任务里顺手跑了格式化', instead: check 只读，格式化放在 format }
+  - { bad: Dockerfile 用 ARG 传 API 令牌, instead: 用 BuildKit secret 挂载 }
+  - { bad: '`FROM xxx:latest` 用于正式发布', instead: 标签加 digest 固定，由机器人提 PR 升级 }
+  - { bad: 把 .env 提交进仓库或打进镜像, instead: 只提交 .env.example，运行时由平台注入 }
+  - { bad: 所有配置都用 YAML，也不配 Schema, instead: 按消费者选格式，机器读的配置配 Schema }
+  - { bad: '`run: echo "${{ github.event.pull_request.title }}"`', instead: 先放进 env，再用 `"$PR_TITLE"` 引用 }
+  - { bad: 用在线 cron 网站验证所有调度器的表达式, instead: 用目标调度器自己的解析结果核对 }
+sources:
+  - { id: S01, title: Google Shell Style Guide, url: "https://google.github.io/styleguide/shellguide.html", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: "GNU Bash Reference Manual: The Set Builtin", url: "https://www.gnu.org/software/bash/manual/html_node/The-Set-Builtin.html", publisher: GNU, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: ShellCheck, url: "https://github.com/koalaman/shellcheck", publisher: ShellCheck, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "ShellCheck wiki: SC2086", url: "https://www.shellcheck.net/wiki/SC2086", publisher: ShellCheck, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "mvdan/sh (shfmt)", url: "https://github.com/mvdan/sh", publisher: mvdan, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: OWASP OS Command Injection Defense Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/OS_Command_Injection_Defense_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S07, title: PSScriptAnalyzer overview, url: "https://learn.microsoft.com/en-us/powershell/utility-modules/psscriptanalyzer/overview", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: just, url: "https://github.com/casey/just", publisher: casey, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: Task, url: "https://github.com/go-task/task", publisher: go-task, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: "GNU Make Manual: Phony Targets", url: "https://www.gnu.org/software/make/manual/html_node/Phony-Targets.html", publisher: GNU, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: JSON Schema 2020-12, url: "https://json-schema.org/draft/2020-12", publisher: JSON Schema, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: check-jsonschema, url: "https://github.com/python-jsonschema/check-jsonschema", publisher: python-jsonschema, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: YAML 1.2.2 Specification, url: "https://yaml.org/spec/1.2.2/", publisher: YAML, date: "2021-10-01", kind: standard, checked: 2026-11-13 }
+  - { id: S14, title: "RFC 8259: The JSON Data Interchange Format", url: "https://www.rfc-editor.org/rfc/rfc8259", publisher: IETF, date: "2017-12", kind: standard, checked: 2026-11-14 }
+  - { id: S15, title: yamllint, url: "https://github.com/adrienverge/yamllint", publisher: adrienverge, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "yamllint: Rules", url: "https://yamllint.readthedocs.io/en/stable/rules.html", publisher: yamllint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: Prettier, url: "https://github.com/prettier/prettier", publisher: Prettier, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: Tombi, url: "https://github.com/tombi-toml/tombi", publisher: tombi-toml, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "Taplo: The future of the project (issue #715)", url: "https://github.com/tamasfe/taplo/issues/715", publisher: Taplo, date: "2024-12-20", kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "The Twelve-Factor App: Config", url: "https://12factor.net/config", publisher: Twelve-Factor, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S21, title: "POSIX.1-2024: Environment Variables", url: "https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap08.html", publisher: The Open Group, date: "2024", kind: standard, checked: 2026-11-14 }
+  - { id: S22, title: "Docker: Building best practices", url: "https://docs.docker.com/build/building/best-practices/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Docker: Build secrets", url: "https://docs.docker.com/build/building/secrets/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Docker: Build checks", url: "https://docs.docker.com/reference/build-checks/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: hadolint, url: "https://github.com/hadolint/hadolint", publisher: hadolint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: "Docker: Multi-stage builds", url: "https://docs.docker.com/build/building/multi-stage/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Docker: Build context and .dockerignore", url: "https://docs.docker.com/build/concepts/context/", publisher: Docker, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: SQLFluff, url: "https://github.com/sqlfluff/sqlfluff", publisher: SQLFluff, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: "SQLFluff: Rules reference", url: "https://docs.sqlfluff.com/en/stable/reference/rules.html", publisher: SQLFluff, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: "GitHub Actions: Secure use reference", url: "https://docs.github.com/en/actions/reference/security/secure-use", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: "GitHub Actions: Script injections", url: "https://docs.github.com/en/actions/concepts/security/script-injections", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S32, title: actionlint, url: "https://github.com/rhysd/actionlint", publisher: rhysd, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: zizmor, url: "https://github.com/zizmorcore/zizmor", publisher: zizmor, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: "GitLab: CI Lint API", url: "https://docs.gitlab.com/api/lint/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: "GitHub Actions: Workflow dependency lockfiles", url: "https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: "GitHub Actions: Late March 2026 updates（schedule 支持时区）", url: "https://github.blog/changelog/2026-03-26-github-actions-late-march-2026-updates", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: "crontab(5) — Linux manual page", url: "https://man7.org/linux/man-pages/man5/crontab.5.html", publisher: man7.org, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S38, title: Sourcemeta JSON Schema CLI, url: "https://github.com/sourcemeta/jsonschema", publisher: Sourcemeta, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S39, title: pgFormatter, url: "https://github.com/darold/pgFormatter", publisher: darold, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S40, title: bats-core, url: "https://github.com/bats-core/bats-core", publisher: bats-core, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S41, title: Pester, url: "https://github.com/pester/Pester", publisher: Pester, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S42, title: EditorConfig Specification, url: "https://spec.editorconfig.org/", publisher: EditorConfig, date: null, kind: standard, checked: 2026-11-13 }
+open_questions:
+  - GitHub workflow 依赖锁文件的状态：官方文档写的是公开预览，有第三方报道称 2026-10-28 已正式发布；是否覆盖所有套餐、是否锁住间接依赖，说法不一致
+  - GitHub Actions schedule 的 timezone 字段：已由官方更新日志确认，但更新日志的准确日期（03-19 或 03-26）和夏令时处理细节未从官方文档核实
+  - 目标 sh（dash、BusyBox ash）对 `set -o pipefail` 的支持情况，未逐个核实
+  - Tombi 能否完全替代 Taplo（配置迁移、编辑器支持、长期维护人数），需要跟踪；Biome 是否已改用 Tombi 处理 TOML 只见于第三方 PR 描述
+  - Biome 是否已支持 YAML 格式化（影响 CFG-022 的分工），未核实
+  - Docker 相关文档、PSScriptAnalyzer 文档沿用原调研的查阅结果，本轮未重新核实
+  - 待补调研：工具链版本统一锁定的做法（mise、aqua 等）在脚本与配置工具上的用法，需与 10 的选型对齐
+  - 待补调研：hadolint、yamllint、zizmor、SQLFluff 的推荐最小配置文件，以及每条硬约束对应的具体规则编号
+  - 待补调研：Windows 下运行 just、Task 时用哪个 shell；GitLab CI 复用（extends、!reference、components）的写法
+  - 待补调研：zsh 脚本是否需要单独的检查工具
