@@ -1,0 +1,658 @@
+id: "30"
+slug: ios
+title: iOS
+summary: iOS 原生开发的平台细节：Swift 6 与严格并发、SwiftUI、Xcode 与最低部署版本、Swift Package Manager、格式与 lint、ATS 与 Keychain、隐私清单与权限、后台任务与扩展、测试、签名与分发。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - Swift 语言模式、严格并发、actor 隔离设置
+    - SwiftUI、UIKit 互操作与 Observation
+    - Xcode 版本、App Store 上传要求、最低部署版本策略
+    - Swift Package Manager 与依赖锁定
+    - swift-format 与 SwiftLint
+    - App Transport Security（ATS）、Keychain、数据保护
+    - 隐私清单（Privacy Manifest）、必需原因 API、App 跟踪透明度（ATT）、权限用途文案
+    - 后台任务、后台传输、通知扩展、小组件、扩展的权限配置
+    - XCTest、XCUITest、Swift Testing、快照测试
+    - 签名、TestFlight、App Store、Apple Business 自定义 App、企业分发、欧盟替代分发
+    - 对比度、动态字体、VoiceOver 在 iOS 上的落地接口
+  excludes:
+    - { what: 跨端选型、离线同步架构、推送总体策略、崩溃上报, see: "28" }
+    - { what: 移动端 E2E 工具（Maestro、Detox 等）, see: "28" }
+    - { what: 热更新与商店对热更新的政策, see: "28" }
+    - { what: 推送服务端调用 APNs 的方式, see: "21" }
+    - { what: 对比度、触控尺寸、读屏、国际化的通用要求, see: "09" }
+    - { what: 颜色、字号等视觉令牌, see: "08" }
+    - { what: 测试分层、覆盖率、验收证据的通用口径, see: "04" }
+    - { what: CI 门禁顺序、PR 与评审、发布审批流程, see: "03" }
+    - { what: 格式化与 lint 的通用原则, see: "02" }
+    - { what: OpenAPI 契约与接口设计, see: "16" }
+    - { what: 本地数据库迁移原则, see: "17" }
+    - { what: 登录、令牌轮换与会话, see: "19" }
+    - { what: 密钥扫描、SBOM、供应链与签名来源证明的通用规则, see: "25" }
+    - { what: App 备案、个人信息保护法规、SDK 合规清单、开源许可口径, see: "27" }
+overview: |
+  1. **新代码用 Swift 6 语言模式。** 严格并发检查让数据竞争在编译期报错；每个 target 显式写清默认 actor 隔离，UI 状态放在主 actor。不用 `@unchecked Sendable`、`nonisolated(unsafe)` 压错误。
+  2. **三个版本是三回事。** 构建用的 Xcode 和 SDK 要满足 App Store 当前的上传要求；最低部署版本按目标用户的设备数据决定并写进决策记录；用户实际在用的系统版本另看统计。CI 固定 Xcode 版本，不用 beta 构建发布。
+  3. **界面默认 SwiftUI + Observation。** 富文本编辑、相机、复杂性能场景用 UIKit 互操作。`View.body` 里不做 I/O。
+  4. **先用系统能力。** 网络用 URLSession + async/await + Codable，存储用 Keychain、UserDefaults、SwiftData；离线优先或重 SQL 时用 GRDB。最小 App 可以零第三方运行时依赖。
+  5. **依赖用 SPM，`Package.resolved` 入库。** CI 只按锁文件解析，不偷偷升级。
+  6. **格式和 lint 各管一摊。** swift-format 管格式，SwiftLint 管质量规则，关掉二者重叠的规则。
+  7. **安全默认不放松。** 不全局关闭 ATS；令牌和密钥只进 Keychain；签名私钥、`.p8` 密钥不进仓库。
+  8. **隐私清单按真实使用填写。** App 和每个扩展都要有；用到必需原因 API 必须写明理由；Apple 列名的常用 SDK 要带隐私清单和签名；ATT 只在真正跟踪时申请；支持注册的 App 要能在 App 内删号。
+  9. **后台由系统调度。** BGTaskScheduler 要处理过期和中断，不能当定时器；大文件用后台 URLSession；推送只是提醒。
+  10. **测试：单元测试用 Swift Testing，UI 测试用 XCUITest。** Swift Testing 不提供 UI 测试接口；快照基线变化必须人审。
+  11. **分发只走 Apple 认可的渠道。** 面向公众用 App Store，给外部企业客户用 Apple Business 的自定义 App，Enterprise 计划只给符合资格的组织内部员工用；欧盟的替代分发仍要经过苹果公证。
+rules:
+  # ── 语言与并发 ──
+  - id: IOS-001
+    title: 新 target 使用 Swift 6 语言模式；仍停在 Swift 5 模式的老 target 要有迁移计划和截止日期
+    level: hard
+    check: auto
+    how: 用 `xcodebuild -showBuildSettings` 检查每个 target 的 `SWIFT_VERSION`；例外清单里登记 target、原因和截止日期
+    applies: [platform:ios]
+    why: Swift 6 语言模式把数据竞争从运行时偶发崩溃变成编译错误；长期停在旧模式，迁移债只会越积越多。
+    detail: |
+      - 老项目按模块逐个迁移，先在 Swift 5 模式下打开完整并发检查消掉警告，再切到 Swift 6 模式。
+      - 不要用全仓 `@preconcurrency import` 一次性压掉所有警告来「完成迁移」。
+    sources: [S02]
+  - id: IOS-002
+    title: 每个 target 显式设置默认 actor 隔离和「易用并发」相关的构建设置，不依赖 Xcode 模板的默认值
+    level: soft
+    check: auto
+    how: 把各 target 的 `SWIFT_DEFAULT_ACTOR_ISOLATION`、`SWIFT_APPROACHABLE_CONCURRENCY` 导出成快照，CI 比对变化，变化时要求评审确认
+    applies: [platform:ios]
+    why: 默认隔离设成 MainActor 与否，会改变同一段代码的隔离语义；不同 target 默认值不同时，搬代码就会出现难查的行为变化。
+    detail: |
+      - App 和界面相关的 target 常设为 MainActor 默认隔离；纯逻辑库、网络库保持非隔离（nonisolated），需要时再显式标注。
+    sources: [S02]
+  - id: IOS-003
+    title: 更新界面状态的代码放在主 actor（`@MainActor`）；跨任务共享的可变状态用 actor 或不可变值类型保护
+    level: hard
+    check: semi
+    how: 在 Swift 6 语言模式下编译不报并发错误；评审时检查共享可变状态的保护方式，必要时用 Thread Sanitizer 跑测试
+    applies: [platform:ios]
+    why: UIKit 和 SwiftUI 只能在主线程更新；没有保护的共享可变状态就是数据竞争。
+    sources: [S02]
+  - id: IOS-004
+    title: 不用 `@unchecked Sendable`、`nonisolated(unsafe)` 压制并发错误；确需使用时就地注释理由，并登记到例外清单
+    level: hard
+    check: auto
+    how: SwiftLint 自定义规则或 CI 里的 grep 扫描这些关键字，与例外清单比对，不在清单里就失败
+    applies: [platform:ios]
+    why: 这两个标注是告诉编译器「相信我」，用来消警告时会把真正的数据竞争藏起来。
+    detail: |
+      - 先改成值类型、actor 或明确的隔离边界；只有包装了自带锁的老代码等确有理由的情况才保留。
+  - id: IOS-005
+    title: 生产代码不用 `try!` 和强制解包（`!`）；测试代码和确定不会失败的字面量除外
+    level: soft
+    check: auto
+    how: 在 SwiftLint 打开 `force_try`、`force_unwrapping` 规则，测试 target 单独放宽
+    applies: [platform:ios]
+    why: 一旦遇到意外数据就直接崩溃，而且崩溃点往往离真正的原因很远。
+    sources: [S21]
+  # ── 工具链与版本 ──
+  - id: IOS-006
+    title: 上传到 App Store Connect 的构建使用满足 App Store 当前要求的 Xcode 和 SDK；CI 固定 Xcode 版本，不用 beta 版构建发布包
+    level: hard
+    check: auto
+    how: CI 开头打印并断言 `xcodebuild -version`；发布流水线拒绝 beta 版 Xcode；每次 Apple 更新上传要求时同步更新 CI 镜像
+    applies: [platform:ios]
+    why: 不满足上传要求的构建会被 App Store Connect 拒收；beta 工具链的行为可能和正式版不同。
+    ref_value: 核实于 2026-11-14（Apple「Upcoming Requirements」页面）：自 2026-04-28 起，上传的 App 必须用 Xcode 26 及以后、iOS 26 SDK 及以后构建；自 2026-09-09 起，上传的 iOS/iPadOS App 最低部署版本不得低于 iOS 13。Apple 通常每年春季提高一次 SDK 要求，以官方页面为准。
+    detail: |
+      - 升级 Xcode 或 Swift 时，先在分支上跑完整的编译、测试和快照回归，再更新 CI 里固定的版本。
+    sources: [S01]
+  - id: IOS-007
+    title: 最低部署版本按目标用户的设备数据决定，写进决策记录，并列出因此不能用或要降级的系统 API
+    level: soft
+    check: semi
+    how: CI 比对各 target 的 `IPHONEOS_DEPLOYMENT_TARGET` 与决策记录里的值；评审时确认决策记录有设备数据依据
+    applies: [platform:ios]
+    why: 编译用的 SDK、最低部署版本、用户实际系统版本是三件事。定得太高会丢用户，定得太低则用不上 Observation、SwiftData 等新接口。
+    ref_value: 参考：Observation 和 SwiftData 需要 iOS 17 及以后，最低部署版本低于 iOS 17 时就要保留 ObservableObject、Core Data 等旧方案。公开统计（App Store 使用统计）只代表 App Store 全体设备，企业内部设备要用客户自己的数据。
+    detail: |
+      - 高于最低版本的 API 用 `if #available` / `@available` 保护，并写好降级路径。
+      - 每年新系统发布后复核一次。
+    sources: [S03, S35]
+  # ── 界面与架构 ──
+  - id: IOS-008
+    title: 新界面默认用 SwiftUI；富文本编辑、相机与视频、复杂列表性能等 SwiftUI 不擅长的场景用 UIKit，并通过 `UIViewRepresentable` / `UIViewControllerRepresentable` 互操作
+    level: soft
+    check: manual
+    how: 评审新界面时确认使用 UIKit 的部分写明了原因
+    applies: [platform:ios]
+    why: SwiftUI 是 Apple 主推的界面框架，新特性先到 SwiftUI；但某些场景 UIKit 仍更成熟，硬套 SwiftUI 会写出大量绕路代码。
+  - id: IOS-009
+    title: 最低部署版本 iOS 17 及以后的新代码用 Observation（`@Observable`）管理状态；与 `ObservableObject` 并存时在模块边界隔开，不在同一层混用
+    level: soft
+    check: semi
+    how: 扫描同一模块里同时出现 `@Observable` 与 `ObservableObject` 的情况，提示评审确认
+    applies: [platform:ios]
+    why: Observation 只在读到的属性变化时刷新视图，比 ObservableObject 更精细；两套机制混用时很难判断刷新来自哪里。
+    detail: |
+      - 状态对象由根视图或组合根持有（`@State`），不在 `body` 里反复创建。
+    sources: [S03]
+  - id: IOS-010
+    title: '`View.body` 里不发网络请求、不读写数据库、不创建重量级对象；副作用放到 `.task` 修饰符或模型层'
+    level: soft
+    check: semi
+    how: 评审时检查 `body` 内是否调用了网络、数据库、文件接口；可用 SwiftLint 自定义规则找候选
+    applies: [platform:ios]
+    why: '`body` 会被系统频繁、不可预测地重新计算，里面的副作用会被重复执行，也很难测试。'
+  - id: IOS-011
+    title: 架构从「功能模块 + 观察模型 + Repository + 协议注入」起步；引入 The Composable Architecture（TCA）等状态框架要写决策记录证明必要
+    level: soft
+    check: manual
+    how: 评审新增的架构类依赖时查看对应的决策记录
+    applies: [platform:ios]
+    why: 小中型 App 用系统能力就够；重型架构框架学习和升级成本高，换掉也难。
+    sources: [S31]
+    see: ["01"]
+  # ── 依赖 ──
+  - id: IOS-012
+    title: 依赖用 Swift Package Manager 管理；新项目不引入 CocoaPods 和 Carthage，只有不提供 SPM 的厂商 SDK 才用 XCFramework 接入
+    level: soft
+    check: auto
+    how: CI 检查仓库里没有新增的 `Podfile`、`Cartfile`
+    applies: [platform:ios]
+    why: SPM 内置在 Xcode 和 Swift 工具链里，不需要额外工具；社区新库普遍优先支持 SPM。
+  - id: IOS-013
+    title: App 仓库把 `Package.resolved` 提交入库；CI 只按锁文件解析依赖，不自动升级
+    level: hard
+    check: auto
+    how: CI 检查 `Package.resolved` 存在；构建时加 `-disableAutomaticPackageResolution`（或 `-onlyUsePackageVersionsFromResolvedFile`），锁文件与解析结果不一致就失败
+    applies: [platform:ios]
+    why: 不锁版本，同一个提交在不同时间构建会拿到不同的依赖，问题无法复现。
+    detail: |
+      - 供别人引用的 Swift 包（库）对依赖写版本范围（`from:`、`.upToNextMinor`），不要 `exact:` 写死，否则容易和使用方的其他依赖解析冲突；由使用方的 App 锁定具体版本。
+      - 要求断网构建时，依赖源和二进制工件要有内部镜像，见 28。
+    see: ["25", "28"]
+  - id: IOS-014
+    title: 新增第三方运行时依赖前写明用途、许可证、维护状况、传递依赖和换掉它的办法；系统框架能满足时不引入
+    level: soft
+    check: semi
+    how: CI 发现 `Package.resolved` 新增包时，要求 PR 描述里有这些信息
+    applies: [platform:ios]
+    why: 每个依赖都会带来升级、许可证、隐私清单和体积的长期成本；一个只做展示和简单接口调用的 App 完全可以零第三方运行时依赖。
+    sources: [S09]
+    see: ["25", "27"]
+  # ── 格式与 lint ──
+  - id: IOS-015
+    title: 用 swift-format 管格式、SwiftLint 管质量规则；关掉 SwiftLint 里与格式重叠的规则，CI 用严格模式运行二者
+    level: soft
+    check: auto
+    how: CI 运行 `swift-format lint --strict --recursive <源码目录>` 和 `swiftlint lint --strict`；配置文件 `.swift-format`、`.swiftlint.yml` 入库
+    applies: [platform:ios]
+    why: 两个工具都管缩进、行宽时会互相打架，开发者改了一个又被另一个报错。
+    detail: |
+      - swift-format 已随 Xcode 工具链提供，可用 `xcrun swift-format` 调用；团队需要和 CI 一致时固定版本。
+      - 只想用一个工具也可以，但规则必须可复现，不能靠人工风格评审。
+    sources: [S19, S20]
+    see: ["02"]
+  # ── 网络与本地安全 ──
+  - id: IOS-016
+    title: 网络请求默认用 URLSession + async/await + Codable；设置超时、响应任务取消，按状态码分类错误，日志里不打令牌和个人信息
+    level: soft
+    check: semi
+    how: 网络层单元测试用 `URLProtocol` 桩覆盖超时、取消、4xx、5xx、解析失败；评审日志语句
+    applies: [platform:ios]
+    why: 系统网络库已覆盖常见需求；不处理取消和超时会让界面卡住，所有错误都显示「网络错误」会掩盖权限过期等真实原因。
+    sources: [S04]
+  - id: IOS-017
+    title: 不在 Info.plist 里全局关闭 App Transport Security（`NSAllowsArbitraryLoads`）；必须用明文 HTTP 的，在 `NSExceptionDomains` 里逐个限定域名并写明理由
+    level: hard
+    check: auto
+    how: CI 扫描所有 target 的 Info.plist，出现 `NSAllowsArbitraryLoads = true` 即失败；`NSExceptionDomains` 的每一项要在例外清单里
+    applies: [platform:ios]
+    why: ATS 默认要求 HTTPS，全局关闭等于让所有请求都可能被中间人窃听和篡改；App 审核也会要求说明理由。
+    detail: |
+      - 内网自签证书的正确做法是通过 MDM 下发企业根证书，而不是关掉 ATS。
+    sources: [S05]
+    see: ["25"]
+  - id: IOS-018
+    title: 访问令牌、刷新令牌、密码、私钥只存 Keychain，并选择合适的可访问性等级；不存 UserDefaults、plist 或普通文件
+    level: hard
+    check: semi
+    how: 扫描代码里写入 UserDefaults、`@AppStorage` 的键名是否含 token、password、secret 等字样；评审 Keychain 封装的可访问性设置
+    applies: [platform:ios]
+    why: UserDefaults 和普通文件是明文存储，会进入备份，越狱设备上可直接读取。
+    detail: |
+      - 不需要跨设备迁移的凭据用 `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` 或 `AfterFirstUnlockThisDeviceOnly`（后台要访问时）。
+      - 要和扩展共享时用 Keychain 访问组，只共享必需的条目。
+      - 优先用成熟的 Keychain 封装或自己写一层很薄的封装，并有单元测试。
+    sources: [S06]
+    see: ["MOB-012", "19"]
+  - id: IOS-019
+    title: 存放敏感业务数据的文件设置数据保护等级（如 `FileProtectionType.complete`），退出登录时删除
+    level: soft
+    check: semi
+    how: 评审写文件的代码是否指定了保护等级；真机测试锁屏后读不到、退出登录后文件被清除
+    applies: [platform:ios]
+    why: 数据保护让文件在设备锁定时保持加密；退出登录不清理，下一个使用者就能看到上一个人的数据。
+    see: ["MOB-015"]
+  # ── 隐私与权限 ──
+  - id: IOS-020
+    title: App 和每个扩展都包含隐私清单（`PrivacyInfo.xcprivacy`），按实际使用声明收集的数据类型和必需原因 API 的理由，不复制模板
+    level: hard
+    check: semi
+    how: 归档后用 Xcode 的「Generate Privacy Report」汇总所有隐私清单；扫描代码里的必需原因 API（如 UserDefaults、文件时间戳、系统启动时间、磁盘空间），确认每类都有对应的理由代码
+    applies: [platform:ios]
+    why: 自 2024-05-01 起，用到必需原因 API 却没有声明理由的 App（包括通过第三方 SDK 用到的）会被 App Store Connect 拒收；照抄模板会让声明和真实行为不符。
+    sources: [S01, S07, S08]
+  - id: IOS-021
+    title: 引入 Apple 列名的常用第三方 SDK 时，确认它自带隐私清单；以二进制形式引入的还要确认带签名
+    level: hard
+    check: semi
+    how: 新增或升级依赖时对照 Apple 的第三方 SDK 名单检查；Xcode 会校验新版本 SDK 与旧版本签名者一致
+    applies: [platform:ios]
+    why: 提交包含名单内 SDK 的新 App 或新增这类 SDK 的更新时，Apple 要求必须有隐私清单，二进制依赖还需签名。
+    detail: |
+      - 名单包括 Alamofire、Kingfisher、SDWebImage、Lottie、Firebase 各组件、Flutter 及其插件等，以官方页面为准；重新打包这些 SDK 的产物同样适用。
+    sources: [S09]
+  - id: IOS-022
+    title: App Store 的 App 隐私详情与隐私清单、第三方 SDK 的实际采集保持一致；增删或升级 SDK 后重新核对
+    level: hard
+    check: manual
+    how: 发布前对照 Privacy Report、SDK 清单和 App Store Connect 里的隐私详情，逐项签字确认
+    applies: [platform:ios]
+    why: 隐私详情不实违反审核指南，也可能构成对用户的虚假陈述。
+    sources: [S10, S11]
+    see: ["27"]
+  - id: IOS-023
+    title: 只有在做 Apple 定义的「跟踪」（跨其他公司的 App 或网站关联用户数据）时才用 App 跟踪透明度（ATT）请求授权；用户拒绝后不用其他标识继续跟踪
+    level: hard
+    check: manual
+    how: 评审时对照 SDK 清单判断是否构成跟踪；测试拒绝授权后广告标识为全零、没有用指纹等方式替代
+    applies: [platform:ios]
+    why: 未授权跟踪和用设备指纹绕过 ATT 都违反 App Store 政策；没有跟踪却弹 ATT 只会打扰用户。
+    sources: [S10]
+  - id: IOS-024
+    title: Info.plist 里每个权限用途文案（`NS…UsageDescription`）写清 App 用它做什么，并本地化；在用户用到对应功能时再发起授权请求
+    level: hard
+    check: semi
+    how: CI 检查代码用到的权限都有对应的用途键、文案非空且不是占位语；评审授权请求的触发时机
+    applies: [platform:ios]
+    why: 缺少用途键的 App 一调用权限接口就会崩溃；文案含糊或启动时一次弹出所有权限，会被审核拒绝，用户也更容易拒绝。
+    sources: [S11]
+    see: ["MOB-039"]
+  - id: IOS-025
+    title: 支持创建账号的 App 在 App 内提供删除账号的入口
+    level: hard
+    check: manual
+    how: 发布检查清单里确认删除入口可达、能真正删除账号及关联数据
+    applies: [platform:ios]
+    why: App 审核指南要求支持账号创建的 App 必须允许用户在 App 内发起删除账号。
+    sources: [S11]
+    see: ["27"]
+  # ── 后台、推送与扩展 ──
+  - id: IOS-026
+    title: 后台工作用 BGTaskScheduler，设置过期处理（`expirationHandler`）、持久化进度、能中断后重入；不把后台任务当定时器
+    level: hard
+    check: semi
+    how: 代码检查每个任务都设置了 `expirationHandler` 并调用 `setTaskCompleted`；真机上用调试命令触发任务和过期，验证中断后能恢复
+    applies: [platform:ios]
+    why: 后台任务何时运行、能跑多久都由系统决定，随时可能被终止；按「每 N 分钟执行一次」设计的功能在 iOS 上不成立。
+    detail: |
+      - 大文件上传下载用后台 URLSession（`URLSessionConfiguration.background`），App 被挂起或结束后系统继续传输。
+      - `BGContinuedProcessingTask` 只用于用户在前台主动发起、进入后台后继续的任务，要展示进度、允许取消，不是常驻后台的豁免。
+      - 需要长时间持续计算的工作放到服务端。
+    sources: [S12, S13]
+    see: ["MOB-021"]
+  - id: IOS-027
+    title: 推送的设备令牌每次启动都重新上报服务端，并标明开发或生产环境；推送只用来提醒，业务数据以服务端为准
+    level: soft
+    check: semi
+    how: 测试令牌变化、切换环境、丢失推送三种情况，确认服务端映射正确、打开 App 后能补齐数据
+    applies: [platform:ios]
+    why: APNs 令牌会在重装、恢复备份等情况下变化，开发和生产环境的令牌不通用；推送本身不保证送达。
+    sources: [S14]
+    see: ["MOB-023", "21"]
+  - id: IOS-028
+    title: APNs 认证密钥（`.p8`）只放在服务端的密钥库，不打进 App、不进仓库
+    level: hard
+    check: auto
+    how: 密钥扫描规则匹配 `.p8` 文件和 `-----BEGIN PRIVATE KEY-----`；App 包内容扫描
+    applies: [platform:ios]
+    why: 拿到 `.p8` 密钥就能以你的身份给所有用户发推送。
+    sources: [S14]
+    see: ["25"]
+  - id: IOS-029
+    title: 通知服务扩展只做轻量处理（如下载附件、解密正文），在系统时限内完成；时限将到时回退显示原始内容
+    level: soft
+    check: semi
+    how: 检查实现了 `serviceExtensionTimeWillExpire`；在慢网和断网下测试通知仍能显示
+    applies: [platform:ios]
+    why: 扩展有严格的时间和内存限制，超时不处理会导致通知内容异常。
+    sources: [S14]
+  - id: IOS-030
+    title: 小组件按时间线和刷新预算设计，界面能接受延迟刷新；不做秒级实时看板
+    level: soft
+    check: manual
+    how: 评审小组件的刷新策略；锁屏可见的小组件确认不显示敏感数据
+    applies: [platform:ios]
+    why: 小组件不是常驻进程，系统按预算刷新，频繁请求刷新只会更快耗尽预算。
+    sources: [S15]
+  - id: IOS-031
+    title: 每个 target 和扩展的 entitlements 只开必需的能力；App Group 和 Keychain 共享组只共享必需的数据
+    level: soft
+    check: semi
+    how: CI 把各 target 的 `.entitlements` 导出比对，变化时要求评审说明
+    applies: [platform:ios]
+    why: 扩展是独立进程，多开的能力和共享容器扩大了数据暴露面，审核时也要逐项说明。
+  # ── 测试 ──
+  - id: IOS-032
+    title: 新的单元和集成测试用 Swift Testing；UI 自动化和性能测试用 XCTest（XCUITest）；存量 XCTest 用例不强制重写
+    level: soft
+    check: semi
+    how: 评审新增测试文件使用的框架；两套框架可在同一个测试 target 里共存
+    applies: [platform:ios]
+    why: Swift Testing 是 Xcode 自带的新单元测试框架，表达力更好；它不提供 UI 测试接口，UI 测试仍要用 XCUITest。
+    sources: [S16, S17]
+    see: ["04"]
+  - id: IOS-033
+    title: UI 测试用 `accessibilityIdentifier` 定位元素，并在关键页面调用 `performAccessibilityAudit()` 做自动无障碍审计
+    level: soft
+    check: auto
+    how: UI 测试里不出现坐标点击；关键页面的测试包含无障碍审计调用，CI 上审计失败即测试失败
+    applies: [platform:ios]
+    why: 按文字或坐标定位的测试随文案和布局变化就断；自动审计能低成本发现缺标签、对比度不足、文字被截断等问题。
+    sources: [S17]
+    see: ["MOB-037", "09"]
+  - id: IOS-034
+    title: CI 保存测试结果包（`.xcresult`），失败时能看到截图和日志
+    level: soft
+    check: auto
+    how: '`xcodebuild test` 加 `-resultBundlePath`，CI 把结果包作为构建产物上传'
+    applies: [platform:ios]
+    why: 只有一行「测试失败」无法排查，结果包里有失败截图、日志和附件。
+    sources: [S16]
+    see: ["04"]
+  - id: IOS-035
+    title: 快照测试只覆盖关键页面，固定模拟器机型、系统版本、语言、字号和深浅色；基线变化必须人工审阅，CI 不自动接受
+    level: soft
+    check: semi
+    how: 快照配置写死运行环境；基线图片的改动走 PR 评审
+    applies: [platform:ios]
+    why: 系统或 Xcode 升级会改变字体渲染和界面外观；自动接受新基线等于不测。
+    sources: [S18]
+  # ── 无障碍与本地化的 iOS 落地 ──
+  - id: IOS-036
+    title: 控件提供 VoiceOver 能读懂的 `accessibilityLabel`，必要时补 `accessibilityValue`、`accessibilityHint`；只有图标的按钮必须有标签，自定义控件声明正确的 traits
+    level: hard
+    check: semi
+    how: XCUITest 的无障碍审计找候选；VoiceOver 真机走一遍核心流程
+    applies: [platform:ios]
+    why: 没有标签的按钮在读屏下只会被读成「按钮」或图片名，读屏用户无法使用。
+    sources: [S22]
+    see: ["09"]
+  - id: IOS-037
+    title: 文字使用动态字体的文本样式（SwiftUI 的 `.font(.body)` 等，UIKit 的 `preferredFont(forTextStyle:)` 加 `adjustsFontForContentSizeCategory`），最大辅助字号下核心内容不截断
+    level: hard
+    check: semi
+    how: 用最大辅助字号截图核心页面并人工检查；无障碍审计会报告被截断的文字
+    applies: [platform:ios]
+    why: 写死字号的文字不跟随系统设置，视力不好的用户放大后要么看不清，要么被截断。
+    sources: [S22]
+    see: ["09"]
+  - id: IOS-038
+    title: 颜色用系统语义色或资产目录里带深浅色变体的颜色；动画遵守「减弱动态效果」设置；支持 iPad 时适配尺寸变化和分屏
+    level: soft
+    check: semi
+    how: 用深色、浅色、增强对比度、减弱动态效果、iPad 分屏组合截图检查
+    applies: [platform:ios]
+    why: 写死的颜色在深色模式下会出现白底白字；不响应减弱动态效果会让前庭敏感的用户不适；iPad 上直接放大 iPhone 布局体验很差。
+    detail: |
+      - SwiftUI 读 `@Environment(\.accessibilityReduceMotion)`，UIKit 读 `UIAccessibility.isReduceMotionEnabled`。
+    sources: [S22]
+    see: ["08", "09"]
+  - id: IOS-039
+    title: 界面文案放进 String Catalog（`.xcstrings`）；日期、数字、货币用 `FormatStyle` 按区域格式化，复数用 String Catalog 的复数变体，不拼接句子
+    level: soft
+    check: auto
+    how: CI 检查 String Catalog 里没有「需要审阅」「未翻译」状态的条目；伪本地化跑一遍 UI 测试
+    applies: [platform:ios]
+    why: 拼接的句子换语言后语序错误；自己格式化的日期和数字在其他地区显示不对。
+    sources: [S23]
+    see: ["09"]
+  # ── 签名、分发与上架 ──
+  - id: IOS-040
+    title: 签名证书私钥、描述文件、App Store Connect API 密钥放在密钥库或 CI 机密里，按环境隔离，不进仓库
+    level: hard
+    check: auto
+    how: 密钥扫描匹配 `.p12`、`.mobileprovision`、`.p8` 和私钥头；CI 签名凭据只在发布流水线可见
+    applies: [platform:ios]
+    why: 签名私钥泄露后，别人能以你的身份签发 App。
+    see: ["25"]
+  - id: IOS-041
+    title: 每个发布构建保留 `.xcarchive`、dSYM 符号文件、对应提交编号、Xcode 版本和 `Package.resolved`
+    level: soft
+    check: auto
+    how: 发布流水线把这些产物归档，缺一项就失败；dSYM 同时上传到崩溃上报服务
+    applies: [platform:ios]
+    why: 没有符号文件，线上崩溃堆栈无法还原；没有提交和工具链信息，问题版本无法重建。
+    see: ["MOB-026", "03"]
+  - id: IOS-042
+    title: 分发渠道在立项时书面决定并符合 Apple 的资格条件；不用 Enterprise 证书给外部客户或公众分发
+    level: hard
+    check: manual
+    how: 评审分发决策记录：用户是谁、用哪个渠道、组织是否符合该渠道的资格
+    applies: [platform:ios]
+    why: Enterprise 计划只允许组织给自己的员工分发内部 App，违规使用会被吊销证书，已安装的 App 全部无法打开。
+    detail: |
+      - 面向公众：App Store，预发布测试用 TestFlight。
+      - 面向特定的外部企业客户：通过 Apple Business 分发的自定义 App（Custom Apps）。
+      - 组织内部员工专用、且符合 Enterprise 计划条件：Enterprise 计划 + MDM；先评估自定义 App 是否够用。
+      - 少量测试设备：Ad Hoc。
+      - TestFlight、App Store、Apple Business 都依赖 Apple 的在线服务；「离线业务」不等于「离线分发」，客户网络不能访问 Apple 服务时要在立项时说明。
+    sources: [S24, S25]
+  - id: IOS-043
+    title: 在欧盟通过替代应用市场或网页分发前，确认已签署相应条款、App 能通过苹果公证，并评估佣金
+    level: soft
+    check: manual
+    how: 分发决策记录里写明适用条款、公证流程和费用测算
+    applies: [platform:ios]
+    why: 欧盟《数字市场法》（DMA）下的替代分发仍要经过苹果的公证审查，条款和收费近年变化频繁，按旧资料决策容易出错。
+    ref_value: 核实于 2026-11-14：Apple 于 2026-08 宣布新的欧盟条款，替代应用市场和网页分发的 App 改收 5% 的核心技术佣金（Core Technology Commission），取代原来的按安装收取的核心技术费，新条款 2026-10-01 生效；所有替代分发的 App 仍需公证。
+    sources: [S26, S27]
+  - id: IOS-044
+    title: 提交审核时提供可用的演示账号和审核期间可访问的后端；需要特殊硬件或环境的功能附演示视频
+    level: soft
+    check: manual
+    how: 发布检查清单确认演示账号在提交当天能登录、后端对公网可达
+    applies: [platform:ios]
+    why: 审核人员登录不了或连不上服务，App 会直接被拒。
+    sources: [S11]
+  - id: IOS-045
+    title: 在中国大陆 App Store 上架、且需要备案的 App，在 App Store Connect 填写与 App 一致的 APP 备案号
+    level: hard
+    check: manual
+    how: 上架前核对备案主体、App 名称、Bundle ID 与 App Store Connect 里填写的备案号一致
+    applies: [platform:ios]
+    why: 缺少或不匹配的备案信息会导致 App 无法在中国大陆 App Store 上架。是否需要备案按 27 的口径判断。
+    sources: [S28]
+    see: ["27"]
+  - id: IOS-046
+    title: React Native、Flutter 等跨平台项目同样维护 iOS 原生资产：隐私清单（含各插件的清单）、entitlements、权限用途文案、签名配置
+    level: soft
+    check: semi
+    how: 归档后用 Privacy Report 检查所有插件的隐私清单都已合并；CI 比对 entitlements 和 Info.plist 变化
+    applies: [platform:ios, platform:mobile]
+    why: JS 或 Dart 层的配置不会自动满足 iOS 的权限、隐私和签名要求，审核看的是最终的原生包。
+    sources: [S09]
+    see: ["28"]
+choices:
+  - category: 工具链
+    pick: 当前正式版 Xcode（满足 App Store 当前上传要求），CI 固定版本
+    avoid:
+      - { name: beta 版 Xcode 构建发布包, why: 行为可能与正式版不同，且不能用于提交 }
+      - { name: 在 Linux 上构建签名 iOS App, why: 签名和归档需要 macOS 与 Xcode }
+    sources: [S01]
+  - category: 界面
+    pick: SwiftUI
+    alternatives:
+      - { name: UIKit（通过 UIViewRepresentable 互操作）, when: 富文本编辑、相机视频、复杂列表性能，或维护存量 UIKit 项目 }
+    avoid:
+      - { name: 自己造界面框架, why: 无法跟上系统新特性与无障碍支持 }
+  - category: 状态观察
+    pick: Observation（@Observable），需要 iOS 17 及以后
+    alternatives:
+      - { name: ObservableObject / Combine, when: 最低部署版本低于 iOS 17 或存量代码 }
+    avoid:
+      - { name: 同一层混用两套观察机制, why: 刷新来源难以追踪 }
+    sources: [S03]
+  - category: 架构
+    pick: 功能模块 + 观察模型 + Repository + 协议注入（组合根手动注入）
+    alternatives:
+      - { name: The Composable Architecture（TCA）, when: 多团队共享复杂状态、副作用多且要求可测试，并有决策记录 }
+    avoid:
+      - { name: 小项目强制套重型架构框架, why: 学习和升级成本高，收益不明显 }
+    license: TCA 为 MIT
+    sources: [S31]
+  - category: 网络
+    pick: URLSession + async/await + Codable
+    alternatives:
+      - { name: swift-openapi-generator（Apple 官方，配合 URLSession 传输层）, when: 后端有稳定的 OpenAPI 契约且接口较多 }
+      - { name: Alamofire, when: 确实需要它的拦截、重试等能力且已评估 }
+    avoid:
+      - { name: 自研 HTTP 协议栈, why: 系统库已覆盖，自研难以维护 }
+      - { name: 手抄大量接口 DTO, why: 与契约漂移 }
+    license: swift-openapi-generator 为 Apache-2.0；Alamofire 为 MIT
+    sources: [S04, S29]
+  - category: 本地存储
+    pick: 偏好用 UserDefaults / @AppStorage，凭据用 Keychain，简单对象模型用 SwiftData
+    alternatives:
+      - { name: GRDB.swift, when: 离线优先、需要明确的 SQL、事务和迁移控制 }
+      - { name: Core Data, when: 存量项目继续使用，不为追新而重写 }
+    avoid:
+      - { name: 自己封装 SQLite 和连接池, why: 容易出现死锁和数据损坏 }
+      - { name: 把 SwiftData 或 GRDB 当成自带同步或加密, why: 同步和加密要单独设计 }
+    license: GRDB 为 MIT；需要加密时评估 SQLCipher 的许可与出口管制
+    notes: SwiftData 模型变更用 VersionedSchema + SchemaMigrationPlan，并用旧版本数据测试迁移（见 MOB-022）。
+    sources: [S30, S32]
+  - category: 图片加载
+    pick: SwiftUI AsyncImage
+    alternatives:
+      - { name: Nuke 或 Kingfisher, when: 需要磁盘缓存、预加载、渐进式解码等高级能力；同一项目只用一个 }
+    license: Nuke、Kingfisher 均为 MIT
+    sources: [S33]
+  - category: 依赖管理
+    pick: Swift Package Manager，Package.resolved 入库
+    alternatives:
+      - { name: XCFramework, when: 厂商 SDK 不提供 SPM 包 }
+    avoid:
+      - { name: 新项目用 CocoaPods 或 Carthage, why: 需要额外工具链，社区新库已普遍转向 SPM }
+  - category: 格式与 lint
+    pick: swift-format（格式）+ SwiftLint（质量规则）
+    alternatives:
+      - { name: 只用其中一个, when: 团队愿意放弃另一类检查，但规则要可复现 }
+    avoid:
+      - { name: 两个工具同时管缩进和行宽, why: 互相打架 }
+    license: swift-format 为 Apache-2.0；SwiftLint 为 MIT（均为独立运行的开发工具，不进入 App）
+    sources: [S19, S20]
+  - category: 测试
+    pick: Swift Testing（单元、集成）+ XCUITest（UI）
+    alternatives:
+      - { name: XCTest 单元测试, when: 存量用例，或需要 XCTest 独有的性能测试接口 }
+      - { name: swift-snapshot-testing, when: 设计关键页面需要视觉回归；只放在测试 target }
+    avoid:
+      - { name: 用 Swift Testing 替代 UI 测试, why: 它不提供 UI 测试接口 }
+    license: swift-snapshot-testing 为 MIT
+    notes: 跨平台的移动端 E2E 工具见 28。
+    sources: [S16, S17, S18]
+  - category: 构建与发布自动化
+    pick: 自建 macOS 构建机 + xcodebuild，按需加 fastlane
+    alternatives:
+      - { name: Xcode Cloud, when: 可以接受 Apple 访问源码仓库并在云端构建 }
+    avoid:
+      - { name: 签名私钥进 Git、共用个人开发者账号, why: 无法审计，泄露后难以止损 }
+    license: fastlane 为 MIT
+    notes: 开发时用 Xcode 自动签名；CI 用 App Store Connect API 密钥或受控的手动签名。
+    sources: [S34]
+  - category: 分发
+    pick: App Store（预发布测试用 TestFlight）
+    alternatives:
+      - { name: Apple Business 分发的自定义 App（Custom Apps）, when: 给特定外部企业客户 }
+      - { name: Enterprise 计划 + MDM, when: 符合资格的组织给自己员工分发内部 App }
+      - { name: Ad Hoc, when: 少量登记设备的测试 }
+      - { name: 欧盟替代应用市场或网页分发, when: 面向欧盟用户且已评估条款、公证和佣金 }
+    avoid:
+      - { name: 用 Enterprise 证书给外部客户或公众分发, why: 违反协议，证书会被吊销 }
+    notes: 2026 年 Apple Business Manager 已并入新的 Apple Business 平台。
+    sources: [S24, S25, S26]
+antipatterns:
+  - bad: 为了消掉 Swift 6 并发错误批量加 `@unchecked Sendable`
+    instead: 改成值类型、actor 或明确的隔离边界
+  - bad: 到处用 `DispatchQueue.main.async` 和 `Task.detached` 修状态问题
+    instead: 用 `@MainActor` 和结构化并发，任务随所有者取消
+  - bad: 新项目一上来就引入 TCA、Alamofire、图片库、ORM 全家桶
+    instead: 从 SwiftUI + Observation + URLSession 起步，按需并有理由地加依赖
+  - bad: 为了调试方便全局关闭 ATS
+    instead: 用 HTTPS；内网证书通过 MDM 下发信任，必要时按域名设例外
+  - bad: 令牌、手机号、密码存在 UserDefaults
+    instead: 凭据存 Keychain，敏感文件设数据保护
+  - bad: 从别的项目复制 `PrivacyInfo.xcprivacy` 应付审核
+    instead: 按真实使用的 API 和 SDK 填写，归档后看 Privacy Report
+  - bad: App 一启动就请求所有权限
+    instead: 用户用到功能时再请求，被拒后降级
+  - bad: 把静默推送或后台任务当可靠的定时调度
+    instead: 系统调度 + 本地持久化任务 + 进入前台时补做
+  - bad: 小组件每隔几秒请求刷新
+    instead: 按时间线设计，需要实时进度时评估实时活动（Live Activity）
+  - bad: 快照测试全量截图并在 CI 自动接受差异
+    instead: 只测关键页面，固定运行环境，基线变化人工审阅
+  - bad: 用 Enterprise 证书签 IPA 发给客户
+    instead: 用 Apple Business 自定义 App 或 App Store
+sources:
+  - { id: S01, title: "Upcoming Requirements", url: "https://developer.apple.com/news/upcoming-requirements/", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Xcode Build Settings Reference", url: "https://developer.apple.com/documentation/xcode/build-settings-reference", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "Migrating from the Observable Object protocol to the Observable macro", url: "https://developer.apple.com/documentation/swiftui/migrating-from-the-observable-object-protocol-to-the-observable-macro", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S04, title: "URLSession", url: "https://developer.apple.com/documentation/foundation/urlsession", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "NSAppTransportSecurity", url: "https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "Keychain Services", url: "https://developer.apple.com/documentation/security/keychain-services", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Privacy manifest files", url: "https://developer.apple.com/documentation/bundleresources/privacy-manifest-files", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Describing use of required reason API", url: "https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "Third-party SDK requirements", url: "https://developer.apple.com/support/third-party-SDK-requirements/", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: "User Privacy and Data Use", url: "https://developer.apple.com/app-store/user-privacy-and-data-use/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "App Review Guidelines", url: "https://developer.apple.com/app-store/review/guidelines/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "Background Tasks", url: "https://developer.apple.com/documentation/backgroundtasks/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "Downloading files in the background", url: "https://developer.apple.com/documentation/foundation/downloading-files-in-the-background", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "User Notifications", url: "https://developer.apple.com/documentation/usernotifications", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "Keeping a widget up to date", url: "https://developer.apple.com/documentation/widgetkit/keeping-a-widget-up-to-date", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Testing in Xcode", url: "https://developer.apple.com/documentation/xcode/testing", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "XCTest", url: "https://developer.apple.com/documentation/xctest", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: "swift-snapshot-testing", url: "https://github.com/pointfreeco/swift-snapshot-testing", publisher: Point-Free, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S19, title: "swift-format", url: "https://github.com/swiftlang/swift-format", publisher: Swift Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "SwiftLint", url: "https://github.com/realm/SwiftLint", publisher: Realm, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S21, title: "SwiftLint rule directory", url: "https://realm.github.io/SwiftLint/rule-directory.html", publisher: Realm, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S22, title: "Human Interface Guidelines: Accessibility", url: "https://developer.apple.com/design/human-interface-guidelines/accessibility", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Localizing and varying text with a string catalog", url: "https://developer.apple.com/documentation/xcode/localizing-and-varying-text-with-a-string-catalog", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Apple Developer Enterprise Program", url: "https://developer.apple.com/programs/enterprise/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "Introducing Apple Business", url: "https://www.apple.com/newsroom/2026/03/introducing-apple-business/", publisher: Apple, date: 2026-03-24, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: "Changes for apps in the European Union", url: "https://developer.apple.com/support/dma-and-apps-in-the-EU", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: "Apple announces changes for apps in the European Union", url: "https://www.apple.com/newsroom/2026/08/apple-announces-changes-for-apps-in-the-european-union/", publisher: Apple, date: 2026-08, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "App Store Connect: App information", url: "https://developer.apple.com/help/app-store-connect/reference/app-information/app-information", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: "swift-openapi-generator", url: "https://github.com/apple/swift-openapi-generator", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "GRDB.swift", url: "https://github.com/groue/GRDB.swift", publisher: Gwendal Roué, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S31, title: "The Composable Architecture", url: "https://github.com/pointfreeco/swift-composable-architecture", publisher: Point-Free, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S32, title: "SwiftData: SchemaMigrationPlan", url: "https://developer.apple.com/documentation/swiftdata/schemamigrationplan", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: "Nuke", url: "https://github.com/kean/Nuke", publisher: kean, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S34, title: "fastlane", url: "https://github.com/fastlane/fastlane", publisher: fastlane, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S35, title: "App Store usage statistics", url: "https://developer.apple.com/support/app-store/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - 报告所写的当前工具链版本（Xcode 27.2、Swift 6.4.2）未联网核实；规则不依赖具体版本，版本账本另行维护。
+  - 报告称 Xcode 27 引入 JSON 格式的工程配置文件，来源只有一句，未核实；核实后再决定是否影响「工程文件入库与评审」的做法。
+  - 报告称 2026-06 App Store 统计中 79% 的 iPhone 在 iOS 26，未核实，未写入规则。
+  - CocoaPods 主仓（trunk）转只读的计划和日期未核实；核实后可作为「新项目不用 CocoaPods」的更强理由。
+  - SwiftLint 的许可证（MIT）与维护状况本次未联网复核；swift-format 随 Xcode 工具链提供的说法来自 2024 年起的社区资料，未找到 Apple 官方文档页。
+  - Apple Business 平台下「自定义 App」分发的具体名称和流程是否有变化，未在 Apple 官方文档确认。
+  - Swift Testing 与 XCTest 在新版 Xcode 中的互操作细节（社区称默认开启）未在 Apple 官方文档确认。
+  - 待补调研：导航（NavigationStack 与路由组织）的默认做法。
+  - 待补调研：依赖注入是否推荐现成库（与 29 Android 的 Hilt 对照）。
+  - 待补调研：日志（OSLog）、崩溃与性能（MetricKit）在 iOS 侧的落地。
+  - 待补调研：内购（StoreKit 2）与订阅的工程规范。
+  - 待补调研：深链与通用链接（Universal Links）、Sign in with Apple 的审核要求。
+  - 待补调研：工程生成工具（Tuist、XcodeGen）是否推荐。
+  - 待补调研：跨平台项目（React Native、Flutter）iOS 侧从 CocoaPods 迁到 SPM、隐私清单合并的具体做法。
