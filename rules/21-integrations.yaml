@@ -1,0 +1,578 @@
+id: "21"
+slug: integrations
+title: 通知与第三方集成
+summary: 和外部服务打交道的那一侧：接收第三方回调、通过邮件短信推送和企业 IM 发通知、管理通知偏好与退订、用 OAuth 接入用户的第三方账号，以及调用第三方 API 时要处理的限流、配额和沙箱。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 接收第三方回调（webhook 接收端）：验签、防重放、先落库再异步处理、幂等
+    - 通知渠道：邮件、短信、移动推送服务端、企业 IM（飞书、钉钉、企业微信、Slack、Teams）
+    - 通知偏好、频控与退订
+    - 通知模板与本地化
+    - 作为客户端用 OAuth 接入第三方账号：令牌存储、刷新、撤销
+    - 调用第三方 API 的特有问题：限流头、配额、结果未知、沙箱环境
+  excludes:
+    - { what: 超时、重试、退避的通用原则, see: "02" }
+    - { what: 对外发布 webhook 与签名格式、幂等键语义、错误格式, see: "16" }
+    - { what: outbox 表、幂等表、事务, see: "17" }
+    - { what: 队列、任务重试与死信、全局限流, see: "18" }
+    - { what: 我方用户的登录、会话、验证码校验规则, see: "19" }
+    - { what: 文案写法、国际化行为, see: "09" }
+    - { what: 密钥管理与扫描、SSRF 防护、日志脱敏, see: "25" }
+    - { what: 可观测性与告警, see: "26" }
+    - { what: 短信与营销的法规、个人信息与数据出境、开源许可口径, see: "27" }
+    - { what: 推送总体架构、国内厂商推送通道、客户端权限与展示, see: "28" }
+    - { what: 对象存储的使用, see: "17" }
+overview: |
+  1. **业务代码只调自己的适配层。** 服务商 SDK 和地址只出现在适配层；适配层写明每家支持什么、不支持什么，调用方按能力降级，不假设各家一样。
+  2. **超时不等于失败。** 有副作用的请求（发短信、扣款）超时后标为「结果未知」，先查状态或对账，不直接重发；能用服务商的幂等键就用。
+  3. **遵守对方的限流。** 429/503 按 `Retry-After` 等待，各层重试不叠加；配额和费用设上限和告警。
+  4. **回调先验签，再落库，再处理。** 对原始请求字节验签；验签后写入收件箱表去重，再返回 2xx，业务异步处理。「能解密」不等于「已验签」。
+  5. **资金类结果以查单和对账为准。** 回调和客户端成功页都不是最终事实。
+  6. **重要通知和业务写入一起提交（outbox）。** 送达状态分清「服务商已受理」「已送达」「已读」，没有回执就是未知，不伪造送达率。
+  7. **邮件三件套。** 发信域配 SPF、DKIM、DMARC；营销和订阅邮件带一键退订（RFC 8058）并在两天内生效；退信和投诉进抑制名单。
+  8. **短信防盗刷。** 服务端多维限频、费用封顶；验证码和手机号不进日志。国内短信只用已审核的签名和模板，法规见 27。
+  9. **推送用当前接口。** APNs 用基于令牌的 HTTP/2 长连接；FCM 用 HTTP v1，旧接口已关停。失效的设备令牌及时停用。
+  10. **IM 机器人分档。** 群自定义机器人通常只能发、不能收回调；要交互就用应用机器人并验签。Teams 旧的 Office 365 Connectors 已退役。
+  11. **接入第三方账号用授权码 + PKCE。** 令牌加密存储，并发刷新只跑一个，用户断开时撤销。
+  12. **CI 不真发。** 测试用 fake 或服务商沙箱，沙箱和生产的凭据分开。
+rules:
+  # ── 调用第三方 API ──
+  - id: INT-001
+    title: 业务代码只调用自己的通知或集成适配层，服务商 SDK 和服务商地址只出现在适配层里
+    level: soft
+    check: auto
+    how: 用依赖边界 lint（如 dependency-cruiser、import-linter、ArchUnit）禁止适配层以外的模块引用服务商 SDK 包和服务商域名
+    applies: [kind:service]
+    why: 服务商 SDK 散落在业务代码里，换服务商、加测试替身、统一处理超时和日志都要改遍全仓库。
+    detail: |
+      - 小系统在同一进程里做一层适配即可，不必为此拆服务；有多租户、偏好、回执需求后再考虑独立的通知服务。
+      - 适配层同时声明能力：支持哪些消息类型、能否查状态、能否收回执、是否支持幂等键。调用方按能力降级，不假设各家一样。
+    see: ["01"]
+  - id: INT-002
+    title: 调用第三方时遵守对方的限流：收到 429 或 503 按 `Retry-After` 等待，没有时退避加抖动；按服务商公布的配额做客户端限流，各层重试不叠加
+    level: hard
+    check: semi
+    how: 用模拟服务返回 429/503（带和不带 `Retry-After`），配合假时钟检查等待时间和总次数；评审时检查 SDK、网关、任务队列是否各自开着重试
+    applies: [kind:service]
+    why: 不理会限流会被服务商封禁账号；SDK、网关、队列各重试三次，叠起来就是几十倍的请求。
+    detail: |
+      - `Retry-After` 可能是秒数，也可能是一个 HTTP 日期，两种都要解析。
+      - 服务商常有自己的限流响应头（剩余配额、重置时间），适配层读出来用于客户端限流。
+      - 多副本共享配额时，用共享的计数，见 18。
+      - 超时和重试的通用原则见 COD-033、COD-034。
+    sources: [S02]
+    see: ["COD-033", "COD-034", "MID-030"]
+  - id: INT-003
+    title: 有副作用的外部请求（发送、扣款、开通）在发出后超时或断连，把结果标为「未知」，先查状态或对账再决定，不直接当失败重发
+    level: hard
+    check: semi
+    how: 故障注入测试：让模拟服务执行成功但不返回响应，检查系统进入「未知」状态并走查询或对账，没有重复发送
+    applies: [kind:service]
+    why: 请求可能已经在对方那里成功了；盲目重发会重复扣费、重复发短信。
+    detail: |
+      - 对方提供状态查询接口的，自动补查；没有的，按副作用成本决定是否人工处理。
+      - 长时间查不到结果的，保持「未知」并交人工，不自动改成失败或成功。
+      - 连接还没建立就失败的（如 DNS 失败、连接被拒），可以按正常的重试处理。
+    sources: [S01]
+  - id: INT-004
+    title: 可能重试的外部写请求带一个持久化的去重键；服务商支持幂等键时必须传
+    level: hard
+    check: auto
+    how: 测试用同一个业务操作连续调用两次，检查服务商侧（模拟服务）只产生一次副作用；去重键在本地有唯一约束
+    applies: [kind:service]
+    why: 网络重试、任务重放都会让同一个请求发出多次，只有去重键能让对方识别出是同一笔。
+    detail: 去重键在发请求前生成并存盘，重试时复用同一个，不在每次重试时重新生成。幂等键的语义见 API-019，幂等表的结构见 DB-028。
+    sources: [S01]
+    see: ["API-019", "DB-028"]
+  - id: INT-005
+    title: 按错误类别处理第三方返回：参数错误和业务拒绝不重试；认证失败暂停该连接并告警；退订、拉黑、永久退信记入抑制名单
+    level: soft
+    check: semi
+    how: 适配层合同测试逐类返回错误，检查是否重试、是否暂停、是否写抑制名单
+    applies: [kind:service]
+    why: 用一个统一的「重试三次」对付所有错误，会对失效的密钥反复请求，对已退订的用户反复发送。
+    detail: |
+      - 不要为了绕过接收方的拒绝、黑名单或合规拦截而切换服务商重发。
+      - 服务商整体故障时可以降级（如改发站内信）；切换到备用服务商前确认对方有同样的资质和能力，验证码不发到未经批准的新通道。
+  - id: INT-006
+    title: 测试和 CI 不得真实发送消息或产生扣费：用 fake 或服务商沙箱；沙箱、预发、生产的凭据和推送环境分开
+    level: hard
+    check: auto
+    how: CI 默认禁止出网（或只放行沙箱域名），统计真实外发次数必须为 0；检查各环境的密钥命名和配置，生产凭据不出现在非生产环境
+    applies: [kind:service]
+    why: 测试里给真实手机号发短信、用生产凭据扣款，既是事故也是费用。APNs 等服务的沙箱和生产环境不能混用。
+    detail: |
+      - 邮件测试用 Mailpit 或 GreenMail 截获，不发到真实邮箱。
+      - 服务商的沙箱行为和生产不完全一样（限流、回执、支付方式），上线前还要在生产做小流量验证。
+    sources: [S14, S16]
+  - id: INT-007
+    title: 每个适配层有合同测试，覆盖成功、4xx、5xx、429、超时、断连、乱序回执和缺字段
+    level: soft
+    check: auto
+    how: 在 CI 里对每个适配层跑同一套合同测试，用模拟服务返回各类情况
+    applies: [kind:service]
+    why: 只测成功路径的集成，上线后第一次遇到限流或超时就出事。
+    see: ["04"]
+  - id: INT-008
+    title: webhook 地址、机器人地址、预签名链接都当作凭据：加密保存，不进日志、错误信息和群聊
+    level: hard
+    check: auto
+    how: 日志脱敏测试；对日志和配置跑密钥扫描，规则包含常见的机器人地址格式
+    applies: [kind:service]
+    why: Slack、飞书、钉钉等的 webhook 地址本身就带着发送权限，泄露了任何人都能往群里发消息。
+    sources: [S19]
+    see: ["25"]
+  - id: INT-009
+    title: 声称支持断网部署时，必须跑断网验收；断网模式下不得悄悄回退去调用公网服务
+    level: hard
+    check: auto
+    how: 在禁止出网的环境里启动并跑核心流程，同时记录 DNS 和出站连接，必须为 0
+    applies: [kind:onprem]
+    why: 适配层能在内网部署，不等于 APNs、FCM、云短信、Slack 这些公网服务能在内网用；悄悄回退公网会违反客户的网络要求。
+    detail: 「服务能断网启动」和「消息能送到目标」是两件事，分别写明。断网时只有内网邮件服务器、内网 IM、站内信这类目标还能送达。
+  - id: INT-010
+    title: 短信、推送、地图等按量计费的外部服务，按项目和租户设预算上限和异常告警
+    level: soft
+    check: semi
+    how: 检查预算配置存在；用模拟流量验证超限时告警并停发
+    applies: [kind:service]
+    why: 被刷一个晚上的短信费可能超过一年的正常用量。
+  # ── 接收第三方回调 ──
+  - id: INT-011
+    title: 收到第三方回调时，先按服务商的算法对原始请求字节验签，通过后才解析和使用其中的字段
+    level: hard
+    check: auto
+    how: 用服务商的官方测试向量或官方验签库写测试：正确签名通过；改动请求体、时间戳或签名任意一处都失败；先解析 JSON 再重新序列化验签的写法被测试抓出
+    applies: [kind:service]
+    why: 不验签任何人都能伪造回调；先解析再序列化会改变字节，导致验签失败后有人干脆关掉验签。
+    detail: |
+      - 优先用服务商的官方 SDK 验签，不自己实现；只能自己实现时，用官方测试向量覆盖。
+      - 签名比较用常量时间比较。
+      - 服务商不支持签名的，用专属的随机回调地址加网络限制，并记录这是风险接受，不把它标成「已验签」。只靠 IP 白名单不够。
+    sources: [S03, S04]
+  - id: INT-012
+    title: 服务商按 Standard Webhooks 签名时，用官方库验签：检查 `webhook-timestamp` 在容忍窗口内，逐个尝试 `webhook-signature` 里的签名，任一匹配即通过
+    level: hard
+    check: auto
+    how: 用官方库的测试：过期和未来过远的时间戳被拒；轮换期间带两个签名时新旧密钥都能通过；篡改 `webhook-id` 失败
+    applies: [kind:service]
+    why: 时间戳窗口挡住重放；签名头里可能同时有多个签名（密钥轮换期间），只取第一个会误拒。
+    detail: 签名内容是「`webhook-id`.`webhook-timestamp`.原始请求体」。`webhook-id` 在重试时不变，用作去重键。发布端的规则见 API-028。
+    ref_value: 容忍窗口常用 5 分钟，是参考值；规范没有规定具体值。
+    sources: [S03]
+    see: ["API-028"]
+  - id: INT-013
+    title: 回调内容既有签名又有加密时，先验签再解密；「能解密」不能当作「已验签」
+    level: hard
+    check: auto
+    how: 测试用签名错误但能正常解密的回调，必须被拒绝
+    applies: [kind:service]
+    why: 解密用的密钥和验签用的密钥不是一回事，能解密只说明对方知道加密密钥，不说明消息来自服务商。微信支付 APIv3 官方文档专门指出过这个错误。
+    sources: [S05]
+  - id: INT-014
+    title: 验签通过后，先把回调写入收件箱表（按服务商和事件 ID 唯一），再返回 2xx；业务处理放到异步任务里
+    level: hard
+    check: auto
+    how: 测试同一事件并发投递多次，收件箱只有一条、业务只处理一次；在处理逻辑里注入异常，检查已返回 2xx 的事件之后仍会被处理
+    applies: [kind:service]
+    why: 在回调请求里同步跑完所有下游，容易超时让对方重发；不落库就返回 2xx，进程一崩事件就丢了。
+    detail: |
+      - 服务商没有事件 ID 的，用其文档说明的字段组合去重，不用整个 JSON 的哈希。
+      - 收件箱表和任务处理见 17、18。
+    sources: [S03]
+    see: ["17", "18"]
+  - id: INT-015
+    title: 回调处理按至少一次投递设计：容忍重复、乱序和迟到；状态只能沿规定方向推进，迟到的旧状态不覆盖更新的状态
+    level: hard
+    check: auto
+    how: 测试按乱序投递一组回调（如先「退信」后「已受理」），检查最终状态正确；用带旧状态条件的更新语句或乐观锁保证不倒退
+    applies: [kind:service]
+    why: 服务商普遍只保证至少一次，顺序不保证；晚到的「已受理」覆盖「已退信」会让系统继续向无效地址发信。
+    see: ["MID-017"]
+  - id: INT-016
+    title: 支付等资金结果以「服务端验签回调 + 主动查单 + 定期对账」为准，不凭客户端成功页发货；金额用最小货币单位的整数
+    level: hard
+    check: auto
+    how: 测试只有客户端成功、没有回调时不发货；对账任务用有差异的账单样例跑，差异进入人工处理队列；金额字段类型检查不允许浮点数
+    applies: [kind:service]
+    why: 回调可能丢、可能被伪造，客户端可以被篡改；只有和渠道账单逐笔核对才能发现漏单和错单。
+    detail: |
+      - 退款、部分退款、关闭、过期分开建模。
+      - 不自己收集和存储银行卡号，用支付商的托管收银台或令牌化。
+      - 以微信支付为例，按日下载交易和资金账单，并校验文件哈希后逐笔核对。
+    sources: [S05, S06]
+    see: ["27"]
+  # ── 通知 ──
+  - id: INT-017
+    title: 重要通知的发送意图和业务写入在同一个事务里提交（outbox），不在业务代码里直接调用发送接口
+    level: hard
+    check: semi
+    how: 测试业务事务回滚时没有通知发出、提交后通知一定会发出；评审时查找业务事务里直接调用发送接口的写法
+    applies: [kind:service]
+    why: 直接发送时，业务回滚了信可能已经发出去，业务提交了进程崩溃信又没发。
+    detail: 第三方调用不放在数据库事务里。outbox 的表结构和中继见 DB-026、MID-013。
+    see: ["DB-026", "MID-013"]
+  - id: INT-018
+    title: 送达状态分清「服务商已受理」「已送达」「已读」；没有对应回执的保持「未知」或「不支持」，不把接口返回成功当成已送达
+    level: soft
+    check: auto
+    how: 状态机测试：只有收到明确回执才能进入「已送达」「已读」；统计报表区分各状态
+    applies: [kind:service]
+    why: 接口返回 200 只说明服务商收下了；把它当送达会算出虚高的送达率，也看不出真正的问题。
+    detail: |
+      - 邮件的「已送达」通常只表示对方邮件服务器收下了，不代表进了收件箱。
+      - 记录每个状态的来源（接口返回、回执、查询、人工）和时间。
+    sources: [S11]
+  - id: INT-019
+    title: 通知带用途（交易、安全、营销、告警）和紧急程度两个字段；营销退订不影响交易和安全通知，强制发送的通知类别要经产品和合规确认
+    level: soft
+    check: semi
+    how: 检查通知定义都带用途字段；测试退订营销后交易通知照常发送；强制发送的类别列表有评审记录
+    applies: [kind:service]
+    why: 把营销也标成「高优先级」，会绕过用户的退订和静默设置；反过来退订误伤交易通知，用户收不到订单信息。
+  - id: INT-020
+    title: 通知偏好按「类别 × 渠道」保存；静默时段按用户时区计算；退订记录来源和时间，并立即生效
+    level: soft
+    check: auto
+    how: 用假时钟测试跨时区和夏令时的静默时段；测试退订后下一条营销通知不再发出
+    applies: [kind:service]
+    why: 偏好只做成一个总开关，用户要么全收要么全关；按服务器时区算静默会在凌晨打扰用户。
+    detail: 偏好、模板和本地化放在自己的系统里，不放进第三方 SDK 的配置。营销同意与退订的法规要求见 27。
+    see: ["27"]
+  - id: INT-021
+    title: 频控分层：同一事件先合并，再按用户、号码或设备、租户、服务商分别限频；告警默认逐级升级，不同时多渠道轰炸
+    level: soft
+    check: auto
+    how: 用假时钟和并发测试验证各层限频；同一故障的告警按事件编号聚合
+    applies: [kind:service]
+    why: 一次故障触发几百条重复告警，用户会关掉所有通知。
+  - id: INT-022
+    title: 通知模板的文案放进资源文件，按收件人的语言和时区渲染；模板带版本号，发送记录里记下用了哪个版本
+    level: soft
+    check: auto
+    how: i18n 检查覆盖邮件和通知模板；发送记录字段检查
+    applies: [kind:service]
+    why: 邮件和推送模板最容易漏掉翻译；没有模板版本就查不清用户当时看到的是什么。
+    detail: 文案写法、复数和日期格式见 09（A11Y-037 等）。
+    see: ["A11Y-037", "09"]
+  # ── 邮件 ──
+  - id: INT-023
+    title: 生产发信域必须配置 SPF、DKIM 和 DMARC，且 `From` 域与 SPF 或 DKIM 对齐；有效的反向解析和 TLS 发信
+    level: hard
+    check: auto
+    how: 上线前和定期用 DNS 查询检查三条记录；发一封到测试邮箱，检查认证结果头里 SPF、DKIM、DMARC 都是 pass
+    applies: [kind:service]
+    why: Gmail 要求批量发件人三者都配，不合规的邮件会被临时或永久拒收；不等量大了再补，一开始就配。
+    ref_value: Gmail 把 24 小时内向个人 Gmail 账号发送约 5,000 封及以上的定为批量发件人，DMARC 策略至少 `p=none`，垃圾邮件投诉率要低于 0.3%。
+    sources: [S07, S08, S10]
+  - id: INT-024
+    title: 营销和订阅邮件必须有可见的退订入口，并带 RFC 8058 一键退订头（`List-Unsubscribe` 和 `List-Unsubscribe-Post`），两天内处理退订
+    level: hard
+    check: auto
+    how: 邮件头测试检查两个头存在且格式正确；集成测试向退订地址发 POST 后，该地址进入退订名单
+    applies: [kind:service]
+    why: Gmail 对批量发件人强制要求一键退订；退订难的邮件会被标成垃圾邮件，连累同域的交易邮件。
+    detail: 交易邮件（验证码、订单、账单）不需要一键退订，也不要把它们误发成营销邮件。
+    sources: [S07, S09]
+  - id: INT-025
+    title: 交易、安全、营销邮件用不同的发送身份或子域；硬退信和投诉的地址进入抑制名单，停止非必要发送
+    level: soft
+    check: auto
+    how: 回放退信和投诉回执，检查地址进入抑制名单、下一次发送被拦截
+    applies: [kind:service]
+    why: 营销邮件的投诉会拖累同一发送身份的验证码邮件；继续向退信地址发信会损害发信声誉。
+    detail: 营销群发不要和验证码这类安全邮件共用一套系统和发送身份。
+    sources: [S11]
+  - id: INT-026
+    title: 邮件模板里的变量必须做 HTML 转义；每封 HTML 邮件同时提供纯文本版本
+    level: hard
+    check: auto
+    how: 模板快照测试里放入带 HTML 和脚本的变量，检查输出已转义；检查发出的邮件有 text/plain 部分
+    applies: [kind:service]
+    why: 未转义的用户输入会把钓鱼链接或伪造内容注入到以你的域名发出的邮件里。
+    detail: 用 React Email 或 MJML 生成邮件 HTML，不复用网页 CSS、不手拼 HTML；在主流客户端（含 Outlook、Gmail、移动端）预览。
+    sources: [S25, S26]
+  # ── 短信 ──
+  - id: INT-027
+    title: 发短信的接口在服务端按号码、账号、设备、IP、租户多维限频，并设每日费用上限和告警；不只靠前端倒计时和服务商的默认限频
+    level: hard
+    check: auto
+    how: 用模拟攻击流量（轮换号码、轮换 IP）测试限频和费用熔断生效
+    applies: [kind:service]
+    why: 短信接口是盗刷的常见目标，攻击者用大量号码刷费用；服务商的限频只按「签名 × 号码」，挡不住轮换号码。
+    detail: |
+      - 号码统一成 E.164 格式后再计数。
+      - 可疑号段或地区可以自动熔断。
+      - 验证码的有效期、一次性消费和校验次数见 19。
+    sources: [S13]
+    see: ["19"]
+  - id: INT-028
+    title: 验证码和完整手机号不写进日志、监控标签、队列错误信息和群聊告警
+    level: hard
+    check: auto
+    how: 日志脱敏测试；在测试数据里放已知验证码和号码，扫描日志和告警输出中不出现
+    applies: [kind:service]
+    why: 日志里的验证码等于可用的登录凭据；完整手机号是个人信息。
+    see: ["25", "27"]
+  - id: INT-029
+    title: 国内短信只用已审核通过的签名和模板，验证码、通知、营销分别用对应用途的模板；营销短信上线前按 27 做法规检查
+    level: hard
+    check: manual
+    how: 上线前核对服务商控制台里的签名和模板审核结果，并和代码里使用的模板编号对照
+    applies: [kind:service]
+    why: 未审核的签名和模板发不出去；为提高送达率换用其他用途的模板会违反服务商规则。
+    sources: [S12]
+    see: ["27"]
+  # ── 移动推送（服务端） ──
+  - id: INT-030
+    title: APNs 用基于令牌的认证（.p8 密钥签 JWT），复用 HTTP/2 长连接；JWT 每 20 到 60 分钟刷新一次，不每条消息新建连接或新签令牌
+    level: hard
+    check: semi
+    how: 评审推送客户端的连接和令牌缓存逻辑；压测时观察连接数和是否出现 `TooManyProviderTokenUpdates`
+    applies: [kind:service]
+    why: Apple 规定令牌刷新不能早于 20 分钟、超过 1 小时会被拒；频繁换令牌或新建连接会被限流。
+    detail: 多台服务器共用一个密钥时，由一处统一签发令牌，或错开刷新时间。APNs 接收了不等于设备已展示。
+    sources: [S14, S15]
+  - id: INT-031
+    title: FCM 用 HTTP v1 接口和服务账号的 OAuth 2.0 访问令牌（或官方 Admin SDK），不得使用已关停的旧版接口和服务器密钥
+    level: hard
+    check: auto
+    how: 代码扫描旧接口地址 `fcm.googleapis.com/fcm/send` 和服务器密钥的用法
+    applies: [kind:service]
+    why: 旧版 FCM 接口已在 2024 年关停，按旧教程写的代码发不出去。
+    detail: 中国大陆的安卓设备大多收不到 FCM，国内厂商推送通道见 28。
+    sources: [S16, S17]
+    see: ["28"]
+  - id: INT-032
+    title: 设备令牌按用户、应用、平台、环境分开保存；服务商返回令牌失效时立即停用，用户退出登录或解绑时删除
+    level: hard
+    check: auto
+    how: 测试模拟服务返回令牌失效错误后，该令牌不再被使用；测试退出登录后令牌被删除
+    applies: [kind:service]
+    why: 向失效令牌持续发送会被服务商限流；退出登录后还推送，可能把别人的通知发到旧设备上。
+    detail: 敏感内容不放进推送标题和正文，需要时显示为中性提示，用户打开应用后再拉取详情。
+    sources: [S15, S17]
+  # ── 企业 IM ──
+  - id: INT-033
+    title: IM 适配层按「纯文本、卡片、交互」三档声明能力；目标不支持交互回调时（如群自定义机器人），不发带操作按钮的卡片
+    level: soft
+    check: auto
+    how: 每个 IM 适配层有能力声明，渲染测试检查不支持交互的目标收到的消息里没有操作按钮
+    applies: [kind:service]
+    why: 飞书等的群自定义机器人只能往群里发消息，点了卡片按钮服务端收不到回调；用户以为点了「批准」，其实什么都没发生。
+    detail: |
+      - 纯文本是所有目标都要有的降级格式。
+      - 内部用中性的消息结构（标题、段落、字段、操作、降级文本），由各适配层渲染，不把 Slack 或飞书的卡片格式当通用格式。
+      - Slack 的 Incoming Webhook 不能删改已发消息，交互要用 Slack 应用。
+    sources: [S18, S19, S20]
+  - id: INT-034
+    title: 接收 IM 交互回调时按平台要求验签；按钮动作绑定业务幂等键，并校验点击者有权执行这个动作
+    level: hard
+    check: auto
+    how: 测试伪造签名的交互请求被拒；同一按钮点两次只执行一次；无权限的用户点击被拒
+    applies: [kind:service]
+    why: 群里的人不一定有权限批准；按钮被重复点击或回调被重放，会重复执行业务动作。
+    sources: [S20]
+  - id: INT-035
+    title: 新建的 Microsoft Teams 集成不得使用已退役的 Office 365 Connectors（旧式 Incoming Webhook），改用 Workflows 或 Teams 机器人
+    level: hard
+    check: auto
+    how: 代码和配置扫描旧连接器的地址格式（`webhook.office.com/webhookb2/`）
+    applies: [kind:service]
+    why: 微软已于 2026 年 5 月完成旧连接器的停用，按旧教程接入的消息发不出去。
+    detail: Workflows 依赖 Power Automate，上线前确认授权和流程的归属人。
+    sources: [S21]
+  # ── 用 OAuth 接入第三方账号 ──
+  - id: INT-036
+    title: 接入用户的第三方账号时用授权码流程加 PKCE 和 `state`，只申请当前功能需要的权限范围
+    level: hard
+    check: semi
+    how: 评审授权请求参数（`code_challenge`、`state`、`scope`）；测试回调里 `state` 不匹配时被拒
+    applies: [kind:service]
+    why: OAuth 安全最佳实践（RFC 9700）要求用授权码加 PKCE、不用隐式流程；`state` 防止攻击者把自己的账号绑到受害者名下。
+    detail: 回调地址精确匹配，不用通配。我方用户自己的登录见 19。
+    sources: [S30, S31]
+    see: ["19"]
+  - id: INT-037
+    title: 第三方访问令牌和刷新令牌加密存储，只在服务端使用，不下发到前端、不写进日志
+    level: hard
+    check: auto
+    how: 数据库字段检查为加密存储；日志脱敏测试；接口响应扫描不含令牌
+    applies: [kind:service]
+    why: 刷新令牌长期有效，泄露后攻击者可以一直以用户身份访问其第三方账号。
+    detail: 加密密钥的管理和轮换见 25。
+    sources: [S30]
+    see: ["25"]
+  - id: INT-038
+    title: 刷新令牌时同一连接只允许一个刷新在执行，保存服务商返回的新刷新令牌；刷新被拒（如 `invalid_grant`）时把连接标为失效并提示用户重新授权，不反复重试
+    level: soft
+    check: auto
+    how: 并发测试多个请求同时遇到令牌过期，只发生一次刷新；测试刷新被拒后连接状态变为失效
+    applies: [kind:service]
+    why: 很多服务商会轮换刷新令牌，并发刷新时后到的请求拿着已作废的旧令牌，会让整个连接失效。
+    sources: [S30]
+  - id: INT-039
+    title: 用户断开第三方连接或注销账号时，服务商支持撤销接口的调用撤销（RFC 7009），并删除本地保存的令牌
+    level: hard
+    check: semi
+    how: 测试断开连接后本地令牌被删除、撤销接口被调用；评审每个连接的撤销实现
+    applies: [kind:service]
+    why: 只删本地记录，令牌在服务商那边仍然有效，泄露过的副本照样能用；用户也会以为已经断开了。
+    sources: [S32]
+    see: ["27"]
+choices:
+  - category: 通知编排与站内信
+    pick: 项目内的轻量通知模块（outbox + 适配层），复用现有的数据和权限
+    when: 通知种类少、没有运营人员改模板和多步骤编排需求
+    alternatives:
+      - { name: Novu, when: 需要用户偏好中心、多步骤工作流、可嵌入的收件箱，且团队能运维它 }
+      - { name: 商业通知平台, when: 不要求私有化、希望少运维 }
+    avoid:
+      - { name: 只发两类告警就引入完整通知平台, why: 运维和许可成本远超收益 }
+    license: Novu 核心为 MIT，`enterprise/` 等目录为商业许可（企业版功能），自托管前确认要用的功能属于哪部分
+    sources: [S22]
+  - category: 轻量多目标通知
+    pick: Apprise
+    when: 运维告警、内部工具，一处配置发到多种 IM 和邮件
+    avoid:
+      - { name: 把 Apprise 的 URL 配置格式开放给不可信用户填写, why: 地址里带凭据，也可能被用来访问内网 }
+    license: BSD-2-Clause
+    notes: Apprise 只是发送客户端，不含偏好、站内信和发送状态。
+    sources: [S23]
+  - category: 事务邮件发送
+    pick: 云邮件服务的 API（如 Amazon SES、Postmark、Resend；国内如阿里云、腾讯云邮件推送），或客户现有的 SMTP 中继
+    alternatives:
+      - { name: Postal, when: 必须自建发信平台，且有人负责 IP 声誉、反向解析和投诉处理 }
+    avoid:
+      - { name: 自己写或自己搭公网 SMTP 服务就指望高送达, why: 难点在域名和 IP 声誉、反垃圾运营，不在软件 }
+    license: Postal 为 MIT
+    sources: [S11, S24]
+  - category: 邮件模板
+    pick: React Email（React/TypeScript 项目）
+    alternatives:
+      - { name: MJML, when: 跨语言或非 React 项目 }
+    avoid:
+      - { name: 手拼 HTML 或复用网页 CSS, why: 邮件客户端兼容性差，容易漏转义 }
+    license: 均为 MIT
+    sources: [S25, S26]
+  - category: 营销与订阅邮件
+    pick: listmonk
+    when: 确有订阅列表和群发需求
+    alternatives:
+      - { name: 商业邮件营销平台, when: 不要求私有化 }
+    avoid:
+      - { name: 用营销系统发验证码等安全邮件, why: 退订、声誉和时效要求都不同 }
+    license: AGPL-3.0；作为独立服务运行与集成进产品分发的要求不同，口径见 27
+    sources: [S27]
+  - category: 邮件测试
+    pick: Mailpit
+    alternatives:
+      - { name: GreenMail, when: Java 项目要在测试里内嵌 SMTP/IMAP 服务 }
+    avoid:
+      - { name: 测试环境直接发到真实邮箱, why: 误发给客户且结果不可重复 }
+    license: Mailpit 为 MIT；GreenMail 为 Apache-2.0
+    sources: [S28, S29]
+  - category: 国内短信
+    pick: 阿里云短信或腾讯云短信
+    alternatives:
+      - { name: 有合规资质的短信聚合商, when: 需要多通道灾备 }
+    avoid:
+      - { name: 用国际短信通道发国内业务, why: 违反运营商规则，送达也不稳定 }
+    notes: 商业服务，不能断网使用。法规要求见 27。
+    sources: [S12, S33]
+  - category: 回调验签
+    pick: 服务商官方 SDK 的验签函数；服务商用 Standard Webhooks 的，用 Standard Webhooks 官方库
+    alternatives:
+      - { name: 自己实现验签, when: 官方没有提供该语言的库；必须用官方测试向量覆盖 }
+    avoid:
+      - { name: 先解析 JSON 再重新序列化后验签, why: 字节变了，签名必然对不上 }
+      - { name: 只靠 IP 白名单, why: 地址会变，也挡不住同一云上的其他租户 }
+    sources: [S03, S04]
+  - category: iOS 推送（服务端）
+    pick: 直连 APNs 的 HTTP/2 接口，基于令牌认证；用所用语言里成熟的 APNs 客户端库
+    avoid:
+      - { name: 证书认证的新接入, why: 证书每年过期要换，令牌认证一个密钥可用于多个应用 }
+    sources: [S14, S15]
+  - category: Android 推送（服务端，海外）
+    pick: Firebase Admin SDK（底层为 FCM HTTP v1）
+    alternatives:
+      - { name: 直接调用 FCM HTTP v1, when: 所用语言没有 Admin SDK }
+    avoid:
+      - { name: FCM 旧版接口, why: 已关停 }
+    sources: [S16, S17]
+  - category: 企业 IM 通知
+    pick: 只推送通知用群机器人或 Incoming Webhook；需要交互、读用户信息、私聊时用应用机器人
+    avoid:
+      - { name: 群自定义机器人做审批按钮, why: 收不到点击回调 }
+      - { name: Teams 旧 Office 365 Connectors, why: 已退役，改用 Workflows 或 Teams 机器人 }
+    sources: [S18, S19, S21]
+  - category: 接入第三方账号（OAuth 客户端）
+    pick: 服务商官方 SDK 或所用语言里成熟的 OAuth 2.0 客户端库，开启 PKCE
+    avoid:
+      - { name: 自己拼授权和换令牌请求, why: 容易漏 `state`、PKCE 和令牌轮换处理 }
+      - { name: 隐式授权流程, why: RFC 9700 不再推荐 }
+    sources: [S30, S31]
+antipatterns:
+  - { bad: 在订单服务里直接调用发短信、发邮件, instead: 通知意图和业务一起写入 outbox，由后台任务发送 }
+  - { bad: 请求超时了就赶紧再发一条, instead: 标为结果未知，用幂等键、查状态或对账确认 }
+  - { bad: 服务商接口返回 200 就记为「已送达」, instead: 记为「已受理」，有回执再推进状态 }
+  - { bad: 所有错误统一重试三次, instead: 按错误类别决定重试、暂停或进抑制名单 }
+  - { bad: 先把回调 JSON 解析成对象，再序列化回去验签, instead: 保留原始请求字节验签 }
+  - { bad: 回调能正常解密就当它是真的, instead: 先验签，再解密 }
+  - { bad: 用户在客户端看到支付成功页就发货, instead: 以验签回调、主动查单和对账为准 }
+  - { bad: 把 webhook 机器人地址贴在文档、日志或工单里, instead: 当作密钥保管，泄露后立即重置 }
+  - { bad: 用群自定义机器人的卡片按钮做审批, instead: 用应用机器人，验签并校验点击者权限 }
+  - { bad: 照着旧教程给 Teams 接 Office 365 Connector, instead: 用 Workflows 或 Teams 机器人 }
+  - { bad: 只靠前端 60 秒倒计时防短信盗刷, instead: 服务端多维限频加费用封顶 }
+  - { bad: 用营销系统发验证码, instead: 交易、安全、营销分开发送身份和系统 }
+  - { bad: 第三方刷新令牌明文存库、多个请求同时刷新, instead: 加密存储，同一连接只允许一个刷新 }
+  - { bad: 私有化部署就声称所有通知渠道都能离线用, instead: 分开写明「服务能断网启动」和「消息能送到哪里」，并跑断网验收 }
+sources:
+  - { id: S01, title: "Making retries safe with idempotent APIs", url: "https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/", publisher: Amazon Web Services, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S02, title: "RFC 9110: HTTP Semantics", url: "https://www.rfc-editor.org/rfc/rfc9110.html", publisher: IETF, date: 2022-06, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: Standard Webhooks Specification, url: "https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md", publisher: Standard Webhooks, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: "stripe-node: Webhook signing", url: "https://github.com/stripe/stripe-node/blob/master/README.md", publisher: Stripe, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: 微信支付 APIv3 验签与解密易错点, url: "https://pay.wechatpay.cn/doc/v3/merchant/4054257711", publisher: 微信支付, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: 微信支付下载账单开发指引, url: "https://pay.wechatpay.cn/doc/v3/merchant/4013071218", publisher: 微信支付, date: 2026-10-13, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Gmail: Email sender guidelines", url: "https://support.google.com/mail/answer/81126?hl=en", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "Gmail: Email sender guidelines FAQ", url: "https://support.google.com/mail/answer/14229414", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "RFC 8058: Signaling One-Click Functionality for List Email Headers", url: "https://datatracker.ietf.org/doc/rfc8058/", publisher: IETF, date: 2017-01, kind: standard, checked: 2026-11-13 }
+  - { id: S10, title: "RFC 7489: DMARC", url: "https://datatracker.ietf.org/doc/rfc7489/", publisher: IETF, date: 2015-03, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: "Amazon SES: Monitoring using event publishing", url: "https://docs.aws.amazon.com/ses/latest/dg/monitor-using-event-publishing.html", publisher: Amazon Web Services, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: 阿里云短信：申请短信模板, url: "https://help.aliyun.com/zh/sms/user-guide/create-message-templates-1", publisher: 阿里云, date: 2026-10-15, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: 阿里云短信：发送规则, url: "https://help.aliyun.com/zh/sms/user-guide/message-rules", publisher: 阿里云, date: 2026-09-20, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "Establishing a token-based connection to APNs", url: "https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: "Establishing a connection to APNs", url: "https://developer.apple.com/documentation/usernotifications/establishing-a-connection-to-apns", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Migrate from legacy FCM APIs to HTTP v1", url: "https://firebase.google.com/docs/cloud-messaging/migrate-v1", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: "FCM: Send messages using the HTTP v1 API", url: "https://firebase.google.com/docs/cloud-messaging/send/v1-api", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: 飞书自定义机器人使用指南, url: "https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot", publisher: 飞书开放平台, date: 2025-03-27, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "Slack: Sending messages using incoming webhooks", url: "https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks", publisher: Slack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Slack: Creating interactive messages", url: "https://docs.slack.dev/messaging/creating-interactive-messages/", publisher: Slack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "Retirement of Office 365 connectors within Microsoft Teams", url: "https://devblogs.microsoft.com/microsoft365dev/retirement-of-office-365-connectors-within-microsoft-teams/", publisher: Microsoft, date: 2024-07-03, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: "Novu", url: "https://github.com/novuhq/novu", publisher: Novu, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "Apprise", url: "https://github.com/caronc/apprise", publisher: Apprise, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Postal", url: "https://github.com/postalserver/postal", publisher: Postal, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "React Email", url: "https://github.com/resend/react-email", publisher: Resend, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "MJML", url: "https://github.com/mjmlio/mjml", publisher: MJML, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "listmonk", url: "https://github.com/knadh/listmonk", publisher: listmonk, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: "Mailpit", url: "https://github.com/axllent/mailpit", publisher: Mailpit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: "GreenMail", url: "https://github.com/greenmail-mail-test/greenmail", publisher: GreenMail, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "RFC 9700: Best Current Practice for OAuth 2.0 Security", url: "https://www.rfc-editor.org/rfc/rfc9700.html", publisher: IETF, date: 2025-01, kind: standard, checked: 2026-11-14 }
+  - { id: S31, title: "RFC 7636: Proof Key for Code Exchange (PKCE)", url: "https://www.rfc-editor.org/rfc/rfc7636.html", publisher: IETF, date: 2015-09, kind: standard, checked: 2026-11-14 }
+  - { id: S32, title: "RFC 7009: OAuth 2.0 Token Revocation", url: "https://www.rfc-editor.org/rfc/rfc7009.html", publisher: IETF, date: 2013-08, kind: standard, checked: 2026-11-14 }
+  - { id: S33, title: 腾讯云短信：签名审核标准, url: "https://cloud.tencent.com/document/product/382/39022", publisher: 腾讯云, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - 待补调研：作为客户端用 OAuth 接入第三方账号（原报告未覆盖）。INT-036 至 INT-039 依据 RFC 9700、7636、7009 整理，S30–S32 只记了整理日期，没有逐条联网核对原文；各语言推荐的 OAuth 客户端库未定。
+  - Yahoo 对批量发件人的要求（与 Gmail 是否一致、阈值）未单独核实；Outlook.com 对大量发件人的要求未调研。
+  - Gmail 的一键退订「两天内处理」和「约 5,000 封/24 小时」来自 Google 发件人指南，本次通过搜索结果核实，交易邮件是否计入阈值各方说法不一。
+  - Standard Webhooks 的时间戳容忍窗口：16 记为规范未给定值，有二手资料称规范建议 300 秒，需对照规范原文。
+  - Novu 的许可证划分（核心 MIT、enterprise 目录商业许可）本次只从二手资料核实，需以官方仓库 LICENSE 文件为准；Apprise、Postal、React Email、MJML、listmonk、Mailpit、GreenMail 的许可证未联网核实。
+  - FCM 旧接口关停的确切日期（各资料为 2024 年 6 月至 7 月之间）以 Firebase 官方页面为准。
+  - 原报告引用的 OWASP Webhook Security Cheat Sheet 是否存在未核实，已不作为来源。
+  - 待补调研：钉钉、企业微信机器人的具体能力（卡片、回调、撤回）和限频；飞书应用机器人回调验签的具体方式。
+  - 待补调研：国际短信服务商选型；小米、OPPO、vivo 等国内厂商推送（归 28）。
+  - 待补调研：站内信（通知中心）的实现做法；通知打扰程度分级（与 09 的缺口相同）。
+  - 原报告中地图（坐标系、Nominatim 使用条款）和对象存储对接的内容未收入本主题；地图服务的归属待定，对象存储见 17。
