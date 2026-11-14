@@ -30,5 +30,9 @@
   },
   "bugs": {
     "url": "https://github.com/plumbrule/plumbrule/issues"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   }
 }
