@@ -1,0 +1,705 @@
+id: "07"
+slug: web
+title: Web 前端
+summary: Web 前端怎么选型和组织：框架与构建、何时用 SSR/SSG、路由、数据请求与缓存、状态、表单、组件库、样式、图表与编辑器等重型功能、前端监控、包体积与性能，以及私有化部署下的资源本地化。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - 项目类型与框架、构建工具选型；SSR/SSG 何时用
+    - 路由、数据请求与缓存、界面状态、表单
+    - 基础组件库与业务组件库选型、复制组件的维护
+    - 样式方案、图标、前端国际化库
+    - 表格、虚拟列表、拖拽、图表、代码编辑、Markdown、富文本、协同、白板、上传、PDF/Office 预览
+    - 实时连接（SSE/WebSocket）的客户端处理
+    - 前端错误监控、真实用户性能监控、包体积预算与加载性能
+    - 前端的 XSS、令牌存储、CSP 兼容等前端侧要求
+    - 私有化与断网部署下的前端资源本地化
+    - 嵌入式组件（widget）与可复用组件库的打包
+  excludes:
+    - { what: tsconfig 严格选项、lint 与格式化工具、包管理器与锁文件、单元测试库, see: "10" }
+    - { what: 格式化与 lint 的通用原则, see: "02" }
+    - { what: 视觉令牌（颜色、字号、间距、动效时长）与设计系统, see: "08" }
+    - { what: 对比度、键盘操作、读屏、焦点、减少动效、日期与数字的本地化显示, see: "09" }
+    - { what: OpenAPI 契约与客户端生成器的语义、错误格式、分页、事件格式, see: "16" }
+    - { what: 测试分层、E2E 工具与视觉回归原则, see: "04" }
+    - { what: 登录、会话、令牌签发、CSRF 方案、授权模型, see: "19" }
+    - { what: CSP、XSS 防护、上传安全、依赖漏洞扫描的通用规则, see: "25" }
+    - { what: 不可信文件的解析与服务端转换, see: "20" }
+    - { what: 发布、可观测性平台、告警, see: "26" }
+    - { what: 开源许可口径、数据出境与隐私法规, see: "27" }
+    - { what: 依赖升级与评审流程、ADR 写法, see: "03" }
+overview: |
+  1. **先定项目类型，再选框架。** 登录后的应用、管理后台、内容站、需要 SSR 的站点、嵌入式组件、组件库，各有默认选型；选择和拒绝的理由写进 ADR（架构决策记录）。
+  2. **登录后应用默认静态 SPA。** React + TypeScript + Vite + TanStack Router + TanStack Query，部署成静态文件，后端独立提供 API。公开内容站默认 Astro 静态生成。只有确实需要个性化 SSR 时才上 Next.js、React Router 框架模式或 TanStack Start，并把服务端运维和安全更新算进成本。
+  3. **数据各归其位。** 能从 URL 重建的状态放路由参数，服务器数据放请求缓存库，临时界面状态放组件内；不要把服务器实体复制进全局 store。
+  4. **一个应用一套。** 一套路由、一套基础组件库、一套样式方案、一个 HTTP 客户端层。
+  5. **不自己造基础设施。** 可访问的弹层和下拉、虚拟列表、复杂表格、拖拽、日期时区、HTML 净化、富文本、CRDT、代码编辑器、PDF 渲染都用成熟库。
+  6. **安全底线。** 不可信 HTML 不直接注入；令牌不进 localStorage；构建产物能在严格 CSP 下运行；权限和上传校验以服务端为准。
+  7. **重的按需加载。** 编辑器、图表、PDF、白板只在用到的路由或交互里加载；首屏和主要路由设包体积预算。
+  8. **按真实用户测性能。** 用 P75 的 LCP、INP、CLS 衡量，实验室跑分不能代替。
+  9. **私有化就全部本地。** 字体、图标、Worker、样式随应用内置，监控数据不出客户网络，在断网环境实际验收。
+rules:
+  # ── 选型与结构 ──
+  - id: WEB-001
+    title: 每个前端项目在 ADR 里写明项目类型（SPA、后台、内容站、SSR 站点、嵌入式组件、组件库）以及选用和放弃的框架
+    level: soft
+    check: semi
+    how: CI 检查仓库里有前端选型 ADR；评审时看新项目是否说明了放弃的选项
+    applies: [platform:web]
+    why: 惯性选型常在后期才暴露问题，比如为不需要 SEO 的后台引入 SSR，多出服务端运维和缓存治理。
+    see: ["03", "05"]
+  - id: WEB-002
+    title: 登录后才能用的应用默认构建为静态 SPA；公开可索引的内容默认静态生成；只有需要个性化服务端渲染时才用 SSR 框架
+    level: soft
+    check: manual
+    how: 评审选型 ADR 时核对：选 SSR 的理由是否具体（SEO 的个性化页面、首屏数据必须服务端取），是否评估了部署、缓存一致性和安全更新
+    applies: [platform:web]
+    why: SSR 带来 Node 服务、多实例缓存一致性和服务端组件安全更新等运维负担；登录后应用通常不需要 SEO。
+    detail: |
+      - 静态 SPA 部署时，静态服务器要配置 history 回退（未知路径返回 index.html）。
+      - 官网和应用同域不等于必须同一框架：`www` 用 Astro、`app` 用 Vite SPA，共享设计令牌和身份服务即可。
+      - 公开页面多且需要个性化时，用真实样板工程对比 Astro、Next.js、React Router 框架模式和 TanStack Start，而不是只比构建速度。
+    sources: [S05, S32, S36]
+  - id: WEB-003
+    title: 一个应用只用一套路由库，不混用两套路由
+    level: soft
+    check: auto
+    how: CI 检查依赖清单里同时出现多个路由库（如 react-router 和 @tanstack/react-router）时报错
+    applies: [platform:web]
+    why: 两套路由的导航、数据加载和 URL 语义不一致，链接和返回行为会出错。
+    sources: [S06]
+  - id: WEB-004
+    title: 筛选、排序、分页、当前标签页等能从 URL 重建的视图状态放进路由的查询参数
+    level: soft
+    check: manual
+    how: 评审时检查：刷新页面或分享链接后视图是否还原
+    applies: [platform:web]
+    why: 放在内存里的视图状态刷新就丢，也无法分享和回退。
+    sources: [S06]
+  - id: WEB-005
+    title: 服务器数据交给请求缓存库或框架的 loader 管理，不复制进全局 store
+    level: soft
+    check: semi
+    how: 评审时检查全局 store 里是否存放了接口返回的实体列表；确需复制的写明理由
+    applies: [platform:web]
+    why: 复制出来的数据会过期，失效、重试、乐观更新都要自己再实现一遍。
+    detail: |
+      状态归属：
+      - URL 可重建的视图 → 路由查询参数
+      - 服务器实体（列表、详情、权限快照）→ 请求缓存库或 loader
+      - 纯本地临时状态（弹层开关、表单中间值）→ 组件内 state
+      - 跨视图共享的轻量客户端状态（布局偏好、命令面板开关）→ context 或轻量 store
+      - 会话与权限 → 服务端为准，前端只持有展示用的副本
+    sources: [S07, S37]
+  - id: WEB-006
+    title: 所有接口调用经过统一的 HTTP 客户端层，鉴权、错误转换、超时和重试只在这一层实现
+    level: soft
+    check: auto
+    how: 用 lint 的 import 限制规则禁止在客户端层以外直接调用 fetch 或引入 HTTP 库
+    applies: [platform:web]
+    why: 每个页面各写一套 401 处理和重试，会导致认证行为分叉和重试风暴。
+  - id: WEB-007
+    title: 后端提供 OpenAPI 契约时，前端的接口类型从契约生成，生成文件不手改
+    level: hard
+    check: auto
+    how: CI 重新运行生成命令后执行 `git diff --exit-code`，有差异即失败
+    applies: [platform:web]
+    why: 手写的接口类型会和后端悄悄漂移，错误要到运行时才暴露。
+    sources: [S35]
+    see: ["16", "10"]
+  - id: WEB-008
+    title: 新增依赖前登记用途、备选、许可证、维护状态、包体积影响和需要的外部资源
+    level: soft
+    check: semi
+    how: PR 模板要求填写；CI 发现依赖清单新增直接依赖时检查 PR 描述是否有登记
+    applies: [platform:web]
+    why: 前端依赖增长快，事后很难说清每个包为什么在、能不能删。
+    see: ["03"]
+  - id: WEB-009
+    title: 商业许可、强 copyleft 或已归档的包未经许可审查不得引入；同一项目的免费版和付费版功能要分清
+    level: hard
+    check: auto
+    how: CI 对锁文件跑许可证扫描，命中禁用或待审许可证即失败；评审时核对精确包名
+    applies: [platform:web]
+    why: 名字相近的包可能许可和维护状态完全不同；付费功能误当免费用有法律风险。
+    detail: |
+      常见坑：
+      - `react-pdf`（wojtekmaj，MIT）和 `react-pdf-viewer`（已归档、商业许可）是两个项目。
+      - AG Grid 社区版是 MIT，企业版功能需要商业许可；Tiptap 核心是 MIT，Pro 扩展和云服务另有条款。
+      - tldraw、在线 Office 预览服务的许可要逐项审查。
+    sources: [S13, S17, S21, S22]
+    see: ["27"]
+  - id: WEB-010
+    title: 依赖的主版本升级单独提 PR，写明影响范围、迁移步骤和回滚方式，并跑完整 E2E；不批量升级多个主版本
+    level: soft
+    check: semi
+    how: CI 发现依赖主版本变化时，要求 PR 描述包含迁移和回滚小节
+    applies: [platform:web]
+    why: 前端库的主版本常有不兼容的 API 变化（如 TanStack Table 新主版本与旧版不兼容），混在一起升级出问题时无法定位。
+    sources: [S14]
+    see: ["03"]
+  # ── 组件与交互 ──
+  - id: WEB-011
+    title: 对话框、菜单、弹出层、下拉选择、组合框等交互组件，基于成熟的可访问基础组件库实现，不自己写焦点管理和键盘交互
+    level: hard
+    check: semi
+    how: 评审时检查新组件里是否手写了焦点陷阱、`role="dialog"`、方向键导航等逻辑；有则要求改用基础组件库
+    applies: [platform:web]
+    why: 焦点、键盘、遮罩滚动、层级这些行为细节多，自己写几乎一定漏掉读屏和键盘用户。
+    sources: [S09, S10, S11]
+    see: ["09"]
+  - id: WEB-012
+    title: 同一应用的公共组件层只用一套基础组件库，不混用多套
+    level: soft
+    check: auto
+    how: CI 检查依赖清单里同时出现多套基础组件库（如 Base UI、Radix、React Aria、Ark UI）时报错，例外要有 ADR
+    applies: [platform:web]
+    why: 不同库的事件模型、样式接口和可访问实现不一致，组合起来行为难以预测。
+  - id: WEB-013
+    title: 以源码方式复制进仓库的组件（如 shadcn/ui）登记上游来源、引入时的版本和本地修改；业务页面复用公共组件，不另复制变体
+    level: soft
+    check: semi
+    how: 维护一份组件清单文件；CI 检查公共组件目录里的文件都在清单中
+    applies: [platform:web]
+    why: 复制源码换来了定制自由，代价是上游修复不会自动到达；不登记就没法升级。
+    sources: [S08]
+    see: ["08"]
+  - id: WEB-014
+    title: 虚拟列表、复杂表格、拖拽排序、日期时区计算、富文本、协同编辑、代码编辑器、PDF 渲染、终端模拟用成熟库，不自己实现
+    level: soft
+    check: manual
+    how: 评审时识别自研的此类实现；确需自研的，先写一份「自研还是采用」的决策记录，列出候选库、缺口、测试和负责人
+    applies: [platform:web]
+    why: 这些领域边界情况极多（动态行高、输入法、时区和夏令时、选区和撤销），自研的成本和缺陷远超预期。
+    detail: |
+      可以自己写的：具体业务流程、页面布局、简单展示组件、接口适配和数据转换、与业务语义绑定的交互。
+  - id: WEB-015
+    title: 一个应用只用一套主样式方案；全局样式只在应用入口定义
+    level: soft
+    check: semi
+    how: 评审时检查是否同时引入多套原子类框架或 CSS-in-JS 库；lint 限制全局样式只能在入口文件引入
+    applies: [platform:web]
+    why: 多套样式方案叠加会造成优先级冲突和体积膨胀。
+    see: ["08"]
+  - id: WEB-016
+    title: 界面文案不硬编码在组件里，统一走 i18n 库；语言包随应用打包，不在运行时请求公网翻译服务
+    level: soft
+    check: semi
+    how: lint 规则查找 JSX 里的裸文本字面量；构建产物 URL 扫描
+    applies: [platform:web]
+    why: 硬编码文案后续无法翻译；在线翻译服务在内网和断网环境不可用。
+    see: ["09"]
+  # ── 健壮性 ──
+  - id: WEB-017
+    title: 每个数据请求处理加载中、空结果、错误三种状态，并在离开页面时取消未完成的请求；每个路由有错误边界
+    level: soft
+    check: semi
+    how: 组件测试用接口模拟返回空和错误；评审时检查请求是否接入取消信号
+    applies: [platform:web]
+    why: 只处理成功路径的页面，在网络慢或接口出错时会白屏或显示过期数据。
+  - id: WEB-018
+    title: 关键用户流程的 E2E 覆盖六种状态：成功、空结果、接口错误、超时、无权限、断网
+    level: soft
+    check: auto
+    how: 用 E2E 框架的网络拦截模拟各状态；CI 检查关键流程的测试用例齐全
+    applies: [platform:web]
+    why: 只测成功路径，最常见的故障场景就没人验证过。
+    ref_value: 六种状态是本规范统一的口径，取代原调研中「正常/超时/无权限」等多种说法。
+    see: ["04"]
+  - id: WEB-019
+    title: SSE 和 WebSocket 连接集中在通信层管理：断线指数退避加随机抖动重连、认证失效时重新认证、按事件编号去重，服务端支持时用游标续传
+    level: soft
+    check: semi
+    how: 测试里模拟断线、重复和乱序事件；评审时检查组件内是否直接创建连接
+    applies: [platform:web]
+    why: 组件里各自开连接容易重复订阅、内存泄漏；不退避的重连会在服务恢复时形成风暴。
+    see: ["16"]
+  - id: WEB-020
+    title: 日期时间用日期库或 Intl 处理；接口传输带时区偏移的 ISO 8601 字符串，不用 `new Date('YYYY-MM-DD')` 做业务计算
+    level: soft
+    check: semi
+    how: lint 规则查找对日期字符串直接 `new Date()` 的用法；测试在固定时区和夏令时切换日运行
+    applies: [platform:web]
+    why: 不带时区的日期字符串在不同浏览器和时区下解析结果不同，常导致差一天的错误。
+    see: ["09", "16"]
+  # ── 安全 ──
+  - id: WEB-021
+    title: 不可信的 HTML 和 Markdown 不得未经净化注入 DOM；Markdown 渲染默认禁用原生 HTML，并校验链接协议
+    level: hard
+    check: auto
+    how: lint 禁用 `dangerouslySetInnerHTML`、`innerHTML`、`v-html`，例外只允许经过净化函数的调用点；安全测试放入 XSS 载荷
+    applies: [platform:web]
+    why: 用户内容、评论、工具输出里的 HTML 是 XSS 的主要入口。净化器本身也会有漏洞，所以先避免渲染 HTML，必须渲染时再净化。
+    detail: |
+      - 链接只允许 http、https、mailto 等白名单协议，拒绝 `javascript:`。
+      - 需要渲染 HTML 时用 DOMPurify 这类维护活跃的净化库，配置严格白名单。
+      - 图示代码（如 Mermaid）来自用户时，开启其安全模式。
+    sources: [S28, S26, S25, S20]
+    see: ["25"]
+  - id: WEB-022
+    title: 访问令牌和刷新令牌不得写入 localStorage 或 sessionStorage
+    level: hard
+    check: semi
+    how: 代码扫描查找对 localStorage/sessionStorage 写入 token 类键名；评审登录实现
+    applies: [platform:web]
+    why: 页面一旦有 XSS，脚本可读的存储里的令牌会被直接窃取。
+    detail: |
+      推荐服务端会话加 HttpOnly、Secure、SameSite Cookie，或由 BFF（为前端服务的后端）持有令牌。用 Cookie 鉴权时写操作要有 CSRF 防护，CORS 不能代替 CSRF 防护，方案见 19。确需在前端持有令牌时，只放内存并缩短有效期。
+    sources: [S27]
+    see: ["19", "25"]
+  - id: WEB-023
+    title: 前端构建产物不依赖内联脚本和 eval，能在不含 unsafe-inline、unsafe-eval 的 CSP 下正常运行
+    level: hard
+    check: auto
+    how: E2E 在启用严格 CSP 的环境运行，检查控制台和 CSP 报告里没有违规
+    applies: [platform:web]
+    why: 产物离不开 unsafe-inline 或 unsafe-eval，CSP 就形同虚设。静态站点可以用哈希，SSR 可以用 nonce。
+    sources: [S29]
+    see: ["25"]
+  - id: WEB-024
+    title: 权限以服务端校验为准；前端隐藏按钮和菜单只是体验，不作为访问控制
+    level: hard
+    check: semi
+    how: 每个受保护接口有服务端权限负例测试；评审时检查是否有只靠前端判断的权限
+    applies: [platform:web]
+    why: 前端代码和请求都能被用户随意修改。
+    sources: [S27]
+    see: ["19"]
+  - id: WEB-025
+    title: 上传文件的类型、大小、配额和权限以服务端校验为准，前端的 accept 和大小提示只改善体验
+    level: hard
+    check: semi
+    how: 服务端有绕过前端直接上传的负例测试
+    applies: [platform:web]
+    why: 前端校验可以被绕过。
+    see: ["25", "20"]
+  - id: WEB-026
+    title: 使用服务端组件（RSC）或 SSR 框架的项目，订阅框架安全公告，严重漏洞按安全修复时限升级
+    level: hard
+    check: auto
+    how: 依赖漏洞扫描覆盖框架包，告警进入安全修复流程
+    applies: [platform:web]
+    why: 服务端渲染让前端框架的漏洞变成服务端漏洞；React 官方曾公告服务端组件的严重漏洞。
+    sources: [S33]
+    see: ["25"]
+  # ── 第三方资源与私有化 ──
+  - id: WEB-027
+    title: 页面加载的外部脚本、字体、CDN、iframe、统计和地图服务列成清单，写明域名、用途、传出的数据和离线替代
+    level: soft
+    check: auto
+    how: CI 扫描构建产物里的外部 URL，与清单比对，不在清单里的报错
+    applies: [platform:web]
+    why: 外部资源会带出用户数据，也会在内网和断网环境里失效。
+    see: ["27"]
+  - id: WEB-028
+    title: 私有化或断网部署的前端，字体、图标、样式、Worker（PDF.js、Monaco 等）全部随应用提供，不请求任何未批准的外部地址，并在断网环境验收
+    level: hard
+    check: auto
+    how: E2E 在屏蔽外网的环境运行核心流程，拦截并记录所有外部请求，有则失败
+    applies: [platform:web, kind:onprem]
+    why: 联网环境下能用不代表断网能用；字体、Worker 和图标偷连外网，是断网部署最常见的故障。
+    ref_value: 参考值：未批准的外部请求为 0 个。
+    sources: [S19, S21, S24]
+    see: ["32"]
+  - id: WEB-029
+    title: 前端错误和性能上报先去敏：不上报用户输入、正文、令牌和完整 URL 查询参数；含客户数据的上报不得发往未批准的公网服务
+    level: hard
+    check: semi
+    how: 上报 SDK 配置统一的过滤钩子并有单元测试；评审出口清单
+    applies: [platform:web]
+    why: 错误上下文、录屏和面包屑里常带着用户数据，发到第三方就是数据外泄。
+    detail: |
+      - 生产 sourcemap 只上传给监控服务，不随静态资源公开部署。
+      - 录屏类功能默认关闭，开启需隐私评审。
+    see: ["27", "26"]
+  - id: WEB-030
+    title: 每次构建带唯一的发布编号，错误上报和性能数据都附带它
+    level: soft
+    check: auto
+    how: CI 检查构建产物里注入了发布编号；监控里能按发布编号筛选
+    applies: [platform:web]
+    why: 没有发布编号，线上错误无法对应到具体版本和 sourcemap。前端错误边界也不能代替服务端观测。
+    see: ["26"]
+  # ── 性能 ──
+  - id: WEB-031
+    title: 为首屏和主要路由设包体积预算并在 CI 检查，超出要在 PR 里说明
+    level: soft
+    check: auto
+    how: 用 size-limit 或构建分析工具在 CI 比对预算
+    applies: [platform:web]
+    why: 不设预算，「顺手引入一个大库」会逐步拖慢首屏。
+    ref_value: 起步参考（自拟草案，无公认出处，按目标设备和网络校准）：登录后 SPA 首屏 JS 约 170 KB（gzip）；内容页首屏 JS 约 80 KB（gzip），纯内容页力争 0 JS；按需加载的单个 chunk 超过约 250 KB（gzip）时说明。
+  - id: WEB-032
+    title: 代码编辑器、图表、PDF 预览、富文本、白板、Office 预览按路由或交互懒加载，不进首屏包
+    level: soft
+    check: auto
+    how: 构建分析检查首屏 chunk 里不含这些库
+    applies: [platform:web]
+    why: 这些库体积大，只有少数页面用到，却让所有用户付出首屏成本。
+  - id: WEB-033
+    title: 在生产环境用真实用户数据按 P75 衡量 LCP、INP、CLS，以官方「良好」阈值为目标；实验室跑分不代替真实用户数据
+    level: soft
+    check: auto
+    how: 用 web-vitals 采集上报到自有收集端；CI 另跑 Lighthouse 防退步
+    applies: [platform:web]
+    why: 开发机上的满分不能说明中低端设备和慢网络上的体验。
+    ref_value: 官方「良好」阈值：LCP ≤ 2.5 秒、INP ≤ 200 毫秒、CLS ≤ 0.1，按 75 百分位计；移动和桌面分开看。
+    sources: [S30]
+  - id: WEB-034
+    title: 首屏最大内容的图片不懒加载并写明宽高；字体自托管并设置 font-display
+    level: soft
+    check: auto
+    how: Lighthouse CI 检查 LCP 图片懒加载和布局偏移；构建扫描字体来源
+    applies: [platform:web]
+    why: 懒加载 LCP 图片会推迟最大内容绘制；不写尺寸会引起布局偏移。
+    sources: [S31]
+  # ── 打包形态 ──
+  - id: WEB-035
+    title: 嵌入第三方页面的组件做样式和全局变量隔离；宿主不可信或需强隔离时用 iframe
+    level: soft
+    check: manual
+    how: 在一个带冲突样式的测试宿主页面里加载组件，检查双方样式互不影响
+    applies: [platform:web]
+    why: 嵌入组件污染宿主的全局 CSS 和 window，会破坏客户页面。
+  - id: WEB-036
+    title: 可复用组件库把 react、react-dom 声明为 peerDependencies，构建时不打进产物，并提供 exports 和类型声明
+    level: soft
+    check: auto
+    how: CI 检查 package.json 的 peerDependencies，并扫描产物中不含 React 源码
+    applies: [platform:web, kind:library]
+    why: 组件库自带一份 React 会让使用方出现两份 React 实例，hooks 失效。
+choices:
+  - category: 登录后应用的框架与构建
+    pick: React + TypeScript + Vite，构建为静态 SPA
+    alternatives:
+      - name: Vue + Vite
+        when: 团队熟悉 Vue 或客户已有 Vue 资产；路由用 Vue Router，状态用 Pinia
+      - name: Svelte + SvelteKit
+        when: 团队熟悉且有明确收益时试点
+    avoid:
+      - { name: 不分场景一律用 SSR 框架, why: 登录后应用通常不需要 SEO，多出服务端运维 }
+    license: React、Vite 为 MIT
+    notes: Vite 新主版本已改用 Rolldown 作为打包器。React 已移交 Linux 基金会下的 React 基金会托管（据社区报道）。
+    sources: [S01, S02]
+  - category: 需要服务端渲染时的框架
+    pick: 已有 React 团队且需要渐进 SSR：React Router 框架模式；已深度用 TanStack：TanStack Start
+    alternatives:
+      - name: Next.js
+        when: 内容与 React SSR 深度融合、团队已熟悉；自托管多实例时按官方要求处理缓存一致性
+      - name: Nuxt
+        when: Vue 团队需要 SSR
+    avoid:
+      - { name: 没做部署与缓存评估就引入服务端组件, why: 服务端组件有独立的安全更新压力和缓存一致性问题 }
+      - { name: 一个项目里混用多套 SSR 框架, why: 路由和数据加载模型互相冲突 }
+    license: React Router、TanStack Start、Next.js 为 MIT
+    notes: React Router 新主版本已发布并按年度节奏发主版本，React Router v6 和 Remix v2 已停止维护；原 Remix 框架的延续就是 React Router 框架模式，Remix 新版仍在预发布。TanStack Start 已发布 1.0 稳定版。
+    sources: [S03, S04, S05, S32]
+  - category: 官网、博客、内容站
+    pick: Astro（静态优先，交互部分用 islands 按需加载）
+    alternatives:
+      - { name: Starlight（基于 Astro）或 VitePress, when: 技术文档站 }
+    avoid:
+      - { name: 把纯内容页做成客户端 SPA, why: SEO 和首屏都差 }
+    license: Astro 为 MIT
+    sources: [S36]
+  - category: 路由
+    pick: TanStack Router（类型安全）
+    alternatives:
+      - { name: React Router, when: 已有 React Router 资产或使用其框架模式 }
+    avoid:
+      - { name: 自写路由或混用两套, why: 导航与 URL 语义不一致 }
+    license: MIT
+    sources: [S06]
+  - category: 数据请求与缓存
+    pick: TanStack Query + 统一的类型化 HTTP 客户端
+    alternatives:
+      - { name: 框架自带的 loader, when: 使用 SSR 框架时与框架数据机制对齐 }
+      - { name: SWR, when: 需求简单、只要缓存与重新验证 }
+    avoid:
+      - { name: 自建全局请求缓存, why: 失效、重试、去重都要重写 }
+    license: MIT
+    sources: [S07]
+  - category: 界面状态
+    pick: 组件内 state 和 context；跨视图共享的轻量状态用 Zustand
+    alternatives:
+      - { name: Jotai, when: 原子化的跨区域状态 }
+      - { name: Redux Toolkit, when: 已有 Redux 资产或需要严格的动作审计 }
+    avoid:
+      - { name: 把服务器实体复制进全局 store, why: 数据过期且失效难管 }
+    license: MIT
+    sources: [S37]
+  - category: 表单与校验
+    pick: React Hook Form + Zod
+    alternatives:
+      - { name: TanStack Form, when: 类型要求高的动态表单 }
+      - { name: 原生 form + schema 校验, when: 简单表单 }
+    avoid:
+      - { name: 手写通用校验引擎, why: 规则分散，前后端各一套真相 }
+    license: MIT
+  - category: 基础组件（定制产品界面）
+    pick: shadcn/ui + Base UI
+    alternatives:
+      - { name: shadcn/ui + Radix, when: 已有 Radix 项目，不必迁移 }
+      - { name: React Aria Components, when: 可访问性要求严、组件复杂 }
+      - { name: Mantine, when: 快速搭建内部工具，不需深度定制 }
+    avoid:
+      - { name: 自写焦点陷阱和可访问弹层, why: 行为细节多，难以做对 }
+      - { name: 同一组件层混用多套基础组件库, why: 事件和样式模型不一致 }
+    license: shadcn/ui、Base UI、Radix、React Aria、Mantine 为 MIT
+    notes: shadcn/ui 新项目已默认使用 Base UI，Radix 仍受支持。Base UI 已发布 1.0 稳定版并持续更新。
+    sources: [S08, S09, S10, S11]
+  - category: 管理后台组件库
+    pick: Ant Design
+    when: 表单、表格密集的 B 端后台，或客户已有 Ant Design 项目；不必强行改写成 shadcn/ui
+    alternatives:
+      - { name: Element Plus, when: Vue 项目 }
+    license: MIT
+    sources: [S38]
+  - category: 样式方案
+    pick: Tailwind CSS + CSS 变量（定制产品）；Ant Design 项目用其主题机制
+    alternatives:
+      - { name: CSS Modules 或普通 CSS, when: 团队不用原子类或组件库自带样式体系 }
+    avoid:
+      - { name: 同时混用多套原子类或 CSS-in-JS, why: 优先级冲突、体积膨胀 }
+      - { name: 在线字体服务, why: 内网和断网不可用，且泄露访问记录 }
+    license: MIT
+    notes: Tailwind Labs 在 2026 年初大幅裁员；框架仍为 MIT，后续维护归属见待确认。
+    sources: [S12]
+  - category: 图标
+    pick: lucide-react（按需导入）
+    alternatives:
+      - { name: "@ant-design/icons", when: Ant Design 项目 }
+    avoid:
+      - { name: 运行时从在线图标 CDN 加载, why: 断网不可用 }
+    license: ISC
+  - category: 表格
+    pick: TanStack Table（高度定制）；后台用 Ant Design Table
+    alternatives:
+      - { name: AG Grid 社区版, when: 大型数据网格；企业版功能需商业许可 }
+    avoid:
+      - { name: 照着旧主版本教程写新版代码, why: 新主版本 API 不兼容 }
+      - { name: 自研排序、列拖动、树形行, why: 交互和性能问题多 }
+    license: TanStack Table 为 MIT；AG Grid 社区版 MIT，企业版商业
+    sources: [S13, S14]
+  - category: 虚拟列表
+    pick: TanStack Virtual
+    alternatives:
+      - { name: react-window, when: 固定行高的简单列表 }
+    avoid:
+      - { name: 自研动态高度虚拟滚动, why: 滚动定位和键盘操作容易出错 }
+    license: MIT
+    sources: [S15]
+  - category: 拖拽
+    pick: "@dnd-kit/core"
+    alternatives:
+      - { name: "@dnd-kit/react", when: 新项目可评估；仍处 0.x，关键路径先做迁移和键盘回归 }
+      - { name: 原生 HTML 拖放, when: 文件拖入等简单交互 }
+    avoid:
+      - { name: react-beautiful-dnd, why: 旧方案，已不维护 }
+    license: MIT
+    sources: [S16]
+  - category: 日期时间
+    pick: date-fns + Intl（目标浏览器支持时可用 Temporal）
+    alternatives:
+      - { name: Day.js, when: Ant Design 项目 }
+      - { name: Luxon, when: 时区逻辑重 }
+    license: MIT
+  - category: 图表
+    pick: Apache ECharts（复杂看板）；Recharts（React 简单报表）
+    alternatives:
+      - { name: visx 或 uPlot, when: 特殊定制或大规模时序数据 }
+    avoid:
+      - { name: 自写坐标轴、提示框和布局, why: 工作量大且难做对 }
+    license: ECharts 为 Apache-2.0；Recharts 为 MIT
+    sources: [S23]
+  - category: 代码编辑与 diff
+    pick: Monaco Editor（类 IDE 和 diff）；CodeMirror（轻量编辑）
+    alternatives:
+      - { name: react-diff-view, when: 只读 diff 展示 }
+    avoid:
+      - { name: 在普通评论框加载 Monaco, why: 体积大 }
+      - { name: 用 textarea 造编辑器, why: 缺选区、补全、撤销 }
+    license: MIT
+    notes: Monaco 的 Worker 要随应用本地提供。
+    sources: [S24]
+  - category: Markdown 渲染
+    pick: react-markdown + remark-gfm，禁用原生 HTML
+    alternatives:
+      - { name: markdown-it + DOMPurify, when: 有特定语法插件需求 }
+    avoid:
+      - { name: 渲染结果直接 dangerouslySetInnerHTML, why: XSS }
+    license: react-markdown 为 MIT；DOMPurify 为 Apache-2.0 或 MPL-2.0 双许可
+    sources: [S25, S26]
+  - category: 富文本
+    pick: Tiptap 核心（扩展模型成熟）
+    when: 确有富文本需求时才引入；先用 Markdown 加预览能满足就不引入
+    alternatives:
+      - { name: Lexical, when: 需要深度定制编辑器 }
+      - { name: ProseMirror, when: 高度特殊的编辑模型 }
+    avoid:
+      - { name: 自造选区、撤销、粘贴处理, why: 输入法和浏览器差异极多 }
+    license: Tiptap 核心、Lexical、ProseMirror 为 MIT；Tiptap Pro 和云服务为商业
+    sources: [S17]
+  - category: 协同编辑
+    pick: Yjs + 编辑器绑定 + provider + 自有的权限与持久化
+    when: 文档级实时协作需求被验证后再引入
+    alternatives:
+      - { name: Automerge, when: 需要不同的同步模型 }
+    avoid:
+      - { name: 自写 CRDT 或 OT, why: 正确性难保证 }
+      - { name: 把 Yjs 文档当业务审计记录, why: 缺权限、版本和审计 }
+    license: MIT
+    sources: [S18]
+  - category: 白板与流程图
+    pick: Excalidraw（自由绘图）；React Flow（节点编辑）；Mermaid（只读图示）
+    alternatives:
+      - { name: ELK.js 或 Dagre, when: 需要自动布局；ELK.js 为 EPL-2.0 }
+      - { name: tldraw, when: 先审许可再用 }
+    avoid:
+      - { name: 把自由白板当流程引擎, why: 缺节点和边的约束模型 }
+    license: Excalidraw、React Flow、Mermaid 为 MIT
+    notes: Excalidraw 的字体要自托管；用户提供的 Mermaid 代码开启安全模式。
+    sources: [S19, S20]
+  - category: 文件上传
+    pick: 原生 File / FormData + react-dropzone
+    alternatives:
+      - { name: Uppy, when: 大文件分片、断点续传、多来源 }
+    license: MIT
+  - category: PDF 预览
+    pick: react-pdf（wojtekmaj）+ 本地提供的 PDF.js Worker
+    alternatives:
+      - { name: 直接封装 pdfjs-dist, when: 需要细粒度控制 }
+    avoid:
+      - { name: react-pdf-viewer, why: 已归档且为商业许可 }
+      - { name: 外部 PDF 查看服务, why: 文件外传 }
+    license: react-pdf 为 MIT；PDF.js 为 Apache-2.0
+    sources: [S21, S22]
+  - category: Office 预览
+    pick: 服务端转换成 PDF 或图片后预览
+    alternatives:
+      - { name: 自托管 Collabora Online 或 ONLYOFFICE, when: 需要原格式交互编辑；许可证逐项审查 }
+    avoid:
+      - { name: 公网在线 Office 预览, why: 客户文件外传 }
+    notes: 服务端转换见 20。
+  - category: 实时通信
+    pick: 服务端单向推送用 SSE；双向用 WebSocket；流式响应用 fetch 流
+    alternatives:
+      - { name: Socket.IO, when: 需要其协议生态和降级能力 }
+    avoid:
+      - { name: 每条消息轮询, why: 浪费且延迟高 }
+      - { name: 组件里各自开连接和重连, why: 重复订阅、泄漏 }
+    license: Socket.IO 为 MIT
+  - category: 前端国际化库
+    pick: i18next + react-i18next
+    alternatives:
+      - { name: FormatJS（react-intl）, when: 需要完整 ICU 消息格式 }
+      - { name: vue-i18n, when: Vue 项目 }
+    avoid:
+      - { name: 运行时请求公网翻译, why: 断网不可用 }
+    license: MIT
+    notes: 本地化显示的行为要求见 09。
+  - category: 动画
+    pick: CSS 过渡 + View Transitions
+    alternatives:
+      - { name: Motion, when: 需要编排复杂动画 }
+    avoid:
+      - { name: 为简单交互引入重型动画库, why: 体积 }
+    license: MIT
+    notes: 动效时长见 08，减少动效见 09。
+    sources: [S01]
+  - category: 组件文档
+    pick: Storybook（组件库、设计系统）
+    alternatives:
+      - { name: Ladle, when: 需要更轻量 }
+    avoid:
+      - { name: 每个业务单页应用都装 Storybook, why: 维护成本大于收益 }
+    license: MIT
+  - category: 错误监控
+    pick: Sentry 自托管或自有错误收集服务，配合发布编号和 sourcemap 管理
+    alternatives:
+      - { name: GlitchTip, when: 需要更轻量的自托管方案 }
+    avoid:
+      - { name: 默认把异常和 sourcemap 上传公网 SaaS, why: 客户数据外泄 }
+    notes: 许可证见待确认。
+  - category: 性能监控
+    pick: web-vitals 采集 + 自有收集端 + Lighthouse CI
+    alternatives:
+      - { name: OpenTelemetry 浏览器 SDK, when: 需要与后端链路打通；官方仍标为实验性 }
+    avoid:
+      - { name: 只看本地 Lighthouse, why: 不代表真实用户 }
+    license: web-vitals 为 Apache-2.0；OpenTelemetry 为 Apache-2.0
+    sources: [S30, S34]
+  - category: OpenAPI 客户端生成
+    pick: 见 10（TypeScript 生成器选择）；契约语义见 16
+    sources: [S35]
+  - category: TypeScript 配置、lint 与格式化、包管理器、单元测试库
+    pick: 见 10
+  - category: E2E 测试工具
+    pick: 见 04
+antipatterns:
+  - { bad: 把所有接口数据放进全局 store, instead: 服务器数据交给请求缓存库，store 只放客户端界面状态 }
+  - { bad: 每个页面自己写 fetch、401 处理和重试, instead: 统一 HTTP 客户端层加接口生成类型 }
+  - { bad: 随手新建 Modal、Popover、Select, instead: 基于可访问基础组件库实现 }
+  - { bad: 为一千行数据自写虚拟列表, instead: 用 TanStack Virtual }
+  - { bad: 几百 KB 的编辑器加载到所有页面, instead: 按路由或交互懒加载 }
+  - { bad: 把工具输出或评论里的 Markdown 当 HTML 注入, instead: react-markdown 禁用原生 HTML 并校验链接 }
+  - { bad: 在 useEffect 里随手开 WebSocket 且不清理, instead: 集中的通信层管理连接、重连和去重 }
+  - { bad: 看包名相似就引入, instead: 核对精确包名、许可证和归档状态 }
+  - { bad: 把 npm update 当修复, instead: 锁定版本、逐个升级、完整回归、准备回滚 }
+  - { bad: 断网后字体和图标不见了，却说系统支持离线, instead: 屏蔽外网后跑完整的冒烟测试 }
+  - { bad: 用 UI 截图代替功能断言, instead: E2E 断言六种状态，截图只做视觉验收 }
+  - { bad: 引入一批库作为「平台能力储备」, instead: 有需求时按功能引入并登记 }
+sources:
+  - { id: S01, title: React 19.3, url: "https://react.dev/blog/2026/09/09/react-19-3", publisher: React, date: 2026-09-09, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: Announcing Vite 8, url: "https://vite.dev/blog/announcing-vite8", publisher: Vite, date: 2026-03-12, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: TanStack Start 1.0, url: "https://tanstack.com/blog/tanstack-start-1-0", publisher: TanStack, date: 2026-10-13, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: React Router v8, url: "https://remix.run/blog/react-router-v8", publisher: Remix, date: 2026-06-17, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "React Router: Rendering Strategies", url: "https://reactrouter.com/start/framework/rendering", publisher: Remix, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: TanStack Router Overview, url: "https://tanstack.com/router/latest/docs/overview", publisher: TanStack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: TanStack Query Overview, url: "https://tanstack.com/query/latest/docs/framework/react/overview", publisher: TanStack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "shadcn/ui: Base UI is now the default", url: "https://ui.shadcn.com/docs/changelog/2026-07-base-ui-default", publisher: shadcn, date: 2026-07, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: Base UI Releases, url: "https://base-ui.com/react/overview/releases", publisher: Base UI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: Radix Primitives, url: "https://www.radix-ui.com/primitives", publisher: WorkOS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: React Aria Components, url: "https://react-spectrum.adobe.com/react-aria/", publisher: Adobe, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Tailwind Labs lays off 75 percent of engineers, url: "https://www.devclass.com/ai-ml/2026/01/08/tailwind-labs-lays-off-75-percent-of-engineers-thanks-to-brutal-impact-of-ai/4079571", publisher: DevClass, date: 2026-01-08, kind: community, checked: 2026-11-14 }
+  - { id: S13, title: "AG Grid: Community vs Enterprise", url: "https://www.ag-grid.com/react-data-grid/community-vs-enterprise/", publisher: AG Grid, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: Announcing TanStack Table v9, url: "https://tanstack.com/blog/announcing-tanstack-table-v9", publisher: TanStack, date: 2026-08-04, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: TanStack Virtual, url: "https://tanstack.com/virtual/latest", publisher: TanStack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "dnd kit: React quickstart", url: "https://dndkit.com/react/quickstart/", publisher: dnd kit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: Tiptap Editor Overview, url: "https://tiptap.dev/docs/editor/getting-started/overview", publisher: Tiptap, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Yjs: A collaborative editor", url: "https://docs.yjs.dev/getting-started/a-collaborative-editor", publisher: Yjs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "Excalidraw: Installation", url: "https://docs.excalidraw.com/docs/@excalidraw/excalidraw/installation", publisher: Excalidraw, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Mermaid: Usage and security level", url: "https://mermaid.js.org/config/usage.html", publisher: Mermaid, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: wojtekmaj/react-pdf, url: "https://github.com/wojtekmaj/react-pdf", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: react-pdf-viewer（已归档）, url: "https://github.com/react-pdf-viewer/react-pdf-viewer", publisher: GitHub, date: 2026-03-25, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Apache ECharts, url: "https://echarts.apache.org/en/index.html", publisher: Apache Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: Monaco Editor, url: "https://github.com/microsoft/monaco-editor", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: react-markdown, url: "https://github.com/remarkjs/react-markdown", publisher: remark, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: DOMPurify, url: "https://github.com/cure53/DOMPurify", publisher: Cure53, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: OWASP Session Management Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S28, title: OWASP Cross Site Scripting Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S29, title: "MDN: Content Security Policy", url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: Defining the Core Web Vitals metrics thresholds, url: "https://web.dev/articles/defining-core-web-vitals-thresholds", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: Optimize Largest Contentful Paint, url: "https://web.dev/articles/optimize-lcp", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S32, title: "Next.js: Self-hosting", url: "https://nextjs.org/docs/app/guides/self-hosting", publisher: Vercel, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: Critical Security Vulnerability in React Server Components, url: "https://react.dev/blog/2025/12/03/critical-security-vulnerability-in-react-server-components", publisher: React, date: 2025-12-03, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: "OpenTelemetry: Browser getting started", url: "https://opentelemetry.io/docs/languages/js/getting-started/browser/", publisher: OpenTelemetry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: openapi-fetch, url: "https://openapi-ts.dev/openapi-fetch/", publisher: openapi-ts, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S36, title: "Astro: On-demand rendering", url: "https://docs.astro.build/en/guides/on-demand-rendering/", publisher: Astro, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S37, title: Zustand, url: "https://zustand.docs.pmnd.rs/", publisher: Poimandres, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S38, title: Ant Design（npm）, url: "https://www.npmjs.com/package/antd", publisher: Ant Group, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - Next.js 当前主版本状态与自托管要求本次未联网核实（原报告写 Next.js 16）。
+  - Radix Primitives 的维护活跃度不明：第三方比较称其发布变慢，未找到官方路线图；新项目默认推荐 Base UI 部分基于此。
+  - Tailwind Labs 据媒体报道于 2026-09 被 Shopify 收购、框架继续以 MIT 开源，未找到官方公告核实。
+  - React 移交 Linux 基金会下的 React 基金会，只见单一社区来源，未核实官方公告。
+  - Base UI 1.0 稳定版发布时间（据报道为 2025-12）未在官方发布页核实。
+  - 除 Tailwind 外，各库许可证取自原报告快照，未逐一到官方仓库 LICENSE 核实；Sentry 自托管、GlitchTip、tldraw、ONLYOFFICE、Collabora 的许可需单独核实。
+  - Remix 新版仍处预发布，其与 React Router 的定位关系需在正式版发布后复核。
+  - 包体积预算 170/80/250 KB 为自拟草案，待补调研：业界常用的前端包体积预算依据。
+  - 待补调研：管理后台（Ant Design）、Vue、嵌入式组件的依赖清单示例。
+  - 待补调研：微前端何时用、用什么。
+  - 待补调研：浏览器终端（如 xterm.js）的选型与安全边界。
+  - 待补调研：国产操作系统和浏览器内核上的前端兼容性测试做法。
