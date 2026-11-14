@@ -29,7 +29,7 @@ if (!newer(next, cur)) fail(`新版本 ${next} 必须比当前的 ${cur} 大`);
 
 const logPath = join(root, 'src/content/docs/changelog.md');
 let log = readFileSync(logPath, 'utf8');
-const head = new RegExp(`^## ${next.replaceAll('.', '\\.')}(（[^）]*）)?\\s*$`, 'm');
+const head = new RegExp(`^## ${next.replaceAll('.', '\\.')}(（[^）]*）)?[ \\t]*$`, 'm');
 if (!head.test(log)) fail(`更新记录（src/content/docs/changelog.md）里还没有「## ${next}」这一节，请先写清这个版本改了什么`);
 const today = new Date().toISOString().slice(0, 10);
 log = log.replace(head, `## ${next}（${today}）`);
@@ -82,7 +82,7 @@ try {
 console.log(`
 准备好了：网站在 dist/site，npm 包是 dist/plumbrule-${next}.tgz。下面几步请确认后手动执行：
 
-  git add plumbrule.config.json cli/package.json rules/_编号台账.yaml src/content/docs/changelog.md
+  git add rules/ plumbrule.config.json cli/package.json src/content/docs/changelog.md   # 连同本次改过的规则
   git commit -m "发布 ${next}"
   pnpm run deploy                                        # 部署网站
   cd dist && npm publish plumbrule-${next}.tgz --access public   # 要两步验证；之后到 npmjs.com 批准
