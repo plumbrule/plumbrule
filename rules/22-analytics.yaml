@@ -1,0 +1,619 @@
+id: "22"
+slug: analytics
+title: 数据分析与统计
+summary: 埋点和事件怎么定义、产品指标怎么写口径、分析数据放哪和怎么加工、A/B 实验怎么做才算数、图表怎么选和怎么画、成本怎么记账、数据质量怎么检查。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 埋点与事件规范：命名、属性、版本、身份、采样、同意状态的工程侧做法
+    - 产品指标定义：口径文档、指标负责人、版本与变更
+    - 分析存储与加工：PostgreSQL、DuckDB、ClickHouse、dbt、Python 数据处理、notebook
+    - 数据质量检查与回填
+    - A/B 实验：实验计划、样本量、停止规则、SRM 检查；实验用的功能开关
+    - 图表与报表：图表类型选择、可读性、看板必须显示的信息
+    - 通用成本账本：按功能、租户、项目记录资源和第三方调用成本
+  excludes:
+    - { what: 个人信息处理的合法基础、告知同意文案、保留期限的法律要求、数据出境, see: "27" }
+    - { what: 前端错误与性能上报的去敏（WEB-029）、图表组件库选型, see: "07" }
+    - { what: 图表配色令牌、字号等视觉令牌, see: "08" }
+    - { what: 对比度、不只靠颜色区分、图表的替代文本, see: "09" }
+    - { what: 事件信封格式、事件 schema 注册与兼容规则, see: "16" }
+    - { what: outbox 表、金额字段类型、读副本、表结构迁移, see: "17" }
+    - { what: 消息队列、任务调度与工作流引擎, see: "18" }
+    - { what: 租户隔离与授权模型, see: "19" }
+    - { what: 模型调用的 token 计量、模型价格表与预算, see: "24" }
+    - { what: 服务运行监控、OTel、日志、告警、SLO, see: "26" }
+    - { what: 开源许可的统一口径与许可扫描工具, see: "27" }
+    - { what: Python 依赖锁定与工具链, see: "12" }
+overview: |
+  1. **埋点不是账本。** 订单、验收、结算、计费这类业务事实只从服务端事务或业务事件派生；浏览器和客户端埋点只用来看路径、漏斗、功能使用。
+  2. **四类数据分开放。** 业务事实、成本计量、实验分配与曝光、可选行为遥测，来源、可否丢失、可否采样、保留期都不同，不要混进一张万能表。
+  3. **事件先登记再上线。** 名称、版本、负责人、属性白名单、隐私级别、保留期、采样方式写进仓库里的事件注册表，CI 校验；事件带唯一 ID 和两个时间戳，消费按 ID 幂等。
+  4. **同意和断网是工程问题。** 可选遥测在用户同意前不加载脚本、不发请求、不写标识；私有化部署默认关闭，断网时零外发。法律要求见 27。
+  5. **指标写成可执行的口径。** 每个关键指标有负责人和版本，写清粒度、分子分母、时区、零分母处理，并带示例数据测试；改口径就升版本，不静默改 SQL。
+  6. **先用 PostgreSQL，量出来不够再升级。** 批处理和本地分析用 DuckDB，大规模事件分析用 ClickHouse；引入前用同一份数据和查询压测比较。
+  7. **实验要事先定规矩。** 上线前写好假设、主要指标、样本量、停止规则；分配和曝光分开记录；SRM 检查不过不下结论；样本太少就别硬做 A/B。
+  8. **图表回答一个问题。** 按问题选图表类型，条形图从零开始，标单位和口径；核心看板显示指标版本和数据截至时间。
+  9. **成本记成不可变的账。** 金额用精确小数，价目表做快照，更正写冲销分录，估算和实际账单分开，归不了属的单列。
+  10. **许可证看清再嵌入。** 自托管独立运行和集成进产品分发是两回事；Metabase、Grafana、Unleash 主仓库是 AGPL，PostHog 自托管官方不支持，dbt 新一代完整发行版是专有许可。
+rules:
+  # ── 数据分类与事实来源 ──
+  - id: DATA-001
+    title: 订单、验收、结算、计费等业务事实只从服务端事务或业务事件派生，不用客户端埋点推导
+    level: hard
+    check: semi
+    how: 评审数据血缘：账单、结算和核心业务指标的源表必须是服务端事实表；事件注册表里标为权威的事件，来源只能是服务端
+    applies: [kind:data, kind:service]
+    why: 客户端埋点会被拦截、丢失、重复、伪造，用它算钱或判验收，数字无法审计。
+    detail: |
+      - 业务事件和业务状态在同一个事务里落库（outbox 或结构化业务事件表），提交后再异步送到分析存储。
+      - 不要在事务提交前单独把事件推给统计平台，再假设它不会丢也不会重复。
+    see: [DB-026]
+  - id: DATA-002
+    title: 把业务事实、成本计量、实验分配与曝光、可选行为遥测分成四类，分别存放并分别定义保留期
+    level: soft
+    check: manual
+    how: 评审事件注册表：每个事件标明所属类别；检查各类别有各自的表或分区和保留期
+    applies: [kind:data]
+    why: 四类数据能否丢、能否采样、能否默认关闭都不一样，混在一张表里会同时损害正确性、隐私边界和成本。
+    detail: |
+      | 类别 | 来源 | 能否丢 | 能否采样 |
+      |---|---|---|---|
+      | 业务事实 | 服务端事务 | 不能，重试去重 | 不能 |
+      | 成本计量 | 计费服务、资源计数、供应商账单 | 不能无声丢，失败要补录 | 不能 |
+      | 实验分配与曝光 | 分配服务和真实曝光点 | 不能，要做完整性检查 | 不能 |
+      | 可选行为遥测 | 浏览器、客户端、后端埋点 | 可以有损 | 可以，要记录概率 |
+  # ── 埋点与事件规范 ──
+  - id: DATA-003
+    title: 新事件上线前先登记到仓库里的事件注册表，写明名称、版本、负责人、触发时机、属性白名单、隐私级别、保留期和采样方式
+    level: soft
+    check: auto
+    how: CI 用 JSON Schema 校验注册表格式，并扫描代码里上报的事件名，未登记的报错
+    applies: [kind:data]
+    why: 没有登记的事件没人维护、口径靠猜，也没法审查里面带了什么数据。
+    detail: |
+      示例（中性）：
+      ```yaml
+      events:
+        order_paid:
+          owner: 订单组
+          version: 1
+          category: business      # business / cost / experiment / telemetry
+          authoritative: true
+          trigger: 支付回调确认成功并提交事务后
+          privacy: internal
+          retention: business_audit
+          sampling: none
+          properties: [order_id, amount_minor, currency]
+        ui_report_viewed:
+          owner: 产品分析组
+          version: 1
+          category: telemetry
+          authoritative: false
+          trigger: 报表页首次渲染完成
+          privacy: pseudonymous
+          retention: optional_telemetry
+          sampling: deterministic_by_session
+          properties: [report_key]
+      ```
+  - id: DATA-004
+    title: 事件名全库用同一种风格：小写蛇形、「对象_动作过去式」；界面行为加统一前缀，不用 click、success、test、event1 这类没有业务含义的名字
+    level: soft
+    check: auto
+    how: CI 用正则校验注册表里的事件名，并检查禁用词表
+    applies: [kind:data]
+    why: 命名混乱会让同一件事出现多个事件名，查询和口径都对不上。
+    detail: |
+      - 好：`order_paid`、`invoice_issued`、`ui_report_viewed`。
+      - 差：`click`、`btnClick2`、`PaySuccess`、`test_event`。
+      - 已发生的事用过去式；状态值用名词或形容词。
+  - id: DATA-005
+    title: 每条事件必须带唯一事件 ID、事件名、schema 版本、发生时间和接收时间（UTC）、来源；多租户系统还必须带租户 ID
+    level: hard
+    check: auto
+    how: 入口处用 JSON Schema 校验，缺字段的拒收并计数；契约测试覆盖每类事件
+    applies: [kind:data]
+    why: 没有唯一 ID 就没法去重，只有接收时间就处理不了离线补传和迟到，没有租户 ID 就无法隔离。
+    detail: |
+      - 可选字段（会话 ID、匿名 ID、trace_id、实验 ID、变体 ID、采样概率）也要写进 schema 的 properties，不能被 `additionalProperties: false` 拒掉。
+      - 校验器要开启 `format` 校验（如 Ajv 的 ajv-formats），否则 `uuid`、`date-time` 只是注释。
+      - 事件信封的通用格式以 16 为准。
+    see: ["16"]
+  - id: DATA-006
+    title: 事件属性只放白名单里的字段；不放完整 URL 和查询参数、自由文本、文件名、邮箱、手机号、IP、令牌、提示词原文
+    level: hard
+    check: semi
+    how: 上报 SDK 统一过滤钩子并有单元测试；CI 对注册表的属性名做敏感词扫描；定期抽样检查入库数据
+    applies: [kind:data, platform:web, platform:mobile]
+    why: 这些字段要么是个人信息、要么是凭据，进了分析库就会被复制到 BI、导出文件和第三方。
+    detail: |
+      - 错误信息先转成受控的错误码再上报。
+      - 前端监控上报的去敏规则见 WEB-029；个人信息的法律口径见 27。
+    see: [WEB-029, "27"]
+  - id: DATA-007
+    title: 事件结构改名、改类型、改含义时升 schema 版本，新旧版本并行一段时间；只新增可选属性不升版本
+    level: soft
+    check: auto
+    how: CI 对比注册表和 schema 的改动，发现不兼容变化而版本号没变时报错
+    applies: [kind:data]
+    why: 静默改结构会让历史数据和新数据混在一起算，图表上看不出断点。
+    see: ["16"]
+  - id: DATA-008
+    title: 时间以 UTC 存储，报表声明业务时区；金额、计数、时间等用有类型的列，不全塞进一个 JSON 字段
+    level: soft
+    check: semi
+    how: 评审表结构：核心查询用到的字段是否是有类型的列；报表定义是否写明时区
+    applies: [kind:data]
+    why: 时区不明会让跨日统计差一天；JSON 里的数值无法约束类型，也难以建索引。
+  - id: DATA-009
+    title: 匿名 ID 只在可选遥测开启后生成；登录后的身份关联用显式事件完成；不靠 IP、UA 或设备指纹识别用户；退出登录或切换租户后清掉匿名状态
+    level: hard
+    check: semi
+    how: 端到端测试检查遥测关闭时没有生成标识；跨租户测试检查切换后不会串号；评审身份合并逻辑
+    applies: [kind:data, platform:web, platform:mobile]
+    why: 指纹识别和跨租户串号既算错数字，也是隐私问题。
+    see: ["27"]
+  - id: DATA-010
+    title: 业务事实、成本计量、实验分配与曝光不得采样；行为遥测要采样时，按稳定的键做确定性抽样并记录采样概率
+    level: hard
+    check: semi
+    how: 扫描采集配置，权威类别的事件采样率必须为 1；遥测事件的 schema 必须有采样概率字段
+    applies: [kind:data]
+    why: 对账本和实验数据采样会造成无法恢复的偏差；不记录概率就没法加权还原。
+    detail: |
+      - 事件总数可以按 Σ(1/p) 加权估计；去重用户数、留存和漏斗不能直接这样还原，要单独设计。
+  - id: DATA-011
+    title: 分析侧消费事件按事件 ID 幂等；同一批输入重放两次结果不变，乱序和迟到能重算修正
+    level: hard
+    check: auto
+    how: 集成测试把同一批事件（含重复、乱序、迟到）重放两次，比对汇总结果一致
+    applies: [kind:data]
+    why: 投递是至少一次的，重复和乱序必然发生，不幂等就会多算。
+    see: [DB-027]
+  - id: DATA-012
+    title: 可选遥测按用户的同意状态开关：同意前不加载分析脚本、不发请求、不写跟踪用的 cookie 或本地标识；撤回同意后立即停止并清除标识
+    level: hard
+    check: auto
+    how: 端到端测试在未同意和撤回两种状态下记录网络请求和存储写入，出现分析域名请求或跟踪标识即失败
+    applies: [kind:data, platform:web, platform:mobile]
+    why: 很多地区的法律要求事先同意才能做非必要跟踪；只隐藏界面、后台照样上报，就是违规采集。
+    detail: |
+      - 同意状态按用途分项（统计分析、录屏、广告归因等），带版本号和时间，服务端也能读到。
+      - 系统正常运行所必需的业务审计和成本核算不属于可选遥测，不受这个开关控制。
+      - 哪些用途需要同意、告知怎么写，见 27。
+    see: ["27"]
+  - id: DATA-013
+    title: 私有化或断网部署时，可选遥测默认关闭；分析脚本和依赖本地托管，断网环境下零外发
+    level: hard
+    check: auto
+    how: 在禁止外部 DNS 和 HTTP 的环境里跑安装、启动、升级和看板使用，记录出站请求，必须为零
+    applies: [kind:data, kind:onprem]
+    why: 「关了遥测」但脚本照样连 CDN、地理 IP 库照样联网更新，客户内网就会外发数据。
+    detail: |
+      - 镜像、DuckDB 扩展、地理 IP 数据、字体、图表库都要预先打包。
+    sources: [S06]
+    see: ["26", "07"]
+  # ── 指标定义 ──
+  - id: DATA-014
+    title: 关键指标写成仓库里的机器可读定义：ID、版本、负责人、含义、粒度、分子分母、去重与排除规则、时间窗、业务时区、零分母处理、数据源，并带示例数据测试
+    level: soft
+    check: auto
+    how: CI 用 schema 校验指标定义文件，并对每个指标跑示例数据测试
+    applies: [kind:data]
+    why: 口径只存在于某人脑子里或某个 BI 卡片里时，不同报表会给出不同的数。
+    detail: |
+      示例（中性）：
+      ```yaml
+      id: order.repeat_purchase_rate
+      version: 1
+      owner: 增长组
+      description: 统计期内下单的用户中，30 天内再次付款的比例
+      grain: user_id
+      numerator: "first_paid_at in window AND second_paid_within_30d"
+      denominator: "first_paid_at in window"
+      exclusions: [test_account, refunded_all]
+      window: calendar_month
+      business_timezone: 按项目配置
+      zero_denominator: return_null
+      sources: [fact_order_payment]
+      tests:
+        - "fixture: 3 名首单用户，其中 1 名 30 天内复购 => 1/3"
+        - "0 <= value <= 1"
+      ```
+      - 比例指标的分子分母用同一粒度；分母为 0 返回空值，不返回 0。
+      - 不要求先上语义层平台；SQL 视图加 YAML 就够，模型多了再用 dbt。
+    sources: [S08]
+  - id: DATA-015
+    title: 改变指标口径时升指标版本，新旧版本并行对照一段时间，并在图表上标出变更点；不静默改 SQL
+    level: soft
+    check: auto
+    how: CI 发现指标的 SQL 或定义改动而版本号没变时报错
+    applies: [kind:data]
+    why: 静默改口径后，趋势图上的跳变会被当成业务变化。
+  - id: DATA-016
+    title: 主要指标配护栏指标一起看；不用单一指标考核个人；按人员维度统计要写明用途并限制查看权限
+    level: soft
+    check: manual
+    how: 评审指标定义：主要指标是否列了护栏；人员维度的报表是否有用途说明和权限设置
+    applies: [kind:data]
+    why: 指标一旦成为考核目标就会被优化变形；人员明细是敏感数据。
+    see: ["06", "27"]
+  - id: DATA-017
+    title: 核心看板和指标卡片显示指标版本、统计区间、数据截至时间和数据质量状态；导出时服务端重新鉴权
+    level: soft
+    check: semi
+    how: 界面测试检查核心卡片上这些信息存在；评审导出接口的鉴权
+    applies: [kind:data]
+    why: 看的人要能回答「这个数怎么来的、新不新」，否则会拿过期或补算中的数据做决定。
+  # ── 存储与加工 ──
+  - id: DATA-018
+    title: 默认用 PostgreSQL 加索引、分区和汇总表做分析；引入 OLAP 前用同一份数据和真实查询压测比较，结果写进 ADR
+    level: soft
+    check: manual
+    how: 评审 ADR：是否有基线方案和候选方案在同样数据、查询、并发下的延迟、资源和运维成本对比
+    applies: [kind:data]
+    why: 按「将来可能会大」上集群，空闲时也要付运维成本。
+    detail: |
+      - 季度报表、离线核查、跨源 CSV/Parquet：先用 DuckDB 做批处理。
+      - 大规模行为事件、复杂分群留存、多人并发持续超出要求：做 ClickHouse 验证。
+      - 频繁多表 JOIN、主键更新、高并发 BI：Doris、StarRocks 和 ClickHouse 用同一份数据比。
+      - 压测覆盖真实的数据跨度、TopN、漏斗、留存、去重、JOIN，以及删除、备份恢复和租户隔离。
+    see: ["05", "17"]
+  - id: DATA-019
+    title: BI 和分析查询用只读账号，只授权分析用的库或 schema；大扫描不在业务主库上跑
+    level: hard
+    check: auto
+    how: 审计数据库角色：BI 账号没有写权限、没有业务 schema 的访问权；分析查询指向读副本或分析库
+    applies: [kind:data]
+    why: BI 账号有写权限或在主库上跑大查询，一个误操作或慢查询就能拖垮业务。
+    see: [DB-032]
+  - id: DATA-020
+    title: 多租户报表和嵌入看板的租户过滤在服务端或数据库层强制，不信任前端传来的租户参数；嵌入时用服务端签名锁定参数
+    level: hard
+    check: semi
+    how: 跨租户测试：篡改前端参数、嵌入令牌和导出请求，不能拿到其他租户的数据
+    applies: [kind:data, kind:service]
+    why: 前端的租户下拉框不是隔离；改一个参数就能看到别人的数据。
+    detail: |
+      - Metabase 的签名嵌入要锁定租户参数；它的访客嵌入不继承行列权限，不能当作行级隔离。
+      - 换用其他 BI 时，同样在 SQL、数据源或数据库账号这一层做隔离。
+    sources: [S14]
+    see: ["19"]
+  - id: DATA-021
+    title: 原始数据层只追加不改写；清洗、事实与维度、指标分层加工，每层的转换 SQL 放版本库、走评审、带测试
+    level: soft
+    check: semi
+    how: 评审转换代码是否在仓库里；检查原始层没有 UPDATE、DELETE（按保留期清理除外）
+    applies: [kind:data]
+    why: 原始层被改过就没法重算；转换逻辑散在 BI 卡片里没人能复查。
+    detail: |
+      - 小项目：定时 SQL 或应用作业，带游标、执行历史和补偿即可。
+      - 模型多、需要血缘和测试时再用 dbt。
+      - 至少一次传输加消费端幂等，比宣称全链路恰好一次更可实现。
+    sources: [S08]
+  - id: DATA-022
+    title: DuckDB 用作嵌入式分析和批处理，不当作多人并发写入的中心服务；所需扩展预先安装或打进镜像
+    level: soft
+    check: semi
+    how: 评审部署架构；断网环境里检查扩展不会在运行时下载
+    applies: [kind:data]
+    why: DuckDB 是进程内引擎，并发写和服务隔离不是它的设计目标；运行时装扩展在断网环境会失败。
+    sources: [S05, S06]
+  - id: DATA-023
+    title: Python 数据处理用列式、向量化的接口（Polars、DuckDB SQL 或 pandas 的向量化操作），不逐行循环；依赖按 12 锁定
+    level: soft
+    check: semi
+    how: 评审时检查对 DataFrame 的逐行迭代（如 iterrows、apply 逐行调用）
+    applies: [kind:data, lang:python]
+    why: 逐行处理慢几个数量级，而且容易在类型和空值上出错。
+    see: [PY-002]
+  - id: DATA-024
+    title: 提交到仓库的 notebook 必须清空输出，不含密钥和真实客户数据
+    level: hard
+    check: auto
+    how: 提交前钩子跑 nbstripout（或同类工具）并在 CI 复查；对 notebook 跑密钥扫描
+    applies: [kind:data]
+    why: notebook 的输出单元会把查询结果、个人信息和令牌原样存进版本历史，删不干净。
+    see: ["25"]
+  - id: DATA-025
+    title: notebook 只做探索；进入定时任务、报表或指标的逻辑移到模块或 SQL 里，并有测试
+    level: soft
+    check: manual
+    how: 评审时检查定时任务和报表是否直接调用 notebook
+    applies: [kind:data]
+    why: notebook 依赖执行顺序和隐藏状态，从上到下重跑结果常常不一样，不适合当生产代码。
+  # ── 数据质量 ──
+  - id: DATA-026
+    title: 关键表必须有自动化的数据质量检查：主键唯一、必填非空、引用关系、取值范围和新鲜度；失败时阻断下游发布或标记看板
+    level: hard
+    check: auto
+    how: 用 dbt 数据测试、Great Expectations 或 SQL 断言在每次加工后运行，失败返回非零并告警
+    applies: [kind:data]
+    why: 脏数据一旦进了汇总层，就会悄悄出现在所有报表里。
+    detail: |
+      - 新鲜度看入库或刷新完成时间，不用 `MAX(event_time)` 代替。
+      - 一致性：拆分后的金额合计等于拆分前；按事件统计的数和账本数差异在约定范围内。
+      - 生产和测试数据带来源标签，测试数据不进正式指标。
+      - 没用 dbt 的项目，用 SQL 或测试框架写同等断言即可。
+    sources: [S08, S09]
+  - id: DATA-027
+    title: 回填和重算要限定范围、写入新版本或临时表、校验行数唯一键和金额合计后再原子切换，留下记录并能回退
+    level: soft
+    check: semi
+    how: 回填脚本用统一模板，执行前后的校验结果和审批记录附在工单或 PR 里
+    applies: [kind:data]
+    why: 直接覆盖历史数据，一旦算错就找不回原来的数。
+    detail: |
+      - 大规模回填先在小租户或小时间窗上试。
+      - 报表显示当前数据水位和是否在补算中。
+  # ── 实验 ──
+  - id: DATA-028
+    title: 正式 A/B 实验上线前写好实验计划：假设、主要指标与护栏、随机化单位、分配比例、最小可检测效应、样本量与时长、停止规则
+    level: hard
+    check: manual
+    how: 实验平台或仓库里有计划文件，评审通过后才能开启流量；分析报告引用计划版本
+    applies: [kind:data]
+    why: 先看数据再挑指标、挑停止时间，几乎总能找到「显著」的结果，结论不可信。
+  - id: DATA-029
+    title: 样本量按功效分析事先算好；不反复查看 p 值、显著了就停；需要提前停止的，事先声明并使用序贯检验或贝叶斯方法
+    level: hard
+    check: manual
+    how: 评审实验报告：实际停止时间与计划一致，或者计划里声明了序贯方法
+    applies: [kind:data]
+    why: 固定样本的检验被反复偷看，假阳性率会远高于名义水平。
+    ref_value: 显著性水平 0.05、功效 0.8 是业界常用的参考值，按业务风险调整，并写进实验计划。
+  - id: DATA-030
+    title: 分配和曝光分开记录，按随机化单位分析；SRM（各组样本比例与设计不符）检查不通过时不下结论、不自动放量
+    level: hard
+    check: auto
+    how: 实验分析流水线对各组样本数跑卡方检验，不通过时报告标红并阻止发布胜者
+    applies: [kind:data]
+    why: 样本比例不对说明分配或记录有问题，此时任何效果估计都可能有偏。
+    ref_value: 常用卡方检验 p < 0.001 判定 SRM，是参考值。
+    detail: |
+      - 每次曝光关联实验 ID、变体 ID、随机化单位 ID、分配时间、曝光时间、配置版本。
+      - 同一单位出现在多个变体、重复曝光、随机化单位和分析单位不一致，先修数据再分析。
+      - 主要指标不可用、数据不新鲜或护栏恶化，阻止自动放量。
+      - GrowthBook 这类工具自带 SRM 检查，优先用现成的。
+    sources: [S19]
+  - id: DATA-031
+    title: 用户或客户太少、达不到所需样本量时不做 A/B，改用灰度、前后对照或盲评，并在结论里写明证据强度
+    level: soft
+    check: manual
+    how: 评审实验计划：算出的样本量与实际可用流量对比
+    applies: [kind:data]
+    why: 功效不够的实验只会产生噪声，还会被误读成「没有效果」或「有效果」。
+    detail: |
+      - 同一租户或项目内的用户会互相影响时，按租户或项目整群随机。
+  - id: DATA-032
+    title: 功能开关不能代替鉴权；权限相关的判断由服务端完成
+    level: hard
+    check: semi
+    how: 安全测试：在客户端改掉开关值，受保护的功能和数据仍不可访问
+    applies: [kind:service, kind:data]
+    why: 开关值可以被客户端篡改，也可能被误配置，把它当权限控制就是开了后门。
+    sources: [S17]
+    see: ["19"]
+  - id: DATA-033
+    title: 动态开关登记负责人、用途、默认值、环境和过期时间，到期清理；一次请求或一次执行内用同一份开关快照，并记录开关和变体
+    level: soft
+    check: auto
+    how: CI 检查开关注册表字段完整，并对过期开关报警
+    applies: [kind:service, kind:data]
+    why: 没人认领的开关越积越多；执行中途开关变了，实验数据和行为都会不一致。
+    detail: |
+      - 默认值按风险定：敏感功能和外部连接默认关，稳定的基础功能可以默认开。
+      - 开关服务不可用时用最近一次可信配置或明确的安全默认值，不能让核心功能瘫痪。
+      - 代码里通过 OpenFeature 这类统一接口求值，方便换后端。
+    sources: [S16, S17]
+  # ── 图表与报表 ──
+  - id: DATA-034
+    title: 按要回答的问题选图表类型：随时间变化用折线，类别比较用条形，构成用堆叠条形，分布用直方图或箱线图，关系用散点；不用 3D 图
+    level: soft
+    check: manual
+    how: 评审看板时逐张检查图表类型和标题是否对应一个明确的问题
+    applies: [kind:data]
+    why: 图表类型选错，读者要花更多力气，还容易读错比例。
+    detail: |
+      - 饼图和环形图只用于少量类别的构成，类别多就改用条形。
+      - 双 Y 轴容易制造虚假相关，能拆成两张图就拆。
+      - 一张图只回答一个问题，标题写结论或问题本身。
+  - id: DATA-035
+    title: 条形图和面积图的数值轴从零开始；坐标轴标出单位，时间轴按真实间隔；标题或注释写明口径和数据截至时间
+    level: soft
+    check: semi
+    how: 图表组件封装默认配置（条形图 Y 轴从零、必填单位）；评审时抽查
+    applies: [kind:data]
+    why: 截断的数值轴会把小差异放大成大差异；没有单位和口径的数字无法比较。
+  - id: DATA-036
+    title: 图表配色只用设计系统的数据色板；系列多时合并为「其他」或拆图；不只靠颜色区分系列，并提供数据表或文字结论
+    level: soft
+    check: semi
+    how: 检查图表配置的颜色是否引用色板令牌；评审时看是否有图例以外的区分方式和数据表
+    applies: [kind:data]
+    why: 颜色太多分不清，色觉障碍用户和读屏用户也读不到信息。
+    see: [DSN-017, A11Y-021, A11Y-022]
+  # ── 成本账本 ──
+  - id: DATA-037
+    title: 成本金额用精确小数或约定单位的整数，同时记录币种；多币种保留原币金额和汇率快照
+    level: hard
+    check: auto
+    how: 检查表结构里金额列的类型；单元测试覆盖舍入和币种换算
+    applies: [kind:data]
+    why: 浮点累计会产生对不上账的误差；不留原币和汇率就无法复核。
+    sources: [S12]
+    see: [DB-005]
+  - id: DATA-038
+    title: 成本分录写入后不修改；更正写冲销分录；价目表带生效区间和版本，调价不改写历史
+    level: hard
+    check: semi
+    how: 数据库权限禁止对分录表 UPDATE 和 DELETE；账本测试覆盖冲销和调价场景
+    applies: [kind:data]
+    why: 就地改历史会让过去的报表和账单对不上，也无法审计。
+    sources: [S12]
+  - id: DATA-039
+    title: 用量、估算成本、实际账单分开记；每笔成本带功能、租户、项目等归属维度和分摊规则版本，归不了属的单列为未分摊，并定期与供应商账单对账
+    level: soft
+    check: semi
+    how: 账本测试检查分摊前后合计相等；对账报表显示与供应商账单的差额和未分摊占比
+    applies: [kind:data]
+    why: 估算和实际混在一起会误导预算；把共享成本硬摊到某个维度会制造虚假的精确度。
+    detail: |
+      - 按人、项目、功能切出的小计是同一笔钱的不同视图，不能相加成总成本。
+      - 共享资源按可解释的代理量（CPU 时间、存储量、请求量）分摊，固定成本可以单列。
+      - 预算提醒可以设多档阈值并预测超支；超支时可以阻断可选任务，不中断已经开始、不可逆的业务操作。
+      - 外部云账单导入可以参照 FOCUS 规范的字段，内部表不必照搬全部字段。
+      - 模型调用的 token 计量和价格表见 24。
+    ref_value: 预算提醒阈值常见为 50%、80%、100% 三档，只是参考值。
+    sources: [S11, S12]
+    see: ["24"]
+  # ── 选型与许可 ──
+  - id: DATA-040
+    title: 引入分析组件前写清许可证和使用方式（独立运行还是集成进产品分发）；AGPL 或专有许可的组件要嵌进交付物时先过许可审查
+    level: hard
+    check: semi
+    how: 依赖清单记录每个组件的许可证和使用方式；许可扫描工具和评审按 27 的口径判定
+    applies: [kind:data]
+    why: 同一个 BI 或分析工具，内部自用和嵌进产品卖给客户的义务完全不同；README 写「开源」不等于可以随意嵌入。
+    sources: [S02, S10, S13, S18]
+    see: ["27"]
+  - id: DATA-041
+    title: BI、实验统计、产品分析优先用成熟的现成工具，不自造 SQL 编辑器、报表权限系统或显著性检验引擎
+    level: soft
+    check: manual
+    how: 设计评审时检查是否有对应的现成方案及不用它的理由
+    applies: [kind:data]
+    why: 这些系统的边界情况多、正确性难审计，自造的维护成本远高于预期。
+choices:
+  - category: 业务事实与成本数据
+    pick: 业务库里的结构化事件表和成本账本表，outbox 同事务写入
+    when: 所有需要算钱、判验收、做审计的数据
+    avoid:
+      - { name: 用第三方分析 SDK 的事件当事实源, why: 可能丢失、重复、被拦截，无法审计 }
+  - category: 网站与产品行为分析（自托管）
+    pick: Umami
+    when: 需要轻量的页面和自定义事件统计，能自托管和断网运行
+    alternatives:
+      - { name: Plausible Community Edition, when: 更看重隐私和简洁界面；需要 PostgreSQL 加 ClickHouse，社区版和云版功能不同 }
+      - { name: Matomo, when: 需要传统网站分析和复杂流量归因，能接受 PHP 加 MySQL 运维 }
+      - { name: PostHog Cloud, when: 可以用公有云服务，需要分析、录屏、开关、实验一体化 }
+    avoid:
+      - { name: PostHog 自托管放进客户交付包, why: 官方明确自托管不受支持、没有带标签的稳定版本，安全修复要自己跟；ee 目录的功能要商业许可 }
+    license: Umami 为 MIT；Plausible 为 AGPL-3.0（前端统计脚本为 MIT）；Matomo 为 GPL-3.0；PostHog 主体 MIT，ee 目录为专有许可
+    sources: [S01, S02, S03, S04, S23]
+  - category: 分析存储
+    pick: PostgreSQL（索引、分区、汇总表、物化视图）
+    alternatives:
+      - { name: DuckDB, when: 本地分析、嵌入式报表、对 Parquet/CSV 的批处理 }
+      - { name: ClickHouse, when: 大规模行为事件、复杂分群留存、压测证明 PostgreSQL 不够 }
+      - { name: Apache Doris / StarRocks, when: 频繁多表 JOIN、主键更新、高并发 BI，并与 ClickHouse 用同一份数据比过 }
+    avoid:
+      - { name: 没压测就上 OLAP 集群, why: 空闲时也要付运维成本 }
+      - { name: 把 DuckDB 当多人并发写入的服务, why: 不是它的设计目标 }
+    license: PostgreSQL 为 PostgreSQL License；DuckDB 为 MIT；ClickHouse 为 Apache-2.0；Doris、StarRocks 为 Apache-2.0
+    sources: [S05, S07]
+  - category: 数据转换与建模
+    pick: 版本库里的 SQL 文件、视图和定时作业
+    alternatives:
+      - { name: dbt Core 或 dbt OSS, when: 模型多、需要血缘、测试、文档时 }
+    avoid:
+      - { name: 为几个日汇总引入 Airflow、Kafka 这类重组件, why: 过度设计；需要时按 18 另行选型 }
+    license: dbt Core 为 Apache-2.0，官方表示会继续维护数年；新一代 dbt 的开源子集 dbt OSS 为 Apache-2.0；完整发行版（原 Fusion 引擎）是专有二进制，按 dbt Product Licensing Agreement 使用
+    notes: 使用新一代 dbt 前确认用的是开源子集还是专有发行版，二者许可不同。
+    sources: [S08, S10]
+  - category: Python 数据处理
+    pick: Polars 或 DuckDB 的 Python 接口
+    alternatives:
+      - { name: pandas, when: 依赖的库只接受 pandas 对象，或已有大量 pandas 代码 }
+  - category: notebook
+    pick: Jupyter，提交前用 nbstripout 清空输出
+    avoid:
+      - { name: 把 notebook 当定时任务或生产报表, why: 依赖执行顺序和隐藏状态，不可复现 }
+  - category: 数据质量检查
+    pick: dbt 数据测试（用了 dbt 时）或 SQL 断言
+    alternatives:
+      - { name: Great Expectations（GX Core）, when: 没用 dbt、要在 Python 流水线里做较复杂的校验 }
+      - { name: Soda Core, when: 内部使用，接受 Elastic License 2.0 的限制 }
+    license: GX Core 为 Apache-2.0；Soda Core 已从 Apache-2.0 改为 Elastic License 2.0（源码可见，不是 OSI 开源许可，禁止作为托管服务提供）
+    sources: [S08, S09, S20, S21]
+  - category: 看板与自助 BI
+    pick: 产品内看板用自有前端加服务端聚合接口；运营自助分析用 Metabase
+    alternatives:
+      - { name: Apache Superset, when: 多数据源、复杂 SQL、多角色 BI，能接受更重的配置 }
+      - { name: Grafana, when: 时间序列趋势和运行侧指标；运行监控见 26 }
+    avoid:
+      - { name: 自造 SQL 编辑器和报表权限系统, why: 成本高、难审计 }
+    license: Metabase 开源版为 AGPL，嵌入产品时要看其嵌入许可条款；Superset 为 Apache-2.0；Grafana 主体为 AGPL-3.0
+    notes: 图表组件库选型见 07。
+    sources: [S13, S14, S15, S22]
+  - category: 实验平台
+    pick: GrowthBook
+    when: 需要统计严谨的 A/B 实验，且样本量够
+    avoid:
+      - { name: 自造显著性检验引擎, why: 统计细节多，难审计 }
+    license: 主体 MIT，部分企业功能为商业许可
+    sources: [S19]
+  - category: 功能开关
+    pick: 版本化配置文件加 OpenFeature 求值接口
+    when: 开关少、环境少
+    alternatives:
+      - { name: Unleash, when: 多服务灰度、策略和开关生命周期治理 }
+      - { name: Flagsmith, when: 需要开关加远程配置和多语言 SDK }
+    avoid:
+      - { name: 把 OpenFeature 当开关服务或实验统计引擎, why: 它只统一求值接口 }
+    license: OpenFeature 为 Apache-2.0；Unleash 主仓库从 v8 起改为 AGPL-3.0，官方 Docker 镜像和 SDK 仍为宽松许可；Flagsmith 核心为 BSD-3-Clause
+    sources: [S16, S17, S18]
+antipatterns:
+  - { bad: 用前端点击埋点算订单数或结算金额, instead: 从服务端事务和业务事件派生 }
+  - { bad: 一张 events 表用 JSON 混装费用、验收和遥测, instead: 分类事实表加可校验的公共信封 }
+  - { bad: 采样 10% 后直接算日活和留存, instead: 业务事实全量；遥测采样记录概率，去重类指标单独设计 }
+  - { bad: 界面上的租户下拉框就当隔离, instead: 服务端或数据库层强制租户条件 }
+  - { bad: 关了遥测开关，但脚本照样连外网 CDN, instead: 断网测试记录出站请求，必须为零 }
+  - { bad: 看到 p < 0.05 就发布, instead: 预先定样本量和停止规则，过 SRM 检查和护栏再下结论 }
+  - { bad: 把分配记录当成用户真的看到了, instead: 分配和曝光分开记录，分析口径一致 }
+  - { bad: 按人、项目、功能三张小计相加得到总成本, instead: 一本账多维切片，小计不相加 }
+  - { bad: 调价后就地改价目表，历史账单跟着重算, instead: 价目表做快照，更正写冲销分录 }
+  - { bad: 为了「实时」一次上齐 Kafka、ClickHouse、dbt、Superset, instead: PostgreSQL 加 SQL 聚合，压测证明不够再升级 }
+  - { bad: 提交带输出的 notebook, instead: 提交前清空输出，逻辑移到模块里 }
+  - { bad: 认为 Metabase 访客嵌入会继承行列权限, instead: 服务端签名锁定参数，或在数据库层隔离 }
+sources:
+  - { id: S01, title: Self-host PostHog, url: "https://posthog.com/docs/self-host", publisher: PostHog, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: PostHog LICENSE, url: "https://github.com/PostHog/posthog/blob/master/LICENSE", publisher: PostHog, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: Umami（仓库与 LICENSE）, url: "https://github.com/umami-software/umami", publisher: Umami Software, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: Plausible Analytics（仓库与 LICENSE）, url: "https://github.com/plausible/analytics", publisher: Plausible, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: DuckDB（仓库与 LICENSE）, url: "https://github.com/duckdb/duckdb", publisher: DuckDB Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "DuckDB: Installing extensions", url: "https://duckdb.org/docs/stable/extensions/installing_extensions", publisher: DuckDB, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: ClickHouse（仓库与 LICENSE）, url: "https://github.com/ClickHouse/ClickHouse", publisher: ClickHouse, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "dbt: Data tests", url: "https://docs.getdbt.com/docs/build/data-tests", publisher: dbt Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "dbt: Source freshness", url: "https://docs.getdbt.com/docs/deploy/source-freshness", publisher: dbt Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: dbt Licensing FAQ, url: "https://www.getdbt.com/licenses-faq", publisher: dbt Labs, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "FinOps Framework: Allocation", url: "https://framework.finops.org/framework/capabilities/allocation/", publisher: FinOps Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: "FOCUS: Cost and Usage dataset", url: "https://focus.finops.org/docs/specification/v1-3/datasets/cost-and-usage/", publisher: FinOps Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S13, title: Metabase License, url: "https://www.metabase.com/license", publisher: Metabase, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "Metabase: Securing embeds", url: "https://www.metabase.com/docs/latest/embedding/securing-embeds", publisher: Metabase, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Apache Superset 发布目录, url: "https://release-catalog.apache.org/superset/index.html", publisher: Apache Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "OpenFeature: Provider", url: "https://openfeature.dev/docs/reference/concepts/provider/", publisher: OpenFeature, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Unleash: Feature flag best practices", url: "https://docs.getunleash.io/guides/feature-flag-best-practices", publisher: Unleash, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: Unleash is moving to AGPLv3, url: "https://www.getunleash.io/blog/unleash-moving-to-agplv3", publisher: Unleash, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: GrowthBook（仓库与 LICENSE）, url: "https://github.com/growthbook/growthbook", publisher: GrowthBook, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: Great Expectations（仓库与 LICENSE）, url: "https://github.com/great-expectations/great_expectations", publisher: Great Expectations, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "Soda Core License Update: Moving to Elastic License 2.0", url: "https://soda.io/blog/soda-core-license-update-moving-to-elastic-license", publisher: Soda, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: Grafana LICENSING, url: "https://github.com/grafana/grafana/blob/main/LICENSING.md", publisher: Grafana Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Matomo（仓库与 LICENSE）, url: "https://github.com/matomo-org/matomo", publisher: Matomo, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - 未联网核实（沿用报告 2026-11-13 的说法）：Plausible 为 AGPL-3.0 且统计脚本为 MIT、Superset 为 Apache-2.0、Grafana 为 AGPL-3.0、Matomo 为 GPL-3.0、GrowthBook 为 MIT 加企业分层、Flagsmith 核心为 BSD-3-Clause、Doris 与 StarRocks 为 Apache-2.0
+  - 未核实：Polars、pandas、nbstripout 的许可证
+  - DuckDB、ClickHouse 的许可证只通过第三方页面印证，入库前应直接看官方仓库的 LICENSE
+  - Soda Core 改为 Elastic License 2.0 的具体时间和版本各方说法不一，需看官方发布说明
+  - Metabase 开源版嵌入产品时的义务（带标识的免费嵌入与付费嵌入许可）需要按 27 的口径由法务确认
+  - PostHog 自托管下 ee 目录功能的具体授权方式未完全确认
+  - 待补调研：埋点 SDK 选型（客户端与服务端，含移动端）
+  - 待补调研：数据接入（ETL/ELT、CDC）工具，如 Airbyte、dlt、Debezium 的选型与许可
+  - 待补调研：语义层工具（如 Cube、MetricFlow）是否值得推荐
+  - 待补调研：国产 BI 和国产 OLAP 的选型与信创适配
+  - 待补调研：同意管理平台（CMP）的选型与同意状态的标准格式
+  - 待补调研：A/B 实验统计方法的外部依据（功效分析、CUPED、序贯检验、SRM 阈值），现有规则主要基于业界通行做法，缺少引用
+  - 待补调研：图表类型选择与可读性规则的权威出处
+  - 待补调研：产品分析事件与 OpenTelemetry 采集的边界，需与 26 对齐
