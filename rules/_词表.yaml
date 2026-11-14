@@ -19,7 +19,8 @@
     名称: 人工
     含义: 只能靠评审或演练记录确认；规则里要写清审查点。
 
-# 适用范围标签：rules[].applies 只能用这里的值
+# 适用范围标签：rules[].applies 只能用这里的值。
+# 同一类（lang:、platform:、kind:）之间是「或」，不同类之间是「且」：[lang:python, kind:service] 只适用于 Python 写的服务。含 all 的总是适用。
 适用范围:
   all: 所有项目
   lang:ts: TypeScript / JavaScript / Node

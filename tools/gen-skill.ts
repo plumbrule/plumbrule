@@ -88,7 +88,7 @@ metadata:
 
 1. 看仓库用了哪些语言和端（package.json、go.mod、pyproject.toml、Cargo.toml、build.gradle、*.xcodeproj 等）；
 2. 运行 \`node scripts/agents-md.mjs --tags <标签,逗号分隔>\`，标签取值：${Object.keys(vocab['适用范围']).filter((k) => k !== 'all').join('、')}；
-3. 把输出的硬约束清单合并进仓库的 AGENTS.md（已有的内容保留，项目约定优先），补上本项目的构建、测试命令。
+3. 默认输出精简版：适用主题的索引和链接，合并进仓库的 AGENTS.md（已有的内容保留，项目约定优先），补上本项目的构建、测试命令。用户明确要把规则逐条写进仓库时才加 \`--full\`；入口文件要短，逐条列出几百条规则会被忽略。
 
 没有 Node 时，直接从相关 \`references/\` 文件里挑出硬约束手写。
 

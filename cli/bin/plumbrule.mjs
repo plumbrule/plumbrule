@@ -3,7 +3,7 @@
 //
 //   plumbrule install [--agent claude|codex|all] [--project] [--dir <目录>]
 //   plumbrule uninstall [同上]
-//   plumbrule agents-md --tags lang:go,kind:service [--soft]
+//   plumbrule agents-md --tags lang:go,kind:service [--full] [--soft]
 //   plumbrule where
 import { cpSync, existsSync, rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -74,7 +74,7 @@ switch (cmd) {
   plumbrule install [--agent claude|codex|all] [--project] [--dir <目录>]
       安装技能。默认装到所有支持的 Agent 的用户目录；--project 装到当前项目。
   plumbrule uninstall [同上参数]
-  plumbrule agents-md --tags <标签,…> [--soft]
+  plumbrule agents-md --tags <标签,…> [--full] [--soft]
       输出适用于本项目的规则，合并进 AGENTS.md。
   plumbrule where
       显示各 Agent 的技能目录。`);

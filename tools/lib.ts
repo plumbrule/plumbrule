@@ -3,6 +3,8 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+// @ts-ignore 纯 JS 模块
+import { appliesTo } from './agents-md-core.mjs';
 
 // 网站构建时本文件会被打包到别处，找不到规则目录就退回到当前工作目录（仓库根）。
 const guess = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,8 +48,8 @@ export const checkName = (c: string) => vocab['检查方式'][c]['名称'] as st
 export const ruleUrl = (t: Topic, r: Rule) => `${config.siteUrl}/topics/${t.slug}/#${r.id.toLowerCase()}`;
 export const topicUrl = (t: Topic) => `${config.siteUrl}/topics/${t.slug}/`;
 
-/** 规则是否适用于给定的范围标签集合（all 总是适用）。 */
-export const ruleApplies = (r: Rule, tags: Set<string>) => r.applies.some((a) => a === 'all' || tags.has(a));
+/** 规则是否适用于给定的范围标签集合，规则见 agents-md-core.mjs 的 appliesTo。 */
+export const ruleApplies = (r: Rule, tags: Set<string>) => appliesTo(r.applies, tags);
 
 export const ownership = load(join(rulesDir, '_归属.yaml'));
 /** 主题名称表（含还没整理的主题）。 */

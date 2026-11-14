@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// 按项目情况输出一份 AGENTS.md 片段：只含适用的硬约束。
-// 用法：node agents-md.mjs --tags lang:go,kind:service [--soft] [--data path/to/rules.json]
+// 按项目情况输出一份 AGENTS.md 片段。默认是精简版（适用主题的索引），--full 逐条列出硬约束，--soft 再加上软指导。
+// 用法：node agents-md.mjs --tags lang:go,kind:service [--full] [--soft] [--data path/to/rules.json]
 // 不依赖任何第三方包，随技能一起分发。
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -18,4 +18,4 @@ if (unknown.length) {
   console.error(`不认识的标签：${unknown.join('、')}\n可用标签：${Object.keys(data.tags).filter((k) => k !== 'all').join('、')}`);
   process.exit(2);
 }
-console.log(renderAgentsMd(data, tags, args.includes('--soft')).text);
+console.log(renderAgentsMd(data, tags, { soft: args.includes('--soft'), full: args.includes('--full') }).text);

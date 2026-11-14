@@ -57,12 +57,13 @@ const tabs = [
   </div>
 
   <h2 id="agents-md">为项目生成 AGENTS.md 里的规则</h2>
-  <p>选上项目用到的语言和端，只挑出相关的硬约束。复制后合并进仓库根目录的 AGENTS.md。</p>
+  <p>选上项目用到的语言和端，生成一段适用主题的索引，复制后合并进仓库根目录的 AGENTS.md。入口文件要短，Agent 会通过技能按需查具体规则；确实要把规则逐条写进仓库时再选「逐条列出」。</p>
   <div class="not-content gen" data-gen>
     <fieldset class="pr-card tags">
       <legend>项目情况</legend>
       {scopes.map(([k, v]) => <label><input type="checkbox" value={k} checked={preset.has(k)} data-tag /> {v}</label>)}
-      <label class="soft"><input type="checkbox" data-soft /> 同时包含软指导（标「建议」）</label>
+      <label class="opt"><input type="checkbox" data-full /> 逐条列出硬约束（会很长）</label>
+      <label class="opt"><input type="checkbox" data-soft /> 同时包含软指导（标「建议」）</label>
     </fieldset>
     <div class="out">
       <pre class="pr-card preview" tabindex="0" aria-label="生成的 AGENTS.md 片段" data-preview></pre>
@@ -104,10 +105,11 @@ const tabs = [
   const render = () => {
     const tags = new Set([...gen.querySelectorAll<HTMLInputElement>('[data-tag]')].filter((x) => x.checked).map((x) => x.value));
     const soft = gen.querySelector<HTMLInputElement>('[data-soft]')!.checked;
-    const { text, count } = renderAgentsMd(data, tags, soft);
+    const full = gen.querySelector<HTMLInputElement>('[data-full]')!.checked;
+    const { text, count, topics } = renderAgentsMd(data, tags, { soft, full });
     gen.querySelector('[data-preview]')!.textContent = text;
-    gen.querySelector('[data-status]')!.textContent = `共 ${count} 条`;
-    gen.querySelector('[data-cli]')!.textContent = `npx plumbrule agents-md${tags.size ? ` --tags ${[...tags].join(',')}` : ''}${soft ? ' --soft' : ''}`;
+    gen.querySelector('[data-status]')!.textContent = `${topics} 个主题，${count} 条规则`;
+    gen.querySelector('[data-cli]')!.textContent = `npx plumbrule agents-md${tags.size ? ` --tags ${[...tags].join(',')}` : ''}${full ? ' --full' : ''}${soft ? ' --soft' : ''}`;
     return text;
   };
   gen.addEventListener('change', render);
@@ -134,7 +136,8 @@ const tabs = [
   .gen { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-top: 1rem; }
   .tags { flex: 1 1 16rem; margin: 0; padding: 0.875rem 1.125rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.375rem 0.75rem; font-size: var(--sl-text-sm); align-content: start; }
   .tags legend { font-weight: 600; padding: 0 0.25rem; }
-  .tags .soft { grid-column: 1 / -1; margin-top: 0.375rem; color: var(--sl-color-gray-2); }
+  .tags .opt { grid-column: 1 / -1; color: var(--sl-color-gray-2); }
+  .tags .opt:first-of-type { margin-top: 0.375rem; }
   .out { flex: 2 1 26rem; min-width: 0; display: flex; flex-direction: column; gap: 0.5rem; }
   .preview { margin: 0; padding: 0.875rem 1.125rem; font-family: var(--sl-font-mono); font-size: 0.8125rem; line-height: 1.75; color: var(--sl-color-gray-1); white-space: pre-wrap; max-height: 28rem; overflow: auto; }
   .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }

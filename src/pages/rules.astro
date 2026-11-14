@@ -21,7 +21,7 @@ const firstScopes = 7;
       </fieldset>
       <fieldset>
         <legend class="fl">适用范围</legend>
-        <p class="hint pr-muted">不勾选表示不限。</p>
+        <p class="hint pr-muted">不勾选表示不限。勾选后，同类之间任一符合即可，不同类要同时符合。</p>
         {scopes.map(([k, v], i) => <label class:list={{ more: i >= firstScopes }} hidden={i >= firstScopes}><input type="checkbox" data-scope value={k} /> {v}</label>)}
         <button type="button" class="linkbtn" data-more aria-expanded="false">更多（{scopes.length - firstScopes} 项）</button>
       </fieldset>
@@ -62,7 +62,7 @@ const firstScopes = 7;
 </StarlightPage>
 
 <script>
-  import { renderAgentsMd } from '../../tools/agents-md-core.mjs';
+  import { renderAgentsMd, appliesTo } from '../../tools/agents-md-core.mjs';
   const root = document.querySelector<HTMLElement>('[data-rules-root]')!;
   const data = JSON.parse(document.getElementById('rules-data')!.textContent!);
   const rows = [...root.querySelectorAll<HTMLTableRowElement>('tbody tr')];
@@ -74,7 +74,7 @@ const firstScopes = 7;
     visible = [];
     for (const r of rows) {
       const applies = r.dataset.applies!.split(' ');
-      const ok = lv.has(r.dataset.level!) && ck.has(r.dataset.check!) && (!sc.size || applies.some((a) => sc.has(a))) && (!kw || r.dataset.text!.includes(kw));
+      const ok = lv.has(r.dataset.level!) && ck.has(r.dataset.check!) && (!sc.size || appliesTo(applies, sc)) && (!kw || r.dataset.text!.includes(kw));
       r.hidden = !ok;
       if (ok) visible.push(r.dataset.id!);
     }
