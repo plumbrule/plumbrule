@@ -1,0 +1,598 @@
+id: "24"
+slug: llm
+title: 模型与大模型工程
+summary: 应用调用大模型的全过程怎么做才可控：怎么选模型和换模型、要不要网关、提示词怎么管、结构化输出和工具调用怎么接、怎么评测、RAG 怎么做、成本怎么算、本地推理怎么部署、调用怎么观测。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - 模型选择、版本固定与升级
+    - 模型网关与多厂商接入
+    - 提示词管理与版本化
+    - 结构化输出与工具调用
+    - 评测（离线评测集、回归评测、模型当评审的校准）与评测工具
+    - RAG 的切块、检索、重排与引用
+    - 模型计价、缓存与预算
+    - 本地或私有化部署推理
+    - 模型调用的可观测
+  excludes:
+    - { what: 可阻断发布的确定性检查层（输出结构、权限、真实状态）, see: "04" }
+    - { what: 提示注入、数据出网、密钥管理与扫描、SSRF 的通用安全规则, see: "25" }
+    - { what: 编码 Agent 的行为规范、Agent 配置的回归评测流程, see: "23" }
+    - { what: MCP 协议、工具接口契约、事件格式, see: "16" }
+    - { what: 工具调用的对象级授权、MCP 令牌校验, see: "19" }
+    - { what: 不可信文档的解析与转换（切块之前的那一步）, see: "20" }
+    - { what: 向量存储选型, see: "17" }
+    - { what: 通用成本账本、金额计算与对账口径, see: "22" }
+    - { what: OTel 部署、告警、灰度与发布, see: "26" }
+    - { what: 生成内容标识、算法备案、数据出境、开源许可口径, see: "27" }
+overview: |
+  1. **按自己的评测结果选模型。** 不按品牌、排行榜或一次演示。每类任务先建一份自己的评测集，候选模型在同一套数据上配对比较。
+  2. **固定版本，换模型当依赖升级。** 业务代码只引用配置里的逻辑名；配置里写厂商的具体快照版本，不用会自动漂移的别名。换模型、改提示词、改工具定义、换 embedding 都要跑回归评测、灰度、可回滚。
+  3. **网关不是必选。** 单一厂商用官方 SDK 加一个薄封装就够；多厂商、统一密钥和计量时再上现成网关（默认 LiteLLM），不自己写。企业版功能另有许可，选之前核对。
+  4. **结构化输出只保证格式。** 写库或执行前还要校验业务约束，并处理拒答和截断。
+  5. **工具描述不是授权。** 工具在执行侧独立鉴权；有副作用的写操作要审批、幂等键和审计。
+  6. **评测分三层。** 确定性检查打底（见 04），语义质量用人工标注的评测集，线上抽检兜底。模型当评审要先和人工标注校准，不单凭它的分数放行。
+  7. **评测工具默认 promptfoo，Python 团队可用 DeepEval。** 评测数据用中性格式保存，工具可以换。
+  8. **RAG 不是默认选项。** 能查库、调接口就不做向量召回；要做时检索前按权限过滤，引用由服务端按片段编号生成。
+  9. **成本分口径记。** 账单、接口返回的用量、网关估算、订阅额度是四件事；声称硬预算就要调用前预留。
+  10. **本地推理要实测。** 高并发 GPU 服务默认 vLLM，开发机用 Ollama；推理服务不裸露在网络上，权重许可单独核。声称离线就做断网冷启动验收。
+  11. **默认不记原文。** 调用日志和链路追踪只记版本、用量、耗时等元数据；原始提示词和输出要授权采样、短期保留。
+rules:
+  # ── 模型选择与版本 ──
+  - id: LLM-001
+    title: 业务代码通过配置里的逻辑名调用模型，不在代码里散落厂商模型 ID
+    level: soft
+    check: auto
+    how: CI 用正则或语法树规则扫描业务代码中的厂商模型 ID 字面量，只允许出现在模型配置文件里
+    applies: [kind:llm]
+    why: 模型 ID 散在各处时，换模型、回滚、审计都要改一遍代码，容易漏。
+    detail: |
+      - 逻辑名按用途起，例如「订单摘要」「工单分类」，配置里映射到厂商、模型和参数。
+      - 配置文件用 schema 校验，至少包含厂商、具体模型版本、采样参数、超时和适用的数据级别。
+  - id: LLM-002
+    title: 生产配置固定到厂商的具体模型快照版本，不使用会自动指向新模型的别名
+    level: hard
+    check: auto
+    how: 配置 schema 拒绝 `latest` 一类的浮动别名和不带版本的模型名；CI 校验
+    applies: [kind:llm]
+    why: 别名背后的模型被厂商替换后，输出、格式遵循、拒答行为都可能变，而你没有做过任何评测。
+    detail: |
+      - 本地模型同理：权重按不可变的版本或哈希引用，不用会移动的标签。
+      - 开发和试验环境可以用别名，但评测报告里要记下实际解析到的版本。
+    see: [LLM-040]
+  - id: LLM-003
+    title: 选模型按自己任务的评测结果，同时比较质量、成本、时延、数据合规和可维护性；不按排行榜或品牌
+    level: soft
+    check: manual
+    how: 选型记录（如 ADR）里附评测数据集版本、候选模型版本和各项结果
+    applies: [kind:llm]
+    why: 公开榜单的任务分布、价格和可用地区和你的业务不同，在别人的题上排第一不代表在你的题上好用。
+    detail: |
+      - 按任务档挑候选：分类、抽取已知字段先考虑规则或小型快速模型；长文综合、复杂推理选高能力推理模型；工具规划要选做过工具专项评测的模型；高风险判定用模型加确定性规则加人审，不让模型终审。
+      - 小模型不一定更省：质量差导致的返工、重试、人工复核也要算进总成本。
+      - 境内外模型走同一套评测集和数据合规检查。
+    sources: [S19]
+    see: ["27"]
+  - id: LLM-004
+    title: 更换模型、提示词、工具定义、检索索引或 embedding 模型，必须先在固定评测集上和当前线上版本配对比较，通过后才能上线
+    level: hard
+    check: semi
+    how: CI 在相关配置或文件变更时自动跑回归评测，结果作为合并或发布的必过检查；关键指标退化需负责人签字
+    applies: [kind:llm]
+    why: 大模型的退化往往不报错，只是悄悄变差；不对比就发现不了。
+    detail: |
+      - 比较双方都写清确切版本、采样参数、推理设置和网关版本，不拿「A 的最新版」比「B 的某个版本」。
+      - 不可退化项单独列：例如已知越权、数据外发用例必须全部拦住，不能用整体质量提升抵消。
+      - 通过后灰度上线，保留回滚到上一组版本的能力；灰度做法见 26。
+    sources: [S19]
+    see: ["04", "26", LLM-020]
+  - id: LLM-005
+    title: 对每个用到的厂商、模型和接口组合，实测它支持哪些能力，不假设「兼容某某接口」就全部兼容
+    level: soft
+    check: semi
+    how: 维护一份能力清单（输入类型、上下文长度、工具调用、结构化输出、流式、可用区域），并用一组兼容性用例逐项验证
+    applies: [kind:llm]
+    why: 兼容层可能静默丢弃字段、改写错误语义或不支持部分 schema，上线后才发现代价大。
+  # ── 调用的可靠性 ──
+  - id: LLM-006
+    title: 每次模型调用必须设置超时、支持取消，并限制并发
+    level: hard
+    check: semi
+    how: 所有调用经过统一封装，静态检查不允许绕过封装直接调用 SDK；故障注入测试验证超时和取消生效
+    applies: [kind:llm]
+    why: 模型调用慢且不稳定，没有超时和并发上限会拖垮整个服务并持续计费。
+    see: ["02"]
+  - id: LLM-007
+    title: 重试只针对连接失败、限流和服务端暂时性错误，带指数退避和随机抖动、次数上限和总时限，并遵守 Retry-After
+    level: soft
+    check: semi
+    how: 故障注入测试覆盖 401、403、429、5xx、连接中断；检查不可重试的错误没有被重试
+    applies: [kind:llm]
+    why: 无限重试会放大故障、重复计费；鉴权失败、schema 非法、拒答这类错误重试也没用。
+    detail: |
+      重试前检查剩余时限和预算。不可重试：401/403、请求不合法、模型拒答、业务语义错误。
+    see: ["18"]
+  - id: LLM-008
+    title: 流式输出已经发给用户、或工具已经执行之后，不得自动重放请求；要返回「执行状态未知」，走查询或补偿
+    level: hard
+    check: semi
+    how: 集成测试模拟流中途断开和工具执行后超时，检查没有重复输出和重复副作用
+    applies: [kind:llm]
+    why: 静默重放会让用户看到前后矛盾的内容，或让扣款、发信这类操作执行两次。
+    see: ["16"]
+  - id: LLM-009
+    title: 降级或切换到备用模型时，备用模型必须满足同一任务的能力要求和数据合规策略；模型拒答不得换更宽松的模型重试
+    level: hard
+    check: semi
+    how: 降级策略写进配置，测试覆盖「备用模型不在批准的厂商或区域」时拒绝切换
+    applies: [kind:llm]
+    why: 为了可用性把敏感数据送到没批准的境外模型，或用更宽松的模型绕过拒答，都是合规事故。
+    see: ["27", LLM-029]
+  # ── 结构化输出与工具调用 ──
+  - id: LLM-010
+    title: 模型输出在写库或执行前，必须通过 schema 校验和业务约束校验，并显式处理拒答、截断和无效输出
+    level: hard
+    check: auto
+    how: 单元测试覆盖合法、缺字段、越界、拒答、截断五类输出；静态检查禁止解析后不校验直接使用
+    applies: [kind:llm]
+    why: 厂商的结构化输出只保证格式符合受支持的 schema 子集，不保证值是对的，也不保证模型不拒答。
+    detail: |
+      - 推荐顺序：厂商原生结构化输出或本地引擎的受约束解码 → 本地严格校验（Pydantic、Zod、JSON Schema）→ 业务断言 → 有副作用时再走权限和审批。
+      - 只用「JSON 模式」不够，它只保证是合法 JSON。
+      - 校验失败可以有限次修复重试，保留原始失败记录；修复只修格式，不能当成纠正事实。
+      - 发给模型的 schema 要按厂商支持的子集来写，不要把任意 JSON Schema 直接塞过去。
+      - 需要结构化结果时用原生结构化输出或工具调用，不用正则从自由文本里抠字段。
+    sources: [S14]
+    see: [TST-033]
+  - id: LLM-011
+    title: 工具在执行侧独立校验调用者身份、权限、目标资源和参数；工具定义和模型的话都不算授权
+    level: hard
+    check: semi
+    how: 每个工具都有越权负例测试（换用户、换租户、换资源）；评审检查授权逻辑不依赖模型输出
+    applies: [kind:llm]
+    why: 模型可能被注入或误判；工具 schema 只是请求格式，挡不住越权。
+    sources: [S07]
+    see: ["19", "25"]
+  - id: LLM-012
+    title: 有副作用的写操作工具（付款、删除、发布、发送、改权限）必须有人工审批或确定性规则放行，带幂等键，并留审计记录
+    level: hard
+    check: semi
+    how: 工具注册时标注是否有副作用；测试检查未审批时不执行、重复调用只生效一次、审计记录齐全
+    applies: [kind:llm]
+    why: 模型拥有超出需要的行动能力是公认的高风险（OWASP 称为过度代理），不可逆操作出错无法挽回。
+    detail: |
+      - 并行的多个工具调用按厂商返回的调用编号聚合参数，参数完整并校验通过后再执行。
+      - 超时、取消、重复的工具调用按幂等键去重；幂等语义见 16。
+    sources: [S07]
+    see: ["16", "19"]
+  - id: LLM-013
+    title: 每个任务只给模型完成它所需的最少工具和最小权限；只读和读写工具分开
+    level: soft
+    check: manual
+    how: 评审时对照任务列出的工具清单，检查有没有用不到的工具或过大的权限
+    applies: [kind:llm]
+    why: 暴露的工具越多，注入和误调用能造成的破坏面越大。
+    sources: [S07]
+  - id: LLM-014
+    title: 接入第三方 MCP 服务或工具前，审查来源、固定版本；把它的工具描述和返回内容当作不可信数据
+    level: soft
+    check: manual
+    how: 接入时记录来源、版本和审查人；回归评测里放入夹带指令的工具描述和工具返回
+    applies: [kind:llm]
+    why: 工具描述和工具返回会直接进模型上下文，恶意内容可以借此注入指令或诱导外发数据。
+    sources: [S08]
+    see: ["16", "25"]
+  # ── 提示词管理 ──
+  - id: LLM-015
+    title: 生产提示词放在版本库里，和代码一起评审；改动附评测结果
+    level: soft
+    check: semi
+    how: 提示词文件路径写进 CODEOWNERS；CI 在提示词变更时要求有回归评测结果
+    applies: [kind:llm]
+    why: 提示词就是代码，线上直接改模板无法评审、无法回滚，也不知道效果变好还是变坏。
+    detail: |
+      - 用提示词管理平台的，平台上的草稿必须经审批后导出回版本库，或平台本身支持不可变修订、差异对比、审批和导出。
+      - 按用途分类（安全策略、业务任务、风格、检索、厂商参数适配），安全策略类收紧修改权限。
+    see: [LLM-004]
+  - id: LLM-016
+    title: 运行时按不可变的版本号或内容哈希加载提示词，调用记录里写明所用版本
+    level: hard
+    check: auto
+    how: 加载器只接受带版本或哈希的引用；链路追踪契约测试检查提示词版本字段存在
+    applies: [kind:llm]
+    why: 不知道线上跑的是哪一版提示词，出了问题就无法复现、归因和回滚。
+  - id: LLM-017
+    title: 用户输入、检索内容、工具返回通过模板变量放进提示词的独立区块，不拼接进系统指令
+    level: hard
+    check: semi
+    how: 静态检查系统提示词构造处没有字符串拼接外部内容；注入样本回归测试
+    applies: [kind:llm]
+    why: 外部内容拼进系统指令就和指令混在一起，最容易被注入覆盖；但这只是减轻，不是根治，授权仍靠 LLM-011。
+    sources: [S08]
+    see: ["25"]
+  # ── 评测 ──
+  - id: LLM-018
+    title: 每类模型任务都有一份版本化的离线评测集，覆盖正常、边界、对抗、应拒答、多轮、工具调用和真实线上分布
+    level: soft
+    check: semi
+    how: 评测集放版本库并记录来源和标注人；CI 统计各类样本是否齐全
+    applies: [kind:llm]
+    why: 只用顺手挑的几个好例子测，长尾失败和注入问题都测不出来。
+    detail: |
+      - 线上样本要先脱敏再进评测集。
+      - 多语言产品按语种分别有样本。
+      - 评测数据用 JSONL、CSV 这类中性格式保存，不锁死在某个评测工具里。
+    sources: [S19]
+  - id: LLM-019
+    title: 能用确定性断言判定的项（格式、字段、引用编号、工具参数、拒答与否），用断言判定，不交给模型评审
+    level: soft
+    check: semi
+    how: 评审评测配置，检查客观项是否用了断言
+    applies: [kind:llm]
+    why: 断言可复现、零成本、不漂移；模型评审有偏差还要花钱。
+    sources: [S19]
+    see: [TST-033]
+  - id: LLM-020
+    title: 用模型当评审前，先在人工标注的样本上校准一致性；没校准的不作为发布门禁；高风险变更和扩大模型权限不能只凭模型评审分数放行
+    level: hard
+    check: manual
+    how: 评测报告里附评审模型与人工标注的一致性结果；评审时核对门禁里用到的每个模型评审项都有校准记录
+    applies: [kind:llm]
+    why: 模型评审会偏向自家模型、长答案和靠前的答案，没校准的分数不能当真值；评审和被评模型可能共享盲点，自动放权等于让模型给自己批准。
+    detail: |
+      - 固定评审模型版本、评分标准、评审提示词和采样参数。
+      - 成对比较时随机交换答案位置，检查位置偏差。
+      - 不用同一个模型既回答又评分又自动放行。
+      - 校准不一致的样本交人工仲裁，定期复核。
+    sources: [S19]
+  - id: LLM-021
+    title: 上线后按授权比例抽样线上调用做质量检查，结合用户纠错和分布漂移，发现的问题补回评测集
+    level: soft
+    check: manual
+    how: 定期检查抽样记录和评测集的更新记录
+    applies: [kind:llm]
+    why: 离线评测集会过时，线上分布会变，只有抽检才能发现新出现的失败模式。
+    detail: 用户反馈不自动当真值，要人工确认后再进评测集。
+  # ── RAG ──
+  - id: LLM-022
+    title: 先确认需要 RAG：能直接查库、调已有接口、或内容能直接放进提示词的，不做向量检索
+    level: soft
+    check: manual
+    how: 方案评审时写明为什么不能用直接查询，并附对照实验结果
+    applies: [kind:llm]
+    why: 把 SQL 查询包装成向量召回，更慢、更贵、更不准，也更难追溯。
+  - id: LLM-023
+    title: RAG 在检索时就按当前用户和租户的权限过滤，不在拿到结果后再过滤
+    level: hard
+    check: auto
+    how: 越权负例测试：用无权用户查询有权文档的独有内容，检查检索结果和回答里都没有
+    applies: [kind:llm]
+    why: 先检索后过滤会通过片段、条数或模型的转述泄露无权内容；向量库本身不是权限边界。
+    sources: [S07]
+    see: ["19"]
+  - id: LLM-024
+    title: 源文档删除、权限变更或改版后，必须在约定时间内更新索引；更新前的旧片段不得返回
+    level: hard
+    check: semi
+    how: 集成测试删除或收回一份文档后再查询，检查不再命中；监控索引与源数据的同步延迟
+    applies: [kind:llm]
+    why: 索引里残留的已删除或已收权内容，会持续泄露给不该看的人。
+    see: ["27"]
+  - id: LLM-025
+    title: 切块按标题、段落、表格、代码块等结构边界切，每块保存来源编号、版本、位置、权限标签和 embedding 模型版本
+    level: soft
+    check: semi
+    how: 索引 schema 校验必填元数据；切块参数通过离线实验确定并记录
+    applies: [kind:llm]
+    why: 机械按长度切会切断表格和语义；没有元数据就做不了权限过滤、引用和重建索引。
+    detail: 切块长度没有通用最优值，按自己的文档类型做实验，不把某个数值当永久规则。文档解析见 20。
+    see: ["20"]
+  - id: LLM-026
+    title: 检索从关键词检索（如 BM25）基线开始，按评测结果再加向量、混合检索和重排
+    level: soft
+    check: semi
+    how: 每加一层都和上一层做对照实验，记录召回和成本变化
+    applies: [kind:llm]
+    why: 编号、条款、名称、错误码这类精确查询，关键词检索往往比向量更准；每层叠加都增加成本和延迟。
+    detail: |
+      - 混合检索可用倒数排名融合（RRF）合并结果。
+      - 重排用专门的重排模型（交叉编码器类），或经过评测的模型重排。
+      - 不盲目叠加查询改写、多路检索、重排。
+  - id: LLM-027
+    title: 启用引用时，引用由服务端根据实际检索到的片段编号生成，并校验被引用片段确实支持该说法；不让模型自己写链接、页码或行号
+    level: hard
+    check: auto
+    how: 引用完整性测试：每个引用都能反查到本次检索结果中的片段，且来源版本未过期
+    applies: [kind:llm]
+    why: 模型会编出看起来可信的链接和页码，用户最容易被这种假引用误导。
+  - id: LLM-028
+    title: RAG 分开评测检索和生成：检索看召回率、排序质量，生成看正确性、忠实度、引用准确率和该拒答时是否拒答
+    level: soft
+    check: semi
+    how: 评测报告分别列出检索指标和生成指标，以及越权率和时延
+    applies: [kind:llm]
+    why: 只看最终答案分不清是检索错了还是生成编了，就不知道该改哪一层。
+  # ── 数据与密钥 ──
+  - id: LLM-029
+    title: 数据发给外部模型前，按数据分级确定允许的厂商、部署区域和日志级别；更换厂商或区域须数据负责人批准
+    level: hard
+    check: manual
+    how: 模型配置里每个逻辑名标明允许的数据级别；评审时核对变更有数据负责人的批准记录
+    applies: [kind:llm]
+    why: 境外模型、日志留存、厂商训练条款都可能构成数据出境或违约，事后补救不了。
+    see: ["25", "27"]
+  - id: LLM-030
+    title: 浏览器、移动端和桌面客户端不持有模型厂商的长期密钥；客户端经自己的后端或网关调用，用短期、限范围的令牌
+    level: hard
+    check: auto
+    how: 对前端构建产物和客户端安装包跑密钥扫描
+    applies: [kind:llm, platform:web, platform:mobile, platform:desktop]
+    why: 客户端里的密钥一定会被提取，被盗刷的账单和数据风险由你承担。
+    detail: 密钥管理和扫描工具见 25。
+    see: ["25"]
+  # ── 成本与缓存 ──
+  - id: LLM-031
+    title: 模型成本按来源分开记：厂商账单、接口返回的用量、网关或内部估算、订阅额度和本地算力分摊，不混成一个数
+    level: soft
+    check: semi
+    how: 成本记录带来源字段；定期用厂商账单对账，记录估算偏差
+    applies: [kind:llm]
+    why: 缓存折扣、思考类 token、批处理、税费和汇率都会让估算和账单不一致；订阅产品的用量也不能按 API 单价折算。
+    detail: |
+      - 单价按生效日期版本化记录，原币金额、汇率日期分开存。
+      - 金额计算和通用账本口径见 22。
+    sources: [S20, S21]
+    see: ["22"]
+  - id: LLM-032
+    title: 声称有硬预算上限时，必须在调用前原子预留最大可能花费，完成后按实际用量结算；并对单次请求限制最大输出长度和最大工具轮数
+    level: hard
+    check: semi
+    how: 并发竞争测试：同时发起超出预算的请求，检查不会透支
+    applies: [kind:llm]
+    why: 先调用后统计在并发下必然超额；只靠网关的异步汇总做不了硬停。
+    detail: 硬停只能保证本系统不再发新请求，厂商账单可能有延迟；对外说明时写清这是本系统能保证的上界。
+    see: ["22"]
+  - id: LLM-033
+    title: 长提示词把稳定内容放在前面以利用厂商的提示缓存，并用实际账单核对缓存是否真的省钱
+    level: soft
+    check: semi
+    how: 监控缓存读写 token 和命中率，和账单对账；提示词变更后检查缓存命中和预算变化
+    applies: [kind:llm]
+    why: 缓存写入可能额外收费，前缀一变就不命中，「开了缓存就省钱」不一定成立。
+    detail: 上下文先删过时和重复的历史，再检索精确资料，最后才压缩；带来源的证据压缩时不能丢引用位置。
+    sources: [S15, S16]
+  - id: LLM-034
+    title: 应用自己做的响应缓存，缓存键必须包含租户、权限范围、模型版本、提示词版本和输入；涉及个人或敏感数据的结果默认不缓存
+    level: hard
+    check: auto
+    how: 安全测试用两个租户发送相同请求，检查不会命中对方的缓存
+    applies: [kind:llm]
+    why: 缓存键缺了租户或权限，就会把一个人的回答返回给另一个人。
+    see: ["18"]
+  # ── 可观测 ──
+  - id: LLM-035
+    title: 日志和链路追踪默认不记录原始提示词、模型输出、工具参数和检索片段；需要时经授权采样、脱敏并限定保留期
+    level: hard
+    check: semi
+    how: 日志抽样扫描敏感字段和个人信息；检查观测平台的采集配置
+    applies: [kind:llm]
+    why: 原文进了观测平台和备份，敏感数据就散落到访问控制更松的地方。
+    see: ["25", "27"]
+  - id: LLM-036
+    title: 链路追踪覆盖请求、模型调用、工具调用和检索，记录模型版本、提示词版本、token 用量、首字耗时、重试和降级原因
+    level: soft
+    check: auto
+    how: 契约测试检查各类调用都产生带这些字段的 span
+    applies: [kind:llm]
+    why: 没有版本和用量，就分不清质量、延迟和成本的变化是哪一处改动引起的。
+    detail: 字段名参考 OpenTelemetry 的生成式 AI 语义约定；该约定仍在演进，固定所用版本并维护字段映射。OTel 部署见 26。
+    sources: [S17]
+    see: ["26"]
+  # ── 本地与私有化推理 ──
+  - id: LLM-037
+    title: 本地推理服务（Ollama、vLLM 等）不直接暴露在公网或不受控网络上；必须放在带认证的网关或内网之后
+    level: hard
+    check: auto
+    how: 部署检查监听地址；外部端口扫描确认推理端口不可从不受控网络访问
+    applies: [kind:llm, kind:onprem]
+    why: 多数本地推理服务默认不带认证，暴露出去会被白嫖算力、拉取或删除模型。
+    sources: [S12]
+    see: ["25"]
+  - id: LLM-038
+    title: 本地推理选型和上线用自己的模型和真实负载实测，记录引擎版本、权重哈希、量化格式、硬件、驱动、上下文长度和并发
+    level: soft
+    check: semi
+    how: 基准测试结果作为文件存档，包含上述字段和首字耗时、吞吐、显存峰值、错误率
+    applies: [kind:llm, kind:onprem]
+    why: 推理性能取决于模型、量化、硬件、驱动和引擎的组合，别人的基准数据不能代替自己的实测。
+    detail: |
+      - 冷启动和热启动、长输入和短输入、固定批次和动态到达分开测。
+      - 显存估算：权重大小约等于参数量 × 每参数位数 ÷ 8，只是下限；还要加 KV 缓存、激活和框架开销。
+      - 国产芯片要按具体芯片、驱动和工具链验证，「CUDA 上能跑」不等于适配通过。
+    sources: [S10, S11]
+  - id: LLM-039
+    title: 使用开源模型权重前，单独核查权重的许可条款；推理引擎的许可证不代表权重的许可
+    level: hard
+    check: manual
+    how: 依赖清单里每个模型权重都有许可条款记录和核查人
+    applies: [kind:llm]
+    why: 引擎是 Apache-2.0，权重可能限制商用、用户规模、地域或再分发。
+    see: ["27"]
+  - id: LLM-040
+    title: 声称支持离线或私有化的版本，必须在断网环境下完成冷启动、推理、评测和故障恢复验收
+    level: hard
+    check: auto
+    how: 发版流程在断网的隔离环境里跑验收脚本，并检查没有对外连接
+    applies: [kind:llm, kind:onprem]
+    why: 镜像拉取、模型下载、依赖安装、价格表、遥测、版本检查都可能悄悄依赖外网。
+    detail: 模型权重和镜像按哈希或摘要固定，随版本一起交付；SBOM 和签名见 25。
+    see: ["25", "26"]
+  - id: LLM-041
+    title: 先用官方 SDK 加校验库实现；有明确需要时再引入编排框架，不为一次结构化输出引入大型框架
+    level: soft
+    check: manual
+    how: 引入框架的 PR 写明它解决了官方 SDK 解决不了的哪个问题
+    applies: [kind:llm]
+    why: 框架带来更多依赖、更快的版本变化和更难排查的抽象层；「用了框架」也不等于有了生产治理。
+choices:
+  - category: 模型选择
+    pick: 按任务档选候选，用自己的评测集配对比较后定
+    when: 所有调用大模型的应用
+    alternatives:
+      - { name: 规则引擎或传统模型, when: 分类、抽取已知字段等能确定求解的任务 }
+      - { name: 小型快速模型, when: 低风险的分类、短摘要、字段抽取，且评测达标 }
+      - { name: 高能力推理模型, when: 长文综合、复杂推理、代码分析、工具规划 }
+      - { name: 多模态模型, when: 需要理解图片或版面，且有字段级评测 }
+    avoid:
+      - { name: 按公开排行榜前几名直接选, why: 任务分布和你的不同 }
+      - { name: 按一次演示选「最强模型」, why: 看不到长尾失败和稳定性 }
+      - { name: 生产配置用浮动别名, why: 模型会在你不知情时被换掉 }
+    notes: 本库不列具体模型名和版本，它们变化太快；选型记录里写明评测日期和版本。
+    sources: [S19]
+  - category: 模型调用接入
+    pick: 厂商官方 SDK + 校验库（Python 用 Pydantic，TypeScript 用 Zod）
+    when: 单一厂商、调用方式简单
+    alternatives:
+      - { name: Pydantic AI, when: Python 项目要类型化的工具调用和多轮交互 }
+      - { name: Vercel AI SDK, when: TypeScript 前端要流式输出和对话界面；权限和业务流程仍在后端 }
+      - { name: LlamaIndex, when: 要接入大量数据源、做复杂检索链 }
+      - { name: LangChain, when: 需要它现成的集成和中间件 }
+    avoid:
+      - { name: 为一次 JSON 解析引入大型编排框架, why: 依赖多、升级频繁、排查难 }
+    license: Pydantic AI、LangChain、LlamaIndex 为 MIT；Vercel AI SDK 为 Apache-2.0（据原报告，未逐一复核）
+    sources: [S25, S26]
+  - category: 模型网关
+    pick: LiteLLM Proxy
+    when: 多厂商、需要统一密钥、路由、限流和用量记录时；单一厂商不必上网关
+    alternatives:
+      - { name: Envoy AI Gateway 或 Higress, when: 已有 Envoy 或 Kubernetes 网关体系 }
+      - { name: Portkey 开源网关, when: 只要轻量的转发、重试和故障切换 }
+      - { name: 官方 SDK + 薄封装 + 受控出口, when: 单一厂商或小规模 }
+    avoid:
+      - { name: 每个团队自己写多厂商代理, why: 参数映射和协议差异要长期跟进，成本高 }
+      - { name: 把厂商托管版或企业版的功能当作开源版也有, why: 部署后才发现缺功能或违反许可 }
+    license: LiteLLM 仓库中 enterprise/ 目录以外为 MIT，enterprise/ 目录另有商业许可，生产使用需付费订阅；超过 5 人的单点登录、基于角色的权限、审计日志等属于企业版功能。Portkey 开源网关为 MIT。
+    notes: 任何网关都要先做验证：实际用到的接口、错误码和断流时的计费与重试、工具和 schema 字段是否被改写、并发下限流和预算是否准确、两个租户的缓存和日志是否隔离、断网能否启动。网关自带的预算不要默认当作并发下精确的硬上限。
+    sources: [S04, S05, S22, S23]
+  - category: 评测工具
+    pick: promptfoo
+    when: 默认选择：配置是声明式 YAML、命令行运行，和项目语言无关，方便放进 CI 做回归评测和红队测试
+    alternatives:
+      - { name: DeepEval, when: Python 团队想把评测写成 pytest 风格的测试代码，或需要它现成的 RAG 和 Agent 指标 }
+      - { name: Ragas, when: 只需要 RAG 检索与生成的专项指标；选用前先查维护活跃度 }
+    avoid:
+      - { name: 只用模型当评审、没有确定性断言和人工标注, why: 评审有偏差，分数会漂移 }
+      - { name: 评测数据只存在某个工具或平台的私有格式里, why: 工具一换数据就丢 }
+    license: promptfoo 为 MIT；DeepEval 为 Apache-2.0，其托管平台 Confident AI 是另外的商业服务，不是必需的
+    notes: OpenAI 于 2026-03 宣布收购 promptfoo，官方表示继续开源维护，但未来治理没有约束性保证。评测集和评分规则用中性格式保存在自己仓库，保证随时能换到 DeepEval。评审模型要能换成本地模型，以便处理不能出网的数据。
+    sources: [S01, S02, S03]
+  - category: 提示词管理
+    pick: 版本库为准 + 运行时加载不可变版本
+    alternatives:
+      - { name: Langfuse 提示词管理, when: 需要非开发人员编辑和线上灰度；草稿须经审批并能导出回版本库 }
+    avoid:
+      - { name: 线上直接改模板, why: 无评审、无评测、无法回滚 }
+    sources: [S06]
+  - category: 结构化输出
+    pick: 厂商原生结构化输出或受约束解码 + 本地严格校验
+    alternatives:
+      - { name: 有限次修复重试, when: 模型或引擎不支持原生结构化输出 }
+    avoid:
+      - { name: 只用 JSON 模式, why: 只保证是合法 JSON，不保证字段和值 }
+      - { name: 正则从自由文本抠字段, why: 脆弱 }
+    sources: [S14]
+  - category: 模型调用可观测
+    pick: OpenTelemetry 采集 + 已有的追踪和日志后端
+    when: 只需要链路追踪和指标时
+    alternatives:
+      - { name: Langfuse, when: 需要大模型专用的追踪界面，并和提示词管理、评测放在一起；可自托管 }
+      - { name: Arize Phoenix, when: 偏实验和评测分析；许可证见待确认 }
+    avoid:
+      - { name: 默认把原始提示词和输出全量采集, why: 敏感数据散落到观测平台 }
+      - { name: 只要链路追踪也强上专用平台, why: 多一套要运维的系统 }
+    license: Langfuse 的 ee/ 目录以外为 MIT，产品功能均在 MIT 部分；ee/ 目录下的企业治理功能（如 SCIM、审计日志、项目级权限、数据保留策略）为商业许可，需许可密钥才启用
+    notes: 私有化交付时关闭观测平台自带的遥测和在线检查，并用出站测试证明。
+    sources: [S06, S17]
+  - category: 检索
+    pick: 关键词检索基线，按评测再加向量的混合检索和重排模型
+    alternatives:
+      - { name: 直接查库或调接口, when: 问题能确定求解 }
+    avoid:
+      - { name: 一上来就搭向量库加多路改写加重排, why: 复杂度和成本失控，且没有对照 }
+    notes: 向量存储选型见 17（默认 pgvector）。
+  - category: 本地推理（服务端 GPU、并发）
+    pick: vLLM
+    alternatives:
+      - { name: SGLang, when: 和 vLLM 成对实测后在目标模型上更好；运行栈变化快，要锁定完整环境 }
+    avoid:
+      - { name: 用 Ollama 承担高并发生产服务, why: 面向单机易用，并发和调度能力要专门验证 }
+      - { name: 按公开基准榜单直接定方案, why: 性能取决于自己的模型和硬件组合 }
+    license: vLLM、SGLang 为 Apache-2.0；权重许可另外核查（LLM-039）
+    notes: vLLM 是 PyTorch 基金会托管的项目，发布节奏稳定，社区活跃。
+    sources: [S09, S10, S11]
+  - category: 本地推理（开发机、单机、小规模）
+    pick: Ollama
+    alternatives:
+      - { name: llama.cpp（llama-server）, when: CPU、Apple 芯片或非 NVIDIA 硬件，用 GGUF 量化模型；或要更细的控制 }
+    avoid:
+      - { name: 把默认配置直接暴露到网络上, why: 默认没有认证（LLM-037） }
+    license: Ollama、llama.cpp 为 MIT
+    notes: llama.cpp 采用滚动构建编号发布，按具体构建号或提交固定。
+    sources: [S12, S13]
+antipatterns:
+  - { bad: 任何 AI 功能都先上编排框架、RAG、向量库和 Agent 平台, instead: 先用官方 SDK 加 schema 校验做最小端到端原型，有真实需要再加 }
+  - { bad: 在每个服务里硬编码厂商域名、模型 ID 和密钥, instead: 逻辑名加集中配置，密钥只放后端或网关 }
+  - { bad: 认为「兼容 OpenAI 接口」就所有字段都兼容, instead: 按厂商、模型、接口逐项做兼容性测试 }
+  - { bad: 429、500 之后无限重试, instead: 只重试暂时性错误，带退避、次数和总时限 }
+  - { bad: 流式输出到一半断了，自动换模型重放且不告诉前端, instead: 返回执行状态未知，需要时由用户显式重新发起 }
+  - { bad: 把结构化输出当成业务数据校验, instead: schema 校验加业务约束加权限检查 }
+  - { bad: 靠系统提示词里一句「不要执行危险操作」防护工具调用, instead: 执行侧鉴权、审批和幂等 }
+  - { bad: 让模型自己写引用链接和页码, instead: 服务端按检索片段编号生成引用 }
+  - { bad: 用同一个模型回答、打分并自动放行, instead: 确定性断言打底，评审模型先和人工标注校准 }
+  - { bad: 用「最大 token 数 × 单价」当正式账单, instead: 账单、用量、估算分开记，定期对账 }
+  - { bad: 每小时汇总一次用量就声称有硬预算, instead: 调用前原子预留，完成后结算 }
+  - { bad: 私有化部署只验证 Docker Compose 能启动, instead: 断网环境冷启动、推理、恢复全流程验收 }
+  - { bad: 引擎是 Apache-2.0 就以为权重也随便用, instead: 引擎、企业模块、权重许可分别核查 }
+  - { bad: 任何失败都自动切到境外厂商, instead: 备用模型先通过数据区域和批准名单检查 }
+sources:
+  - { id: S01, title: promptfoo, url: "https://github.com/promptfoo/promptfoo", publisher: promptfoo, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: OpenAI to acquire Promptfoo, url: "https://openai.com/index/openai-to-acquire-promptfoo/", publisher: OpenAI, date: 2026-03-09, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: DeepEval, url: "https://github.com/confident-ai/deepeval", publisher: Confident AI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: LiteLLM LICENSE, url: "https://github.com/BerriAI/litellm/blob/main/LICENSE", publisher: BerriAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "LiteLLM: Enterprise", url: "https://docs.litellm.ai/docs/enterprise", publisher: BerriAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: Why is Langfuse open source?, url: "https://langfuse.com/docs/open-source", publisher: Langfuse, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: OWASP Top 10 for LLM Applications 2025, url: "https://genai.owasp.org/llm-top-10/", publisher: OWASP, date: 2024-11-18, kind: standard, checked: 2026-11-14 }
+  - { id: S08, title: "OWASP LLM01:2025 Prompt Injection", url: "https://genai.owasp.org/llmrisk/llm01-prompt-injection/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S09, title: PyTorch Foundation welcomes vLLM, url: "https://pytorch.org/blog/pytorch-foundation-welcomes-vllm/", publisher: PyTorch Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: vLLM, url: "https://github.com/vllm-project/vllm", publisher: vLLM, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: SGLang, url: "https://github.com/sgl-project/sglang", publisher: SGLang, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Ollama, url: "https://github.com/ollama/ollama", publisher: Ollama, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: llama.cpp, url: "https://github.com/ggml-org/llama.cpp", publisher: ggml-org, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "OpenAI: Structured Outputs", url: "https://developers.openai.com/api/docs/guides/structured-outputs", publisher: OpenAI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "OpenAI: Prompt caching", url: "https://developers.openai.com/api/docs/guides/prompt-caching", publisher: OpenAI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Anthropic: Prompt caching", url: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: OpenTelemetry semantic conventions for generative AI, url: "https://opentelemetry.io/docs/specs/semconv/gen-ai/", publisher: OpenTelemetry, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S19, title: Demystifying evals for AI agents, url: "https://www.anthropic.com/research/demystifying-evals-for-ai-agents", publisher: Anthropic, date: 2026-01-09, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: Managing billing for ChatGPT and the API platform, url: "https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform", publisher: OpenAI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Why is Claude API usage billed separately from my paid Claude plan, url: "https://support.claude.com/en/articles/9876003-why-is-claude-api-usage-billed-separately-from-my-paid-claude-plan", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: Portkey AI Gateway, url: "https://github.com/Portkey-AI/gateway", publisher: Portkey, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Higress, url: "https://github.com/higress-group/higress", publisher: Higress, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Pydantic AI, url: "https://github.com/pydantic/pydantic-ai", publisher: Pydantic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: Vercel AI SDK, url: "https://github.com/vercel/ai", publisher: Vercel, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - 原报告称「2026-09 Envoy AI Gateway 更名为 Agent Router、仓库迁移」，未核实；选型里暂用原名
+  - 原报告称 OpenTelemetry 生成式 AI 语义约定已于 2026-05 迁入独立仓库，未核实；LLM-036 只要求固定所用版本
+  - Arize Phoenix 服务端许可证（原报告称 Elastic License 2.0，限制作为托管服务提供），未核实
+  - Ragas 的仓库地址和维护活跃度（原报告给出的仓库地址可疑），未核实
+  - LiteLLM enterprise/ 目录许可的完整条款和企业版功能清单以官方为准；本次只核实到 LICENSE 的划分和部分功能
+  - promptfoo 被 OpenAI 收购的交割日期，以及收购后开源许可和治理是否变化，需在下次复核时再查
+  - OWASP 大模型应用 Top 10 当前为 2025 版，未找到 2026 版；发布前到 genai.owasp.org 再确认（与 25 统一）
+  - MCP 和工具调用的安全建议（MCP 官方安全最佳实践、工具描述投毒）未逐条核实，规则只写了通用做法；协议细节以 16 为准
+  - Vercel AI SDK、Pydantic AI、LangChain、LlamaIndex、SGLang、Ollama、llama.cpp 的许可证沿用原报告，未逐一从官方 LICENSE 复核
+  - 待补调研：各档任务的代表模型（含国内模型）与选型方法，标注日期
+  - 待补调研：本地推理的硬件档位建议（显存、并发与模型规模的对应）
+  - 待补调研：护栏与内容审核工具（输入输出过滤）选型
+  - 待补调研：embedding 模型和重排模型的选型与评测方法
+  - 待补调研：国内模型网关与国产推理芯片的适配实践
