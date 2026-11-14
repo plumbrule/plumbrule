@@ -1,0 +1,569 @@
+id: "18"
+slug: middleware
+title: 中间件选型
+summary: 缓存、消息队列与事件流、基于数据库的任务队列、定时调度与持久工作流、分布式锁、限流、搜索引擎、对象存储怎么选、怎么用才不出错，以及消费端的重复、乱序、恢复测试。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 是否需要引入中间件、引入前要写清什么
+    - 缓存（Valkey、Redis 等）的用法与许可证
+    - 消息队列与事件流（RabbitMQ、NATS JetStream、Kafka 等）的选型和可靠性要求
+    - 基于 PostgreSQL 的任务队列库（按语言）
+    - 定时调度与持久工作流（Temporal 等）
+    - 分布式锁、限流
+    - 搜索引擎（PostgreSQL 全文检索、Meilisearch、OpenSearch、Elasticsearch 等）
+    - 自建对象存储
+    - 消费端的重复、乱序、崩溃恢复测试
+  excludes:
+    - { what: 事务与隔离级别、SKIP LOCKED、advisory lock、outbox 表和 inbox 表的设计, see: "17" }
+    - { what: 幂等语义、Idempotency-Key 的状态码、事件信封（CloudEvents）和事件目录, see: "16" }
+    - { what: 开源许可证的口径（独立工具与随产品分发的组件的区别）、许可扫描工具, see: "27" }
+    - { what: 镜像固定、SBOM、漏洞扫描, see: "25" }
+    - { what: 部署、升级演练、监控告警、容量与 SLO, see: "26" }
+    - { what: 各语言的客户端库写法, see: "10-15" }
+    - { what: 登录会话与授权模型, see: "19" }
+overview: |
+  1. **先问要不要。** 数据库能扛住就不加缓存、不加队列、不加搜索引擎。每加一个中间件，就多一套要备份、升级、监控、排障的系统；引入前写清为什么现有的不够、怎么退出。
+  2. **缓存和搜索索引都不是真相。** 权威数据只在数据库里；缓存可以丢，索引可以重建。缓存键带租户和版本，每类键定好过期时间、失效方式和缓存挂了怎么办。缓存默认用 Valkey（BSD-3-Clause）；Redis 8 起是 AGPLv3 / SSPLv1 / RSALv2 三选一。
+  3. **后台任务先用数据库队列库，不要自己写。** 和业务同库、同事务的后台任务，用现成的 PostgreSQL 任务队列库：Go 用 River，Node 用 pg-boss 或 Graphile Worker，Python 用 Procrastinate，Elixir 用 Oban，Java 用 db-scheduler 或 JobRunr。领取、租约、重试、死信这些库都做好了。
+  4. **先分清要的是什么语义。** 工作队列（一个任务处理一次、确认、重试）默认 RabbitMQ；轻量发布订阅和可持久事件用 NATS JetStream（Core NATS 不持久）；需要长期回放、多个独立消费组、大吞吐分区日志时才上 Kafka。不存在「数据库队列→RabbitMQ→Kafka」的必经升级链。
+  5. **至少一次是常态。** 写库再发消息用 outbox（见 17）；消费者按业务键去重；重试有上限、有退避、有死信。任何中间件的「恰好一次」都不覆盖对外的支付、HTTP 调用。消费端要专门测重复、乱序和崩溃恢复。
+  6. **调度、队列、工作流是三件事。** 定时任务写清时区、错过怎么补、能否重叠；跨天、等人审批、要补偿的长流程才上 Temporal；几个 cron 不值得上 Temporal 或 Airflow。
+  7. **锁和限流要讲语义。** 业务唯一性靠数据库唯一约束；跨系统强互斥要 fencing token（单调递增的令牌，下游拒绝旧令牌）；Redis 锁和 Redlock 不保证外部副作用只发生一次。全局限流要共享的原子计数。
+  8. **搜索先用数据库自带的。** 应用内搜索先用 PostgreSQL 全文检索和 `pg_trgm`；中文必须用真实查询评测，不能凭「支持中文」就上线。独立搜索默认 OpenSearch（Apache-2.0）；Elasticsearch 源码可选 AGPLv3，但官方默认发行包是 Elastic License 2.0。
+  9. **许可证按实际用的发行包核对。** 重点：Redis 8 三选一、Dragonfly 是源码可用许可（生产限 100 vCPU）、Elasticsearch 发行包 ELv2、XXL-JOB 与 Typesense 是 GPL-3.0、MinIO 社区版仓库已归档不再维护。口径见 27。
+rules:
+  # ── 引入与治理 ──
+  - id: MID-001
+    title: 引入新的中间件前写一份决策记录，写清需求、为什么现有数据库或服务不够、考虑过的替代、退出路径和许可证
+    level: soft
+    check: manual
+    how: 评审新增中间件的 PR 时，检查是否附带决策记录（ADR）且五项都有内容
+    applies: [kind:service]
+    why: 中间件一旦上线就很难撤掉；没写清理由的引入，往往只是跟风，最后变成没人敢动的依赖。
+    see: ["05"]
+  - id: MID-002
+    title: 给缓存、队列、搜索、调度新增可靠性要求前，先写清容量、积压上限、可丢多少数据、多久恢复和谁负责运维
+    level: soft
+    check: manual
+    how: 决策记录或运维手册里有这几项；评审时核对
+    applies: [kind:service]
+    why: 口头承诺的可靠性没人兑现；中间件出事时才发现没人值班、没人会恢复。
+    see: ["26"]
+  - id: MID-003
+    title: 每个中间件记录实际使用的版本、镜像摘要和发行包许可证；生产环境不用 latest 这类浮动标签
+    level: hard
+    check: auto
+    how: CI 扫描部署清单，发现浮动标签或缺少镜像摘要时失败；用 SBOM 工具生成组件清单
+    applies: [kind:service]
+    why: 浮动标签会在不知情时换掉版本甚至换掉许可证；断网环境里还会直接拉不到镜像。
+    see: ["25", "26"]
+  - id: MID-004
+    title: 许可证按实际下载和分发的发行包与版本核对，不只看源码仓库的 LICENSE；每次升级重新核对
+    level: hard
+    check: semi
+    how: 升级时对照官方许可证页面和发行包内的许可文件，记录核对结果；许可扫描工具找候选
+    applies: [kind:service, kind:onprem]
+    why: 同一个项目的源码和二进制、社区版和企业版、新旧版本可能是不同许可证（如 Elasticsearch、Redis、Dragonfly）。
+    detail: |
+      - 本主题的选型表只标许可证；能不能用、随产品分发时要做什么，按 27 的口径判断。
+      - 同时确认是否有联网激活、使用量上报或用量上限（如 Dragonfly 的生产 vCPU 上限）。
+    sources: [S01, S03, S05]
+    see: ["27"]
+  - id: MID-005
+    title: 断网交付的项目，交付前实测中间件在断网下的冷启动、重启、故障恢复和升级，所需镜像、依赖、分词词典都预先备好
+    level: hard
+    check: semi
+    how: 在断网的验收环境里跑一遍启动、重启、恢复和升级，保留记录
+    applies: [kind:onprem]
+    why: 「能私有化部署」不等于能在断网下跑起来；漏一个依赖或一次联网检查，现场就起不来。
+    see: ["26"]
+  - id: MID-006
+    title: 新增专用中间件时，写清它挂了业务怎么降级；不能降级的，写明事故处理办法
+    level: soft
+    check: manual
+    how: 运维手册里有降级或事故处理一节；故障演练时验证
+    applies: [kind:service]
+    why: 每多一个依赖就多一个单点，没想过降级的话，缓存挂了整个系统一起挂。
+    see: ["26"]
+  # ── 缓存 ──
+  - id: MID-007
+    title: 缓存不得作为订单、资金、审批、权限、审计记录的唯一存储；缓存全部丢失后系统必须能从权威数据恢复
+    level: hard
+    check: semi
+    how: 测试环境清空缓存后跑核心流程的集成测试，结果必须正确
+    applies: [kind:service]
+    why: 缓存会过期、会被逐出、会丢数据，放在里面的「真相」迟早会丢。
+  - id: MID-008
+    title: 每类缓存键写清负责人、过期时间、键的版本、租户范围、失效方式和缓存不可用时的行为；不设「永不过期」的默认值
+    level: soft
+    check: semi
+    how: 缓存键定义集中在一处（代码常量或配置文件），评审时逐类核对；静态检查找没有过期时间的写入
+    applies: [kind:service]
+    why: 没人负责、没有过期时间的键会无限增长，结构变化后旧数据还会被当成新数据读出来。
+    detail: |
+      - 键名示例：`<应用>:<环境>:<租户>:<领域>:<对象>:<编号>:v<版本>`。
+      - 用户输入进键名前要转义，避免冒号和控制字符搅乱键空间；不把高基数字段放进键名。
+      - 涉及个人信息时，键里用内部编号，不用手机号、邮箱。
+  - id: MID-009
+    title: 多租户系统的缓存键必须包含租户标识，并有跨租户读取的负例测试
+    level: hard
+    check: auto
+    how: 集成测试：租户 A 写入后，用租户 B 的身份读同一业务键，必须读不到
+    applies: [kind:service]
+    why: 漏了租户的缓存键会把一个客户的数据直接返回给另一个客户。
+    see: ["19"]
+  - id: MID-010
+    title: 更新权威数据后必须有明确的缓存一致性策略（更新后删缓存、带版本写入或绕过缓存），并测试写后读和并发竞态
+    level: hard
+    check: semi
+    how: 集成测试覆盖「写后立即读」和「并发写与回填缓存交错」两种场景
+    applies: [kind:service]
+    why: 「写库后删缓存」在并发下仍可能被迟到的回填覆盖成旧值，不测就发现不了。
+    detail: |
+      - 常规热点数据用旁路缓存（cache-aside）：读时没命中再查库回填，写库后删除缓存。
+      - 用版本号或时间戳挡住迟到的旧值回填。
+      - 写后读一致性要求高的地方（如付款后查订单状态）直接读库。
+  - id: MID-011
+    title: 热点缓存处理穿透、击穿和雪崩：负缓存加短过期时间、同键重建合并、过期时间加随机抖动
+    level: soft
+    check: semi
+    how: 压测时模拟大量不存在的键、热点键过期、批量同时过期，观察数据库负载
+    applies: [kind:service]
+    why: 缓存一失效，流量全打到数据库上，往往比没有缓存还糟。
+    detail: |
+      - 穿透（查不存在的数据）：先校验参数，再用短时负缓存；布隆过滤器只用于高频且数据集稳定的场景。
+      - 击穿（热点键过期）：同一个键只让一个请求去重建（singleflight），能容忍旧值时先返回旧值再后台刷新。
+      - 雪崩（大批键同时过期）：过期时间加随机抖动，热点预热，数据库前加限流。
+  - id: MID-012
+    title: 缓存登录态或授权结果时必须能及时撤销；负缓存和敏感数据缓存都要有过期时间
+    level: hard
+    check: semi
+    how: 测试：撤销用户权限或注销后，在约定时间内缓存不再放行
+    applies: [kind:service]
+    why: 权限撤销了缓存还放行，等于没撤销。
+    see: ["19"]
+  # ── 消息与事件 ──
+  - id: MID-013
+    title: 写数据库和发消息要同时成功时，用事务 outbox 或等价机制，不在提交事务后直接发消息
+    level: hard
+    check: semi
+    how: 代码评审找「提交后直接 publish」的写法；故障注入测试在提交后、发送前杀掉进程，事件不能丢
+    applies: [kind:service]
+    why: 提交成功、发送失败，事件就永久丢了；反过来先发后提交，又会发出从未发生的事件。
+    detail: |
+      - outbox 表的设计见 17。转发程序拿到中间件的发送确认后才把记录标为已发送；转发可能重复，由消费者去重。
+      - 也可以用变更数据捕获（CDC，读数据库变更日志）代替轮询 outbox。
+    see: ["17", "16"]
+  - id: MID-014
+    title: 持久化的消息必须带唯一事件编号、事件类型和版本、发生时间、租户和追踪编号；大载荷只传引用
+    level: hard
+    check: auto
+    how: 契约测试用 JSON Schema 校验消息样例必须包含这些字段
+    applies: [kind:service]
+    why: 没有编号没法去重，没有版本没法演进，没有追踪编号出了问题查不到链路。
+    detail: 对外发布的事件信封（CloudEvents）和事件目录的要求见 16；这里是内部队列消息的最低要求。
+    see: ["API-026", "API-027"]
+  - id: MID-015
+    title: 消费者必须按业务键幂等：同一条消息处理多次，结果和处理一次相同
+    level: hard
+    check: auto
+    how: 集成测试把同一条消息重复投递、并发投递，检查业务结果不变
+    applies: [kind:service]
+    why: RabbitMQ、NATS JetStream、Kafka 的常规投递都是至少一次，重复不可避免。
+    detail: |
+      - 先完成幂等的业务处理，再确认（ACK）消息；处理和确认不在同一个事务里时，接受「可能重复」，用业务唯一约束兜底。
+      - 消费方的去重记录（inbox 表）设计见 17；幂等语义见 16。
+    sources: [S07, S12]
+    see: ["16", "17"]
+  - id: MID-016
+    title: 不得以中间件的「恰好一次」功能代替业务幂等；对外支付、HTTP 调用、数据库更新的只发生一次由业务唯一性保证
+    level: hard
+    check: manual
+    how: 评审有外部副作用的消费者，确认有业务幂等键或下游的幂等键
+    applies: [kind:service]
+    why: Kafka 的事务、JetStream 的去重窗口只管中间件内部，管不到外部系统。
+    sources: [S07]
+  - id: MID-017
+    title: 消息和任务的重试必须有次数上限、指数退避加随机抖动、死信或隔离队列，以及人工补偿和重放入口
+    level: hard
+    check: semi
+    how: 检查队列配置的最大投递次数和死信设置；故障注入测试一条永远失败的消息，确认它最终进入死信而不是无限循环
+    applies: [kind:service]
+    why: 一条「毒消息」无限重试会堵住整个队列，还会反复触发副作用。
+    detail: 重放死信要有权限控制和记录，避免误操作重复触发副作用。
+    sources: [S07, S13]
+  - id: MID-018
+    title: 需要按顺序处理时，写明排序键和顺序范围（同一个业务对象内有序），并测试重平衡和重试后的顺序；不承诺全局有序
+    level: soft
+    check: semi
+    how: 集成测试在消费者扩缩容、消息重试时检查同一对象的处理顺序
+    applies: [kind:service]
+    why: 分区重平衡和重试都会打乱顺序；全局有序几乎都做不到，也很少真正需要。
+    see: ["API-027"]
+  - id: MID-019
+    title: 消费者上线前必须通过重复投递、乱序投递和处理中崩溃恢复三类测试
+    level: hard
+    check: auto
+    how: CI 用真实中间件容器跑集成测试：同一消息投两次、打乱顺序投递、处理中途杀掉消费者再重启，检查最终业务状态正确且无丢失
+    applies: [kind:service]
+    why: 只测成功路径的消费者，一遇到重投、乱序、进程被杀就会丢任务或重复执行。
+    detail: |
+      - 重复：同一消息投两次以上，业务结果与一次相同。
+      - 乱序：同一对象的旧事件晚到时，不能覆盖新状态（用版本号判断）。
+      - 恢复：处理中 `kill -9` 消费者或断开与中间件的连接，任务最终被处理且只产生一次副作用；租约过期的任务能被别的工作进程接走。
+      - 中间件短暂不可用时，生产者和消费者能自动恢复，不丢已确认的消息。
+    see: ["04"]
+  - id: MID-020
+    title: 不可丢的任务不得用 Core NATS 或其他不持久的发布订阅承载
+    level: hard
+    check: manual
+    how: 评审消息通道配置，确认不可丢任务走的是持久化通道（JetStream、RabbitMQ 持久队列、数据库队列）
+    applies: [kind:service]
+    why: Core NATS 是「发出即忘」，订阅者离线时消息直接丢失。
+    sources: [S07]
+  # ── 数据库任务队列 ──
+  - id: MID-021
+    title: 基于 PostgreSQL 的任务队列用现成的库（按语言见选型），不自己写领取、租约、重试和死信逻辑
+    level: soft
+    check: manual
+    how: 评审时检查是否有自建的任务表加轮询代码；有的话要求说明现成库为何不适用
+    applies: [kind:service]
+    why: 领取、租约过期回收、最大次数、死信、清理归档、优先级公平这些细节很多，自己写很容易漏，现成库都已做好并经过大量使用。
+    detail: |
+      - 这些库都基于 `FOR UPDATE SKIP LOCKED` 在短事务里领取任务；其原理和事务要求见 17。
+      - 好处是任务可以和业务数据在同一个事务里写入，不需要 outbox。
+      - 吞吐、长积压或高频轮询会带来表膨胀和数据库负载，出现这些信号时再评估专用队列。
+    sources: [S10]
+    see: ["17"]
+  - id: MID-022
+    title: 确有理由自己实现数据库任务领取时，必须有租约到期时间、持有者令牌、续约与过期回收、最大尝试次数和死信状态
+    level: hard
+    check: auto
+    how: 集成测试：领取后杀掉工作进程，租约过期后任务被重新领取；超过最大次数后进入死信；用旧令牌提交结果被拒绝
+    applies: [kind:service]
+    why: 没有租约，工作进程一崩任务就永远卡在「处理中」；没有令牌，过期的工作进程还会覆盖新结果。
+    detail: 租约和 fencing token 的数据库实现见 17；这里只列必须具备的能力。
+    see: ["17"]
+  - id: MID-023
+    title: 领取任务和持有数据库锁的事务里不做网络调用、大模型调用或其他耗时操作
+    level: hard
+    check: semi
+    how: 代码评审检查事务块内是否有 HTTP、RPC、大模型调用；监控长事务和锁等待
+    applies: [kind:service]
+    why: 事务里等外部服务，锁就一直不放，别的请求排队，数据库连接也被占住。
+    see: ["17"]
+  # ── 调度与工作流 ──
+  - id: MID-024
+    title: 每个定时任务声明唯一编号、时区、错过触发后的处理方式和是否允许重叠执行，并测试夏令时切换
+    level: hard
+    check: semi
+    how: 调度配置用 schema 校验这四项必填；对使用有夏令时时区的任务写切换日的测试
+    applies: [kind:service]
+    why: 不写时区会在服务器换时区后错时；不写重叠策略，上一次没跑完下一次又开始，会重复处理。
+    detail: |
+      - 多实例部署时，同一个定时任务同一时刻只能有一个实例触发（用调度器自带的集群模式或数据库锁）。
+      - 定时任务本身也要幂等，补跑和重复触发都不能出错。
+  - id: MID-025
+    title: 只有跨天等待、等人审批或外部回调、需要补偿的长流程才引入持久工作流引擎；简单定时和单步异步任务不用
+    level: soft
+    check: manual
+    how: 决策记录里写明流程的等待时长、步骤数和补偿需求
+    applies: [kind:service]
+    why: Temporal 这类引擎本身就是一套要运维的分布式系统，为几个 cron 引入得不偿失。
+  - id: MID-026
+    title: 使用 Temporal 时，Workflow 代码必须确定性；网络、数据库、大模型等外部操作放进 Activity，Activity 自己要幂等
+    level: hard
+    check: auto
+    how: CI 跑 Temporal SDK 的回放测试（用历史事件重放 Workflow），并开启 SDK 的确定性检查
+    applies: [kind:service]
+    why: Temporal 靠重放事件历史恢复流程，Workflow 里有随机数、当前时间或直接 I/O 就会重放失败。
+    detail: 修改在途 Workflow 的逻辑要用 SDK 的版本机制，不能直接改代码让旧实例重放出错。
+    sources: [S09]
+  - id: MID-027
+    title: 不自己写跨重启的「有状态工作流框架」；流程简单就用数据库状态机加任务队列，复杂就用成熟的工作流引擎
+    level: soft
+    check: manual
+    how: 评审时识别自建的流程引擎、定时器和补偿框架
+    applies: [kind:service]
+    why: 状态重放、补偿、升级兼容、定时器竞态都很难做对，维护成本远超预期。
+  # ── 分布式锁 ──
+  - id: MID-028
+    title: 防重复创建、防重复执行这类业务唯一性，靠数据库唯一约束和条件状态更新，不只靠内存锁或 Redis 锁
+    level: hard
+    check: semi
+    how: 检查数据模型里对应字段有唯一约束；并发测试同时提交两次，只成功一次
+    applies: [kind:service]
+    why: 锁会过期、客户端会卡顿，过期后两个实例都以为自己拿到了锁。
+    see: ["17"]
+  - id: MID-029
+    title: 跨系统的强互斥必须使用 fencing token，由下游拒绝旧令牌的写入；不以 Redlock 宣称保证外部一致性
+    level: hard
+    check: semi
+    how: 实验：让锁持有者暂停到租约过期，别的实例拿到新锁后，旧持有者恢复写入必须被拒绝
+    applies: [kind:service]
+    why: 进程停顿、网络延迟都可能让过期的持有者继续写；只有下游检查令牌才能挡住。
+    detail: |
+      - 能放进同一个数据库的互斥，优先用行锁或事务级 advisory lock（见 17）。
+      - 需要独立协调服务时，etcd 的租约和修订号可以当 fencing token 用。
+      - Valkey/Redis 的带过期锁只做「软互斥」（重复了也不出大错的场景），释放时要校验是自己的锁。
+    sources: [S14, S11]
+    see: ["17"]
+  # ── 限流 ──
+  - id: MID-030
+    title: 多副本部署的全局限流必须用共享的配额源（网关或共享存储的原子计数），不得每个副本各自计数后当成全局配额
+    level: hard
+    check: auto
+    how: 压测：多个副本同时承压，统计放行总数不超过配额
+    applies: [kind:service]
+    why: 每个副本各算各的，N 个副本就放行 N 倍流量。
+  - id: MID-031
+    title: 限流的读取、判断、写入必须是原子操作；超限时返回明确的响应和指标，并写清限流存储不可用时放行还是拒绝
+    level: hard
+    check: semi
+    how: 并发测试同一个键的计数准确；评审代码不存在「读取→加一→写回」分开执行；评审配置里的失败策略
+    applies: [kind:service]
+    why: 非原子的计数在并发下会多放行；故障时放行还是拒绝要事先定，涉及成本和安全的一般选拒绝。
+    detail: |
+      - 先定按什么维度限（IP、用户、租户、密钥、接口、业务操作），用什么算法（令牌桶、滑动窗口），突发上限多少。
+      - 区分「请求速率」和「并发数」两种限制。
+      - 超限返回 429 和 `Retry-After`，格式见 16。
+    sources: [S15]
+    see: ["16"]
+  # ── 搜索 ──
+  - id: MID-032
+    title: 搜索索引是派生数据：必须能从权威数据全量重建，有重建手册并演练过
+    level: hard
+    check: semi
+    how: 定期在测试环境清空索引后按手册全量重建，记录耗时和结果
+    applies: [kind:service]
+    why: 索引会损坏、分词器升级会要求重建；不能重建就等于把真相放在了索引里。
+    detail: |
+      - 索引文档带来源编号、租户和来源版本号，用来对账和防旧数据覆盖。
+      - 增量更新走 outbox、CDC 或可靠的批量同步；用别名切换新旧索引，支持回退。
+      - 监控索引延迟和漏数。
+  - id: MID-033
+    title: 搜索查询必须在检索层强制租户和权限过滤，并有「无权文档搜不到」的负例测试
+    level: hard
+    check: auto
+    how: 集成测试用无权用户搜索已知存在的文档，结果里不得出现，包括计数、高亮和联想
+    applies: [kind:service]
+    why: 搜索结果、联想词和计数都可能泄露别人的数据。
+    see: ["19"]
+  - id: MID-034
+    title: 中文搜索选型和分词器升级前，用本业务的真实查询集评测召回和排序，覆盖短词、专有名词、中英数混合、同义词和权限负例
+    level: soft
+    check: semi
+    how: 维护一份带标注答案的查询集，评测时统计前 10 条召回率（Recall@10）、排序质量（NDCG@10）和查询耗时，结果附在决策记录里
+    applies: [kind:service]
+    why: 「支持中文」不代表搜得准；PostgreSQL 的 `pg_trgm` 按三字切分，对一两个汉字的短查询效果可能很差。
+    detail: |
+      - 业务编号、精确匹配不要用全文检索，用普通索引或前缀索引。
+      - 中文子串匹配可以用 `pg_bigm`（按两字切分）；要分词时评估 zhparser 等扩展，或专用引擎的中文分析器。
+      - 查询集示例：「发票」（短词）、「售后工单」（业务术语）、「A320B 型号」（中英数混合）、「退款/退货」（同义词）。
+      - 国产或兼容 PostgreSQL 的数据库，扩展能否用要逐个实测（见 17）。
+    ref_value: 查询集规模没有标准；参考值是每类至少几十条、总数一两百条起，阈值由业务负责人确认。
+    sources: [S16, S17]
+    see: ["17"]
+  # ── 升级与迁移 ──
+  - id: MID-035
+    title: 中间件升级和迁移前做快照，写清回滚或前滚办法；迁移时新旧并行、对账通过后再下线旧系统
+    level: soft
+    check: manual
+    how: 升级计划里有快照、回滚步骤和对账口径；在预发环境演练
+    applies: [kind:service]
+    why: 索引格式、持久化格式、工作流状态的升级往往不可逆；直接切换出问题就回不去。
+    detail: |
+      - 影子读或影子消费时不得触发外部副作用。
+      - 缓存通常可以直接丢；搜索可以从权威数据重建；高价值消息要定好重放起点；在途的长流程不能直接丢掉旧平台的状态。
+      - 不要只因「性能更好」就换中间件，先用业务数据压测对比。
+    see: ["26"]
+  # ── 对象存储 ──
+  - id: MID-036
+    title: 业务代码按 S3 兼容接口访问对象存储，不依赖某个实现的私有接口；自建对象存储选仍在维护的项目
+    level: soft
+    check: semi
+    how: 依赖检查找特定实现的专有 SDK 和管理接口调用；选型评审确认项目仍在发布安全修复
+    applies: [kind:service, kind:onprem]
+    why: MinIO 社区版仓库已归档、不再修复漏洞，绑死在一个实现上就很难迁走。
+    sources: [S04]
+choices:
+  - category: 缓存
+    pick: Valkey；没有明确收益时不加缓存，直接查库
+    alternatives:
+      - { name: Redis Open Source, when: 需要 Redis 8 及以后的特有功能，且按交付方式选定了三种许可证之一 }
+      - { name: 进程内缓存, when: 单实例、数据量小、可以容忍各副本短暂不一致 }
+    avoid:
+      - { name: Dragonfly, why: 源码可用许可（DSAL），生产合计超过 100 vCPU 要买商业许可，不能作为独立数据库产品再分发；只有实测收益明确且许可审过时才考虑 }
+      - { name: 把缓存当权威库, why: 会丢数据 }
+    license: Valkey 为 BSD-3-Clause；Redis 8 起为 AGPLv3 / SSPLv1 / RSALv2 三选一，7.2 及以前为 BSD-3-Clause，7.4 到 8 之前为 RSALv2 / SSPLv1；Dragonfly 为 DSAL
+    notes: Valkey 是 Linux Foundation 旗下的社区项目，与 Redis 协议兼容，但具体命令和模块的兼容性仍要测。
+    sources: [S01, S02, S03]
+  - category: 基于 PostgreSQL 的任务队列（按语言）
+    pick: Go 用 River；Node 用 pg-boss 或 Graphile Worker；Python 用 Procrastinate；Elixir 用 Oban；Java 用 db-scheduler 或 JobRunr
+    when: 任务和业务数据在同一个 PostgreSQL 里，吞吐没到数据库扛不住的程度
+    alternatives:
+      - { name: Celery / RQ（Python）、BullMQ（Node）、Asynq（Go）等基于 Redis 的成熟队列库, when: 已有 Valkey/Redis 且不需要和业务同事务写入任务；各语言细节见 10–15 }
+      - { name: RabbitMQ 或 NATS JetStream, when: 跨服务、跨团队消费，或数据库负载已和队列明显相关 }
+    avoid:
+      - { name: 自己写任务表加轮询, why: 领取、租约、重试、死信、清理都要自己补，容易漏 }
+      - { name: 用 Redis List 手写队列, why: 确认、重试、租约、观测都要自己补；成熟的 Redis 队列库不在此列 }
+      - { name: 一开始就上 Kafka 或 Pulsar, why: 为没有的需求付出运维成本 }
+    license: River 为 MPL-2.0；pg-boss、Graphile Worker、Procrastinate 为 MIT；Oban、db-scheduler 为 Apache-2.0；JobRunr 见待确认
+    sources: [S10, S24, S25, S26, S27, S28, S29]
+  - category: 工作队列（一个任务处理一次、确认、重试、路由）
+    pick: RabbitMQ（用仲裁队列）
+    alternatives:
+      - { name: NATS JetStream, when: 团队已熟悉 NATS，或同时需要轻量发布订阅和请求响应 }
+      - { name: 数据库任务队列库, when: 任务和业务同库同事务 }
+    avoid:
+      - { name: Core NATS, why: 不持久，订阅者离线就丢 }
+      - { name: 把 RabbitMQ 普通队列当长期回放日志, why: 消费后即删除，不适合回放；需要回放用流 }
+    license: RabbitMQ 为 MPL-2.0（以官方仓库为准，见待确认）；NATS 为 Apache-2.0
+    sources: [S12, S13, S07, S06]
+  - category: 事件流（可回放、多消费组、大吞吐）
+    pick: outbox 加 NATS JetStream 起步；确有长期回放、多个独立消费组、分区大吞吐需求时用 Apache Kafka
+    alternatives:
+      - { name: Apache Pulsar, when: 多租户、分层存储、跨地域复制是硬需求 }
+      - { name: Apache RocketMQ, when: 团队熟悉且需要它的事务消息、延时消息等业务消息类型 }
+      - { name: Redpanda, when: 要兼容 Kafka 接口又想运维更轻；先审许可证 }
+    avoid:
+      - { name: 只因「高并发」就上 Kafka, why: 先分清是工作队列还是可回放日志 }
+      - { name: 把中间件的恰好一次当成外部副作用只一次, why: 不覆盖外部系统 }
+    license: Kafka、Pulsar、RocketMQ、NATS 为 Apache-2.0；Redpanda 社区版为 BSL，企业功能另需许可
+    notes: NATS 在 2025 年曾有维护公司想把它移出 CNCF 并改许可证，最终 NATS 留在 CNCF、保持 Apache-2.0。
+    sources: [S06, S07, S21]
+  - category: 定时调度
+    pick: 平台自带的定时触发（Kubernetes CronJob、systemd timer）或任务队列库自带的定时功能
+    alternatives:
+      - { name: Quartz（集群模式用 JDBC 存储）, when: Java 服务需要应用内的集群调度 }
+      - { name: PowerJob 或 XXL-JOB, when: Java 团队需要带管理界面的分布式调度；XXL-JOB 是 GPL-3.0，随产品分发前按 27 审 }
+      - { name: Apache Airflow, when: 数据管道、批处理 DAG }
+    avoid:
+      - { name: 用 Airflow 做订单超时这类在线业务, why: 它是数据编排工具，不是在线业务引擎 }
+      - { name: 多实例各自跑同一个 cron, why: 重复执行 }
+    license: Quartz、PowerJob、Airflow 为 Apache-2.0；XXL-JOB 为 GPL-3.0
+    sources: [S22, S30, S31]
+  - category: 持久工作流
+    pick: Temporal（确有长流程时）
+    alternatives:
+      - { name: DBOS, when: 已用 PostgreSQL、想以库的形式在应用内获得持久执行，不另部署服务 }
+      - { name: Hatchet, when: 以后台任务为主、兼带简单工作流；服务端成熟度先自行验证 }
+      - { name: Flowable, when: 需要 BPMN 流程建模、业务人员参与流程设计（Java） }
+    avoid:
+      - { name: 为几个定时任务部署 Temporal, why: 运维成本远超收益 }
+      - { name: 自写跨重启工作流框架, why: 重放、补偿、升级兼容难做对 }
+      - { name: Inngest 自托管作为默认, why: 服务端是 SSPL 加延迟转 Apache-2.0，许可和私有化边界要单独审 }
+    license: Temporal、DBOS、Hatchet 为 MIT；Flowable 为 Apache-2.0
+    sources: [S08, S09, S32]
+  - category: 分布式锁与协调
+    pick: 数据库唯一约束加条件状态更新；同库互斥用行锁或事务级 advisory lock
+    alternatives:
+      - { name: etcd 租约加修订号做 fencing, when: 跨系统强互斥、需要独立的协调服务 }
+      - { name: Valkey 带过期时间和持有者校验的锁, when: 重复执行也不出大错的软互斥 }
+    avoid:
+      - { name: 没有续约、释放时不校验持有者的 SETNX 锁, why: 过期后会误删别人的锁 }
+      - { name: 用 Redlock 宣称保证外部一致, why: 进程停顿和时钟问题下不成立 }
+    sources: [S11, S14]
+  - category: 限流
+    pick: 网关或服务网格自带的限流；需要在应用里做全局配额时，用 Valkey 原子脚本实现令牌桶
+    alternatives:
+      - { name: 进程内令牌桶, when: 单实例，或只做本副本的保护 }
+      - { name: 数据库计数, when: 请求量很低 }
+    avoid:
+      - { name: 多副本各自内存计数当全局配额, why: 放行 N 倍流量 }
+      - { name: 读取、加一、写回分开执行, why: 并发下计数不准 }
+    sources: [S15]
+  - category: 应用内搜索
+    pick: PostgreSQL 全文检索加 pg_trgm；中文短词用 pg_bigm
+    alternatives:
+      - { name: zhparser 等中文分词扩展, when: 需要中文分词且能在目标数据库上编译部署；许可证逐项审 }
+      - { name: ParadeDB pg_search, when: 想在 PostgreSQL 里获得 BM25 排序；社区版为 AGPL-3.0 }
+    avoid:
+      - { name: 未用中文查询评测就宣称 PostgreSQL 全文检索够用, why: 短词和专有名词召回可能很差 }
+    license: pg_trgm 随 PostgreSQL（PostgreSQL License）；pg_bigm 见待确认；ParadeDB 社区版为 AGPL-3.0
+    sources: [S16, S17, S23]
+  - category: 独立搜索引擎
+    pick: OpenSearch
+    alternatives:
+      - { name: Meilisearch 社区版, when: 中小规模、面向用户的即时搜索和容错；集群高可用等功能在企业版，先核对边界 }
+      - { name: Typesense, when: 轻量即时搜索；GPL-3.0，随产品分发前按 27 审 }
+      - { name: Elasticsearch, when: 团队已有经验或要用其商业功能；先按发行包核对许可证 }
+    avoid:
+      - { name: 小系统只为模糊搜索就上整套搜索集群, why: 先用数据库自带的 }
+      - { name: 把索引当唯一真相, why: 索引要能重建 }
+    license: OpenSearch 为 Apache-2.0；Elasticsearch 源码可选 AGPLv3 / SSPL 1.0 / ELv2，官方默认发行包为 ELv2；Typesense 为 GPL-3.0；Meilisearch 社区版 MIT、企业版另有许可（见待确认）
+    notes: 中文分析可用 OpenSearch 的 CJK 或 ICU 分析器，或 Elasticsearch 官方的 smartcn 插件；国内常用的 IK 分词插件需另行评估。
+    sources: [S05, S18, S19, S20]
+  - category: 自建对象存储
+    pick: 能用云厂商或私有云提供的 S3 兼容对象存储就用托管的；必须自建时选 Ceph RGW 或 SeaweedFS
+    alternatives:
+      - { name: Garage, when: 小规模、多地域部署；AGPL-3.0 }
+      - { name: 继续使用 MinIO 商业版, when: 已购买商业授权 }
+    avoid:
+      - { name: 新项目选用 MinIO 社区版, why: 2025 年起只发源码、2025 年底进入维护模式，仓库已归档，不再修复安全漏洞 }
+    license: SeaweedFS 为 Apache-2.0；Garage 为 AGPL-3.0；Ceph 见待确认；MinIO 社区版为 AGPL-3.0（已归档）
+    sources: [S04, S33, S34]
+antipatterns:
+  - { bad: 用 Redis SETNX 锁防止订单重复, instead: 数据库唯一约束或条件更新；跨系统强互斥用 fencing token }
+  - { bad: 事务提交后直接发消息, instead: 事务 outbox 或 CDC }
+  - { bad: 「Kafka 是恰好一次，所以支付只扣一次」, instead: 业务幂等记录加下游的幂等键 }
+  - { bad: 用 Core NATS 承载不可丢的任务, instead: JetStream、RabbitMQ 持久队列或数据库任务队列库 }
+  - { bad: 自己写任务表和轮询代码, instead: 用对应语言的 PostgreSQL 任务队列库 }
+  - { bad: 每次查数据库前都先查一遍缓存, instead: 按实际延迟和数据库瓶颈决定要不要缓存 }
+  - { bad: 所有键都设同一个固定过期时间, instead: 过期时间加随机抖动，热点键单飞重建 }
+  - { bad: 把 PostgreSQL 全文检索说成中文分词很好, instead: 用真实中文查询评测，必要时用 pg_bigm、分词扩展或专用引擎 }
+  - { bad: 为几个定时任务部署 Temporal 或 Airflow, instead: cron 或任务队列库的定时功能 }
+  - { bad: 客户内网直接拉 latest 镜像, instead: 固定镜像摘要，离线物料预先备好 }
+  - { bad: 只看源码仓库的 LICENSE 就下结论, instead: 按实际使用的发行包、版本和部署方式核对 }
+  - { bad: 消费者只测了成功路径, instead: 测重复、乱序、崩溃恢复和中间件断连 }
+sources:
+  - { id: S01, title: Redis Licenses, url: "https://redis.io/legal/licenses/", publisher: Redis, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Valkey（GitHub 仓库）", url: "https://github.com/valkey-io/valkey", publisher: Valkey（LF Projects）, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Dragonfly Source-Available License (DSAL)", url: "https://github.com/dragonflydb/dragonfly/blob/main/LICENSE.md", publisher: DragonflyDB, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "MinIO（GitHub 仓库，已归档）", url: "https://github.com/minio/minio", publisher: MinIO, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: Elastic Licensing FAQ, url: "https://www.elastic.co/pricing/faq/licensing", publisher: Elastic, date: 2024-08-29, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: Protecting NATS and the integrity of open source, url: "https://www.cncf.io/blog/2025/04/24/protecting-nats-and-the-integrity-of-open-source/", publisher: CNCF, date: 2025-04-24, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "NATS: JetStream", url: "https://docs.nats.io/nats-concepts/jetstream", publisher: NATS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Temporal（GitHub 仓库）", url: "https://github.com/temporalio/temporal", publisher: Temporal, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "Temporal: Workflows", url: "https://docs.temporal.io/workflows", publisher: Temporal, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "PostgreSQL: SELECT（The Locking Clause / SKIP LOCKED）", url: "https://www.postgresql.org/docs/current/sql-select.html", publisher: PostgreSQL, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "PostgreSQL: Explicit Locking", url: "https://www.postgresql.org/docs/current/explicit-locking.html", publisher: PostgreSQL, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "RabbitMQ: Consumer Acknowledgements and Publisher Confirms", url: "https://www.rabbitmq.com/docs/confirms", publisher: RabbitMQ, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "RabbitMQ: Quorum Queues", url: "https://www.rabbitmq.com/docs/quorum-queues", publisher: RabbitMQ, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "Redis: Distributed Locks", url: "https://redis.io/docs/latest/develop/use/patterns/distributed-locks/", publisher: Redis, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "Redis: Rate limiter", url: "https://redis.io/docs/latest/develop/use-cases/rate-limiter/", publisher: Redis, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "PostgreSQL: pg_trgm", url: "https://www.postgresql.org/docs/current/pgtrgm.html", publisher: PostgreSQL, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "pg_bigm（GitHub 仓库）", url: "https://github.com/pgbigm/pg_bigm", publisher: pg_bigm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "OpenSearch: CJK analyzer", url: "https://docs.opensearch.org/latest/analyzers/language-analyzers/cjk/", publisher: OpenSearch, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: Meilisearch Open Source（CE 与 EE）, url: "https://www.meilisearch.com/open-source", publisher: Meilisearch, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Typesense（GitHub 仓库）", url: "https://github.com/typesense/typesense", publisher: Typesense, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "Redpanda: Licensing overview", url: "https://docs.redpanda.com/streaming/current/get-started/licensing/overview/", publisher: Redpanda, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "XXL-JOB（GitHub 仓库）", url: "https://github.com/xuxueli/xxl-job", publisher: XXL-JOB, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "ParadeDB（GitHub 仓库）", url: "https://github.com/paradedb/paradedb", publisher: ParadeDB, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: "River（Go 的 PostgreSQL 任务队列）", url: "https://github.com/riverqueue/river", publisher: River, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S25, title: "pg-boss（Node 的 PostgreSQL 任务队列）", url: "https://github.com/timgit/pg-boss", publisher: pg-boss, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: "Graphile Worker（Node 的 PostgreSQL 任务队列）", url: "https://github.com/graphile/worker", publisher: Graphile, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: "Procrastinate（Python 的 PostgreSQL 任务队列）", url: "https://github.com/procrastinate-org/procrastinate", publisher: Procrastinate, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "Oban（Elixir 的 PostgreSQL 任务队列）", url: "https://github.com/oban-bg/oban", publisher: Oban, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: "db-scheduler（Java 的数据库任务调度）", url: "https://github.com/kagkarlsson/db-scheduler", publisher: db-scheduler, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: "Quartz Scheduler（GitHub 仓库）", url: "https://github.com/quartz-scheduler/quartz", publisher: Quartz, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S31, title: "PowerJob（GitHub 仓库）", url: "https://github.com/PowerJob/PowerJob", publisher: PowerJob, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: "DBOS Transact（GitHub 仓库）", url: "https://github.com/dbos-inc/dbos-transact-py", publisher: DBOS, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: "SeaweedFS（GitHub 仓库）", url: "https://github.com/seaweedfs/seaweedfs", publisher: SeaweedFS, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: "Garage（Git 仓库镜像）", url: "https://github.com/deuxfleurs-org/garage", publisher: Deuxfleurs, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - MinIO 社区版仓库归档的确切日期：多方说法为 2025-12 进入维护模式、2026-02 首次归档、2026-04 再次归档；GitHub 当前显示已归档，具体日期以 MinIO 官方说明为准。客户端 mc 是否也已归档未核实。
+  - Dragonfly：DSAL 原文已核实（生产合计 100 vCPU 上限、不得作为独立产品再分发），但「2.1 版起改用 DSAL」的版本分界和旧版 BSL 的适用范围未核实；是否有用量上报也未核实。
+  - Redpanda 的 GitHub 主仓库显示为已归档，可能是迁移了仓库或改变了开源策略，社区版的现状和许可证待核实。
+  - 以下许可证沿用原调研或只看了 GitHub 识别结果，未逐一读官方 LICENSE：RabbitMQ（MPL-2.0）、Meilisearch 社区版与企业版边界、pg_bigm、Ceph（LGPL 组合）、JobRunr（开源版 LGPL-3.0，Pro 版商业）、Inngest（SSPL 加延迟转 Apache-2.0）、Kafka/Pulsar/RocketMQ/Airflow（Apache-2.0）、Hatchet 服务端的社区版与商业版边界。
+  - Camunda 8 自托管生产使用是否需要商业授权，待核实；若需要，Java 的 BPMN 场景默认 Flowable。
+  - 待补调研：Redis Streams、RabbitMQ Streams 作为轻量事件流的适用边界。
+  - 待补调研：Rust 的 PostgreSQL 任务队列库（如 apalis）成熟度；JVM 的 Quartz、PowerJob、DolphinScheduler 对比；Camunda / Flowable 的选型。
+  - 待补调研：限流的网关产品（Envoy 全局限流、NGINX、APISIX 等）和各语言限流库。
+  - 待补调研：etcd、ZooKeeper 作为锁与协调服务的使用要求。
+  - 待补调研：中文搜索的 IK 分词插件、pg_jieba、zhparser 的维护状态、许可证（含 SCWS 词典）和在国产数据库上的兼容性；各引擎中文效果没有实测对比。
+  - 待补调研：自建对象存储（Ceph RGW、SeaweedFS、Garage 等）的成熟度、运维成本和迁移方案。
+  - 待补调研：数据库任务队列何时该换专用队列的量化信号（原调研给的「超过任务时限 20%」「3 个观察窗口」没有出处，未采用）。
