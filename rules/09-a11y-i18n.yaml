@@ -1,0 +1,645 @@
+id: "09"
+slug: a11y-i18n
+title: 交互、无障碍与国际化
+summary: 界面怎么让所有人都能用、看得懂、不出错：对比度、触控尺寸、键盘与焦点、读屏、减少动效、操作反馈与撤销、界面文案与错误提示，以及多语言、本地化格式和双向文字。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+legal_notice: true
+scope:
+  includes:
+    - 无障碍验收基线（WCAG 2.2 AA）与人工检查
+    - 文字与非文字对比度、不只靠颜色、缩放与重排
+    - 触控与指针目标尺寸、拖拽和悬停的替代方式
+    - 键盘可达、焦点可见、对话框焦点、快捷键与输入法防护
+    - 读屏：语义、可访问名称、状态公告
+    - 动效与闪烁、减少动态效果
+    - 操作反馈、撤销与确认、乐观更新、长任务状态、草稿保留
+    - 界面文案与错误提示的写法
+    - 国际化：文案外置、整句翻译、复数、日期数字货币格式、双向文字、伪本地化、翻译流程
+  excludes:
+    - { what: 基础组件库、前端框架、前端 i18n 库的选型, see: "07" }
+    - { what: 颜色、字号、间距、动效时长等视觉令牌的具体数值, see: "08" }
+    - { what: 测试分层、E2E 工具、验收证据与「未测不得记为通过」, see: "04" }
+    - { what: 时间点的存储与传输格式、时区名的保存, see: "02" }
+    - { what: 接口错误格式与稳定错误码、长任务接口, see: "16" }
+    - { what: 错误信息泄露、上传安全等安全规则, see: "25" }
+    - { what: AI 生成内容的评测与可信度, see: "24" }
+    - { what: 无障碍相关法规的适用范围判断, see: "27" }
+    - { what: Android 平台的无障碍接口与测试, see: "29" }
+    - { what: iOS 平台的无障碍接口与测试, see: "30" }
+overview: |
+  1. **基线是 WCAG 2.2 AA。** 指全部 A 级和 AA 级成功准则。WCAG 3 还是工作草案，不能写进合同当验收标准。硬约束一律按 AA；AAA（如 7:1 对比度、44×44 目标）只作项目自愿的更高目标。
+  2. **自动扫描全绿不等于达标。** axe 一类工具平均只能发现约一半问题；声明符合 WCAG 前，要有人用键盘走完关键流程、用读屏软件听一遍。
+  3. **原生控件优先。** 能用 `button`、`a`、`input`、`label`、`dialog` 的不用 `div` 加 ARIA；复杂组件用遵守 WAI-ARIA APG（W3C 的组件交互模式指南）的现成实现。
+  4. **几个关键数字（都出自 WCAG 2.2 AA）：** 正文对比度 4.5:1、大字 3:1、界面组件和图形 3:1；指针目标 24×24 CSS px（有例外）；320 CSS px 宽度下能重排；文字放大到 200% 不丢内容。
+  5. **键盘和焦点：** 所有功能键盘可达，焦点始终看得见、不被遮挡；对话框关闭后焦点回到原处。快捷键统一登记，输入法打字过程中不触发。
+  6. **不只靠颜色、悬停、拖拽和一闪而过的提示传信息。**
+  7. **反馈要真实：** 每个操作都有结果；可逆的给撤销，不可逆的确认时写清后果；没有真实进度就不显示百分比。
+  8. **文案说人话：** 按钮写「动词＋对象」，错误提示说清哪里错、怎么改，不露堆栈和内部信息。
+  9. **国际化第一天就做：** 文案进资源文件、整句翻译、复数交给 ICU 规则、日期数字货币交给 `Intl` 并显式传语言、时区和币种；启用从右到左的语言时用 `dir` 和 CSS 逻辑属性。用伪本地化提前暴露硬编码和截断。
+  10. **国内项目：** GB/T 37668-2026 已于 2026-10-30 发布、2027-02-01 实施，非等效采用 WCAG 2.2，全部代替 2019 版；「WCAG 2.2 AA 通过」不等于国内法规合规，适用范围见 27。移动端平台特定的无障碍接口见 29 / 30。
+rules:
+  # ── 基线与验收 ──
+  - id: A11Y-001
+    title: Web 界面以 WCAG 2.2 AA（全部 A 级和 AA 级准则）为无障碍验收基线；不以 WCAG 3 草案作为验收或合同依据
+    level: hard
+    check: manual
+    how: 评审需求文档、合同和验收清单，确认写明「WCAG 2.2 AA」；出现「WCAG 3 认证」「符合 WCAG 3」字样时退回
+    applies: [platform:web]
+    why: WCAG 2.2 是 W3C 正式推荐标准，也是国内外标准（GB/T 37668-2026、EN 301 549）的参照；WCAG 3 仍是工作草案，内容还会大改。
+    detail: |
+      - AAA 级准则（如 7:1 对比度、44×44 目标）可以作为项目更高目标写进需求，但要标明是项目自定，不是 AA 要求。
+      - 国内项目同时对照 GB/T 37668（2027-02-01 前现行 2019 版）；面向欧盟的产品对照 EN 301 549。是否必须合规、适用哪类服务见 27。
+      - 桌面和移动原生应用没有直接等同的标准，按同样的能力要求（可感知、可操作、可理解）做等效检查，平台细节见 29 / 30 / 31。
+    sources: [S01, S03, S23, S24, S25, S26]
+    see: ["27"]
+  - id: A11Y-002
+    title: 自动扫描通过不能单独作为达标依据；声明符合 WCAG 前，关键流程必须有人工键盘检查和读屏检查记录
+    level: hard
+    check: manual
+    how: 发布评审时检查每个关键流程是否有人工检查记录（测试人、日期、浏览器和读屏软件、结论）；只有自动扫描报告的不得写「符合 WCAG」
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 替代文本是否准确、焦点顺序是否合理、读屏播报是否可懂，只能靠人判断；axe 官方说明自动检测平均只覆盖约 57% 的 WCAG 问题。
+    detail: |
+      - 读屏组合至少覆盖：Windows 上 NVDA ＋ Chrome 或 Firefox，macOS 上 VoiceOver ＋ Safari；合同要求或主要用户在用时加 JAWS；有移动端用户时加 TalkBack 和 iOS VoiceOver（平台细节见 29 / 30）。
+      - 每次记录系统、浏览器、读屏软件版本、页面、测试人、日期和结论。
+      - 国内项目如有国产读屏软件或信创浏览器的用户，单独列入测试范围。
+    sources: [S06, S07, S08]
+    see: ["04", "29", "30"]
+  - id: A11Y-003
+    title: 在 CI 里对关键流程跑自动无障碍扫描，覆盖弹窗打开、表单报错、空结果等交互后的状态，不只扫首屏
+    level: soft
+    check: auto
+    how: E2E 测试在每个关键状态调用 axe 扫描，按 WCAG 2.x A/AA 标签过滤，有违规即失败
+    applies: [platform:web]
+    why: 多数无障碍问题出现在交互之后的界面（弹窗、错误提示、动态加载的内容），只扫静态首屏会漏掉。
+    detail: |
+      - 规则标签以所用 axe 版本的规则目录为准，升级后核对标签是否变化。
+      - 例外规则写在配置里并注明原因和到期日，不在测试里随手关掉。
+    sources: [S07, S08, S20]
+    see: ["04"]
+  - id: A11Y-004
+    title: 能用原生 HTML 元素（button、a、input、select、label、dialog）实现的控件，不用 div 或 span 加 ARIA 模拟
+    level: hard
+    check: auto
+    how: 无障碍 lint（如 jsx-a11y 的 no-static-element-interactions、click-events-have-key-events、interactive-supports-focus）报错即失败
+    applies: [platform:web]
+    why: 原生元素自带键盘操作、焦点和语义；用 div 模拟要自己补齐，几乎总会漏掉一部分。错误的 ARIA 比不加更糟。
+    sources: [S05, S19]
+    see: ["WEB-011"]
+  - id: A11Y-005
+    title: 每个交互元素都有可访问名称、正确的角色和状态；有可见文字标签的，可访问名称要包含这段可见文字
+    level: hard
+    check: semi
+    how: axe 检查缺失名称和角色；评审时核对图标按钮的名称、展开/选中/禁用等状态是否同步，以及 aria-label 是否与可见文字一致
+    applies: [platform:web]
+    why: 读屏用户和语音控制用户靠名称找到控件；名称和可见文字不一致时，语音用户说出看到的字却点不到（WCAG 2.5.3、4.1.2）。
+    sources: [S01, S05]
+  - id: A11Y-006
+    title: 有意义的图片和图标有准确的替代文本；纯装饰的图片用空 alt 或对读屏隐藏
+    level: hard
+    check: semi
+    how: axe 检查缺失 alt；替代文本写得对不对由评审人判断
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 读屏用户看不到图片，没有替代文本就丢了信息；装饰图带上文字又会制造噪音（WCAG 1.1.1）。
+    detail: |
+      - 图表要另给数据表或文字结论，不能只写「图表」。
+      - Markdown 文档里图片的替代文本见 DOC-009。
+    sources: [S01]
+    see: ["DOC-009"]
+  - id: A11Y-007
+    title: 每个页面有描述性的标题、合理的标题层级和地标区域、跳到主内容的链接；链接文字说清去向
+    level: hard
+    check: semi
+    how: axe 检查 document-title、heading-order、landmark、bypass 等规则；评审时检查「点这里」「更多」这类说不清去向的链接
+    applies: [platform:web]
+    why: 读屏和键盘用户靠标题、地标和跳过链接快速定位，否则每页都要从头听起（WCAG 1.3.1、2.4.1、2.4.2、2.4.4）。
+    detail: |
+      - 单页应用切换路由后，同步更新页面标题，并把焦点移到新页面的主标题或用状态公告告知已换页。
+    sources: [S01]
+  - id: A11Y-008
+    title: 不移动焦点的状态变化（保存成功、搜索结果数量、出错）要能被读屏感知；只对真正需要播报的内容用 live region，不逐字重复播报
+    level: hard
+    check: semi
+    how: E2E 断言状态区域带 role="status" 或 role="alert"；人工读屏检查播报次数和内容
+    applies: [platform:web]
+    why: 读屏用户看不到页面角落弹出的提示；但滥用实时播报（如流式输出每个字都播一次）会让页面无法使用（WCAG 4.1.3）。
+    sources: [S01]
+  # ── 键盘与焦点 ──
+  - id: A11Y-009
+    title: 所有功能都能只用键盘完成，没有进得去出不来的键盘陷阱，焦点顺序与阅读顺序一致
+    level: hard
+    check: semi
+    how: E2E 用 Tab / Shift+Tab 走完关键流程并断言焦点顺序；人工拔掉鼠标走一遍
+    applies: [platform:web, platform:desktop]
+    why: 读屏、开关设备、语音控制用户都依赖键盘接口；一个点不到的按钮就能挡住整个流程（WCAG 2.1.1、2.1.2、2.4.3）。
+    sources: [S01, S04]
+  - id: A11Y-010
+    title: 焦点指示始终可见；不去掉浏览器默认焦点样式而不给替代；获得焦点的元素不被吸顶栏、浮层完全遮挡
+    level: hard
+    check: semi
+    how: 样式 lint 查找 把 outline 设为 none 或 0 且没有 `:focus-visible` 替代样式的写法；人工滚动并打开浮层检查遮挡
+    applies: [platform:web]
+    why: 键盘用户看不到焦点在哪就无法操作（WCAG 2.4.7、2.4.11，均为 AA）。
+    detail: |
+      - 焦点指示本身的颜色要满足非文字对比度 3:1（见 A11Y-021）。
+      - WCAG 2.4.13 焦点外观（AAA）给了更具体的面积和对比要求，可作为项目更高目标。
+      - 焦点样式的具体令牌见 08。
+    sources: [S01]
+    see: ["08"]
+  - id: A11Y-011
+    title: 模态对话框打开时焦点进入框内、Tab 在框内循环、Esc 可关闭（适用时），关闭后焦点回到触发它的元素，背后内容不可操作
+    level: hard
+    check: auto
+    how: E2E 测试打开对话框、按 Tab 循环、按 Esc，断言焦点回到触发按钮
+    applies: [platform:web]
+    why: 焦点留在背景里或关闭后丢失，键盘和读屏用户就迷路了。
+    detail: |
+      - 优先用原生 `<dialog>` 的 `showModal()` 或成熟基础组件库的对话框，不自己写焦点陷阱（见 WEB-011）。
+    sources: [S04]
+    see: ["WEB-011"]
+  - id: A11Y-012
+    title: 菜单、组合框、标签页、树、表格等复合组件按 WAI-ARIA APG 的键盘模式实现，并按模式逐键测试
+    level: soft
+    check: semi
+    how: 评审时对照 APG 对应模式的键盘表逐项操作；组件测试覆盖方向键、Home/End、Esc、Enter/Space
+    applies: [platform:web]
+    why: 只加 ARIA 角色不做对应的键盘行为，读屏会告诉用户「这是菜单」却按不动。
+    detail: |
+      - 普通网站导航不要套 `role="menu"`。
+      - 组合框里，输入法打字时的回车不能当成确认选项（见 A11Y-015）。
+    sources: [S04]
+    see: ["WEB-011"]
+  - id: A11Y-013
+    title: 只用单个字母、数字或符号键的快捷键，必须能关闭、能改成带修饰键的组合，或只在对应组件获得焦点时生效
+    level: hard
+    check: semi
+    how: 检查快捷键登记表里每个单字符快捷键是否标明关闭方式、重映射或作用域；E2E 验证关闭后不再触发
+    applies: [platform:web, platform:desktop]
+    why: 语音输入用户说话时会触发单字符快捷键，造成误操作（WCAG 2.1.4）。
+    sources: [S10]
+  - id: A11Y-014
+    title: 快捷键统一登记并分作用域，加入时检查冲突；每个快捷键都有可见的菜单或按钮作为替代入口；不覆盖复制粘贴、后退、刷新等浏览器和系统习惯
+    level: soft
+    check: semi
+    how: 维护一份快捷键登记表（命令、作用域、各平台默认键、替代入口、是否可改），测试检查冲突；评审时检查组件里是否直接给 window 加键盘监听
+    applies: [platform:web, platform:desktop]
+    why: 各页面各自监听容易冲突、无从查找，也会破坏用户熟悉的平台操作。
+    detail: |
+      - macOS 显示 ⌘，其他平台显示 Ctrl；快捷键帮助和命令面板显示的是当前实际键位。
+      - 判断按了哪个字符用 `KeyboardEvent.key`，判断物理位置用 `code`；不要假设所有人都是美式键盘布局。
+    sources: [S12]
+  - id: A11Y-015
+    title: 输入法正在组字（`isComposing` 为真或 `keyCode` 为 229）时，不执行快捷键、不提交表单、不确认选项；输入框内默认不响应全局快捷键
+    level: hard
+    check: auto
+    how: 组件测试派发 compositionstart/compositionend 和组字中的 keydown 事件，断言没有触发提交或命令
+    applies: [platform:web, platform:desktop]
+    why: 中文、日文用户用回车确认候选词，如果被当成提交或选中，就会发出半截内容或选错项。
+    sources: [S12]
+  # ── 指针与触控 ──
+  - id: A11Y-016
+    title: 指针和触控目标至少 24×24 CSS px，或满足 WCAG 2.5.8 的例外（间距足够、页面上有等效的达标控件、行内链接、浏览器默认控件、必须保持原样）
+    level: hard
+    check: semi
+    how: axe 的 target-size 规则找候选；间距和例外由人确认
+    applies: [platform:web]
+    why: 目标太小，手抖、用触屏或视力不好的用户容易点错（WCAG 2.5.8，AA）。
+    detail: |
+      - 间距例外的判定：以每个过小目标的外框中心画直径 24 CSS px 的圆，圆不与其他目标或其他过小目标的圆相交。
+    sources: [S01, S02]
+  - id: A11Y-017
+    title: 主要操作和触屏上的常用操作，目标做到 44×44 CSS px
+    level: soft
+    check: semi
+    how: 评审时抽查主要按钮的实际点击区域；可用可视化工具标出不足的目标
+    applies: [platform:web, platform:mobile]
+    why: 24 px 是 AA 的最低线，不是好用的尺寸；更大的目标明显减少误触。
+    ref_value: 44×44 CSS px 取自 WCAG 2.5.5 目标尺寸（增强，AAA），作为项目更高目标而非 AA 要求。原生平台的推荐尺寸见 29 / 30。
+    sources: [S02]
+    see: ["29", "30"]
+  - id: A11Y-018
+    title: 需要拖拽的操作都有单击即可完成的替代方式；悬停才出现的功能在键盘和触屏上也能触发；悬停或聚焦弹出的内容可关闭、可移入、不自动消失
+    level: hard
+    check: semi
+    how: 评审时列出所有拖拽和悬停交互，逐一确认替代方式；人工用键盘和触屏各走一遍
+    applies: [platform:web]
+    why: 很多用户做不了精确拖动，触屏没有悬停；提示框一移开鼠标就消失，放大镜用户根本看不全（WCAG 2.5.7、1.4.13，均为 AA）。
+    detail: |
+      - 拖拽排序可配「上移 / 下移」按钮或「移动到…」菜单。
+    sources: [S01]
+  # ── 视觉呈现 ──
+  - id: A11Y-019
+    title: 正文文字与背景的对比度至少 4.5:1，大字（至少 18pt，或至少 14pt 粗体）至少 3:1
+    level: hard
+    check: auto
+    how: axe 的 color-contrast 规则；设计令牌在定义时用对比度工具校验每组前景色和背景色
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 低对比度是最常见的无障碍问题之一，弱视和强光下的用户都看不清（WCAG 1.4.3，AA）。
+    detail: |
+      - 18pt 约等于 24 CSS px，14pt 约等于 18.66 CSS px。
+      - 例外：禁用状态的控件、纯装饰文字、标志和品牌名里的文字。
+      - 文字压在图片或渐变上时自动工具算不准，要人工核对最差的位置。
+      - AAA（1.4.6）要求正文 7:1、大字 4.5:1，可作为项目更高目标。
+      - 暗色主题、高对比模式各自重新校验。具体颜色令牌见 08。
+    sources: [S01]
+    see: ["08"]
+  - id: A11Y-020
+    title: 文字放大到 200% 不丢内容和功能；在 320 CSS px 宽度下内容能重排、不需要横竖两个方向滚动；用户调大行距字距后不破版
+    level: hard
+    check: semi
+    how: E2E 在 320 px 宽度和 200% 文字缩放下跑关键流程并截图；人工检查截断和重叠
+    applies: [platform:web]
+    why: 低视力用户靠放大阅读，放大后内容被截断或要来回横向滚动就没法用（WCAG 1.4.4、1.4.10、1.4.12，均为 AA）。
+    detail: |
+      - 320 CSS px 宽度相当于 1280 px 宽的窗口放大到 400%。
+      - 大表格、地图、图表、编辑器这类本身是二维的内容可以例外，但要保证功能仍可用。
+      - 不给文本容器写死高度和单行截断（另见 A11Y-044）。
+    sources: [S01, S09]
+  - id: A11Y-021
+    title: 控件边界、选中和焦点等状态指示、图表里理解内容必需的图形，与相邻颜色的对比度至少 3:1
+    level: hard
+    check: semi
+    how: 设计令牌校验边框和状态色；评审时对照截图检查输入框边框、复选框、图表线条
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 看不清输入框边界和勾选状态，用户就不知道哪里能点、选了什么（WCAG 1.4.11，AA）。
+    sources: [S01]
+    see: ["08"]
+  - id: A11Y-022
+    title: 不只靠颜色传达信息；错误、必填、状态、图表系列同时用文字、图标或图案区分
+    level: hard
+    check: manual
+    how: 评审时把截图转成灰度检查信息是否还能分辨；读屏检查状态是否有文字
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 色盲用户分不清红绿，读屏也读不出颜色（WCAG 1.4.1，A）。只用 emoji 表达状态同样有问题。
+    sources: [S01]
+  # ── 动效 ──
+  - id: A11Y-023
+    title: 自动开始且持续超过 5 秒的移动、闪烁、滚动内容提供暂停、停止或隐藏；任何内容一秒内闪烁不超过三次
+    level: hard
+    check: manual
+    how: 评审时列出轮播、跑马灯、自动播放视频和动画，检查暂停控件；对闪烁内容做人工检查
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 自动移动的内容干扰注意力障碍用户阅读；快速闪烁可能诱发光敏性癫痫（WCAG 2.2.2、2.3.1，均为 A）。
+    sources: [S01]
+  - id: A11Y-024
+    title: 系统开启「减少动态效果」时，关闭或替换非必要的位移、缩放、视差和自动滚动动画
+    level: soft
+    check: semi
+    how: E2E 模拟系统开启减少动态效果（prefers-reduced-motion 设为 reduce）并检查关键动画被关闭；评审动画代码是否读取该设置
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 大幅运动会让前庭障碍用户头晕恶心。WCAG 2.3.3（AAA）要求可以关闭由交互触发的动画；系统设置是用户已经表达过的偏好。
+    detail: |
+      - 可以保留淡入淡出这类不产生位移的过渡。
+      - 动效时长等令牌见 08。
+    sources: [S01]
+    see: ["08"]
+  # ── 表单与认证 ──
+  - id: A11Y-025
+    title: 每个输入有可见标签；格式要求在输入前就显示；出错时在字段旁说明并能从页首汇总跳到字段；提交失败后保留已输入的内容
+    level: hard
+    check: semi
+    how: axe 检查标签关联；E2E 提交错误数据，断言错误与字段关联（aria-describedby）、焦点到汇总、输入未被清空
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 只靠占位符当标签，一输入就看不到要求；错误不就近、输入被清空，用户只能从头再来（WCAG 3.3.1、3.3.2）。
+    detail: |
+      - 不要在用户还在输入时就报错；输入法组字过程中不做校验。
+      - 前端校验只为体验，服务端必须再校验一次。
+      - 同一流程里已经填过的信息不再要求重填（自动带入或可选择），出于安全必须重输的除外（WCAG 3.3.7，A）；多步流程里帮助入口的位置保持一致（WCAG 3.2.6，A）。
+    sources: [S01, S13]
+  - id: A11Y-026
+    title: 涉及法律承诺、付款，或修改、删除用户数据的提交，至少满足一项：可撤销、提交前可检查修改、或需要明确确认
+    level: hard
+    check: manual
+    how: 评审时列出这类操作，逐一确认撤销、复核页或确认步骤存在
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 这类错误后果严重且难以挽回（WCAG 3.3.4，AA）。
+    sources: [S01]
+  - id: A11Y-027
+    title: 登录不要求用户记忆、转抄或解谜；允许粘贴和密码管理器自动填充
+    level: hard
+    check: auto
+    how: E2E 在登录和验证码输入框执行粘贴并断言成功；检查输入框没有禁用 autocomplete 或拦截 paste 事件
+    applies: [platform:web, platform:mobile]
+    why: 禁止粘贴、要求手抄验证码会挡住认知障碍用户，也逼着所有人用弱密码（WCAG 3.3.8，AA）。
+    detail: |
+      - 图形验证码要有不靠认知测试的替代方式（如识别物体或用户自己上传的内容可以，转抄扭曲文字不行）。
+      - 登录和会话的整体设计见 19。
+    sources: [S11]
+    see: ["19"]
+  - id: A11Y-028
+    title: 每次操作都给出看得见、读屏也能感知的结果（处理中、成功、失败及下一步）；不静默失败；重要错误不只用会自动消失的轻提示
+    level: hard
+    check: semi
+    how: E2E 模拟成功和失败，断言出现状态信息；评审时检查错误是否只放在几秒后消失的提示里
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 没有反馈用户会重复点击或以为成功了；自动消失的提示读屏和键盘用户常常错过（WCAG 4.1.3）。
+    detail: |
+      - 打扰程度分级：成功用轻提示，需要关注的放在页面状态区，只有危险操作才用阻断式对话框。
+      - 重要通知要能在之后重新查看（如通知中心、任务列表）。
+      - 各种页面状态（加载、空、错误、无权限）的覆盖要求见 WEB-017、WEB-018。
+    sources: [S01]
+    see: ["WEB-017", "WEB-018"]
+  - id: A11Y-029
+    title: 长任务显示真实状态（排队、运行中、成功、失败、已取消）；没有可度量的总量时用不确定进度，不显示估算出来的百分比
+    level: soft
+    check: semi
+    how: 评审进度条的数据来源；测试断开连接后重新查询状态而不是沿用旧值
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 编造的「99%」会让用户失去信任，也无法判断要不要等。
+    detail: |
+      - 取消要区分「已提交取消请求」和「确实已取消」。
+      - 长任务的接口字段见 16。
+    see: ["16"]
+  - id: A11Y-030
+    title: 可逆的常规操作优先提供撤销，不每次弹确认；不可逆或对外产生影响的操作，确认时写明动作、对象、数量和后果
+    level: soft
+    check: manual
+    how: 评审时检查确认框文案是否包含具体对象和后果、按钮是否是具体动词；检查可撤销操作是否给了撤销入口
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 每次都弹「确定吗」会让用户习惯性点确定，真正危险时反而挡不住。
+    detail: |
+      - 例：「永久删除 3 个文件？删除后无法恢复。」按钮用「永久删除」和「取消」，不用「确定」。
+      - 移到回收站这类有恢复期的操作，直接执行并给「撤销」。
+  - id: A11Y-031
+    title: 乐观更新（先显示成功再等服务端）只用于低风险、可逆的操作，失败时回滚并告知；付款、授权、删除、对外发送等等服务端确认后再显示成功
+    level: soft
+    check: semi
+    how: E2E 模拟接口失败、延迟和冲突，断言界面回滚并提示；评审时检查高风险操作没有乐观更新
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 服务端失败而界面显示成功，等于欺骗用户，还会造成数据对不上。
+  - id: A11Y-032
+    title: 多步表单和长时间编辑自动保存草稿；会丢失未保存内容的离开（关页、返回、切换路由）先提示
+    level: soft
+    check: semi
+    how: E2E 在填写中刷新、返回、断网后恢复，断言内容还在或出现提示
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 填了半天的内容因为误触返回而丢失，是最让用户恼火的问题之一。
+  # ── 文案 ──
+  - id: A11Y-033
+    title: 按钮和菜单用「动词＋对象」；同一含义全产品用同一个词，区分删除、移除、归档、停用；维护一份界面术语表
+    level: soft
+    check: semi
+    how: 术语表放在仓库里，文案检查脚本标出术语表中的禁用同义词；评审时检查泛用的「确定」「提交」
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 「确定」不告诉用户会发生什么；同一操作叫法不一，用户会以为是两件事。
+    detail: |
+      - 例：「保存草稿」「提交审批」「删除 3 个文件」。
+      - 代码命名的一致性见 COD-001；文档写作见 05。
+    see: ["COD-001", "05"]
+  - id: A11Y-034
+    title: 错误提示说明哪里出错、原因（已知时）和怎么恢复，不责备用户；不向用户显示堆栈、SQL、内部路径和密钥，可附请求编号便于反馈
+    level: hard
+    check: semi
+    how: E2E 触发接口错误，扫描页面文字中是否出现堆栈、SQL 片段、文件路径特征；文案由评审人按模板检查
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: 「操作失败」帮不了用户；暴露内部信息会给攻击者线索。
+    detail: |
+      常用模板：
+      - 格式：「“{字段}”格式不对，请按 {示例} 填写。」
+      - 权限：「无法{操作}：当前账号没有{权限}。可联系{角色}开通。」
+      - 暂时失败：「{操作}没有完成，你填的内容已保留，请重试。如果一直出现，请提供请求编号 {编号}。」
+      - 冲突：「这条记录已被其他人修改。请查看最新版本后再提交。」
+      后端返回稳定错误码、前端负责翻译成用户语言（错误格式见 16）；信息泄露的安全要求见 25。
+    sources: [S13]
+    see: ["16", "25"]
+  - id: A11Y-035
+    title: AI 生成的内容在界面上区分「生成中」「草稿待审」「已人工确认」「已执行」；建议不显示成已执行；不显示没有校准依据的置信度百分比和查不到的引用
+    level: soft
+    check: manual
+    how: 评审时检查 AI 输出的状态标签与后台实际状态是否一一对应；抽查引用链接能否打开
+    applies: [kind:llm]
+    why: 用户会把看起来完成的结果当真；编造的置信度和引用会制造虚假的权威感。
+    see: ["24", "06"]
+  - id: A11Y-036
+    title: 中文排版遵循 W3C 中文排版需求（CLReq）的标点和断行规则；不用全局正则在中英文之间强行插空格
+    level: soft
+    check: manual
+    how: 准备一组含代码、网址、数字、单位的中英混排样例，人工审校渲染结果
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 粗暴的正则会破坏网址、代码和数字；中文标点和断行有自己的规则。
+    detail: |
+      - 断行优先用 CSS 原生属性（line-break、word-break、overflow-wrap），在目标浏览器上实测。
+      - CLReq 是 W3C 工作组笔记，是技术参考，不是强制条文。
+    sources: [S18]
+  # ── 国际化 ──
+  - id: A11Y-037
+    title: 需要支持多语言的界面，所有用户可见文字（含 aria-label、title、alt、错误、空状态、邮件和通知模板）都放进资源文件，不硬编码
+    level: hard
+    check: auto
+    how: lint 规则（如 i18n 库配套的「禁止裸字符串」规则）扫描组件和模板，命中即失败；豁免写在配置里并注明原因
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: 漏一处就会出现中英混杂的界面；无障碍名称和邮件模板最容易被漏掉。
+    detail: |
+      - 单语言项目也建议从第一天外置文案，后期再抽取的成本远高于一开始就做。
+      - i18n 库选型见 07；语言包随应用打包、不在运行时请求公网见 WEB-016。
+    see: ["07", "WEB-016"]
+  - id: A11Y-038
+    title: 按完整句子翻译，每条消息有稳定的 ID 和给译者的上下文说明；不把翻译片段和变量拼接成句子
+    level: hard
+    check: semi
+    how: lint 查找翻译函数结果与字符串或变量用 + 或模板字符串拼接的写法；评审新增消息是否带说明
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: 不同语言的词序不同，拼接出来的句子在别的语言里不通；没有上下文，译者分不清「打开」是动词还是状态。
+    detail: |
+      - 错：`t('deleted') + count + t('files')`。对：一条消息 `已删除 {count} 个文件`，变量用占位符。
+    sources: [S14]
+  - id: A11Y-039
+    title: 复数、性别和分支选择用 ICU 消息格式或 i18n 库自带的 CLDR 复数规则，不用 `count === 1` 判断
+    level: hard
+    check: semi
+    how: lint 查找翻译调用附近的 `=== 1`、`> 1` 等单复数判断；资源编译时校验每种语言的复数分支齐全
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: 各语言复数规则差别很大（有的有 6 种形式），只分「1 个」和「多个」在很多语言里是错的。
+    detail: |
+      - ICU 写法：`{count, plural, one {# file} other {# files}}`；中文只需 `other`。
+      - i18next 默认用自己的 JSON 复数后缀（`_one`、`_other`），底层同样用 CLDR 规则，不等于 ICU 语法；同一项目只用一种消息格式。
+    sources: [S14, S15]
+  - id: A11Y-040
+    title: 日期、时间、数字、百分比、货币、列表和排序用 `Intl` 或同等的本地化接口，并显式传入语言、时区和币种
+    level: hard
+    check: semi
+    how: lint 查找不带参数的 `toLocaleString()`、手写的日期格式串和千分位处理；E2E 至少在两种语言和两个时区下运行
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: 日期顺序、小数点、千分位、货币符号位置各地不同，手写规则必然出错；不传参数时结果取决于运行机器的设置。
+    detail: |
+      - 语言（如 `zh-CN`）、时区（如 `Asia/Shanghai`）、币种（如 `CNY`）是三个独立参数：界面是中文不代表金额一定是人民币、时间一定是北京时间。
+      - 语言、地区、时区让用户分别设置、分别修改，不由其中一个推断另一个，也不用来推断用户的其他身份。
+      - 服务端和 Node 运行环境要带完整的国际化数据，部署前在目标环境验证。
+      - 时间点怎么存储和传输见 COD-026、COD-027；前端日期计算见 WEB-020。
+    sources: [S16]
+    see: ["COD-026", "COD-027", "WEB-020"]
+  - id: A11Y-041
+    title: 页面根元素的 lang 与当前界面语言一致，切换语言时同步更新；夹杂的其他语言片段单独标 lang
+    level: hard
+    check: auto
+    how: axe 的 html-has-lang、html-lang-valid 规则；E2E 切换语言后断言 `document.documentElement.lang`
+    applies: [platform:web]
+    why: 读屏按 lang 选择发音，标错了中文会被按英文规则念出来；浏览器断行和字体选择也依赖它（WCAG 3.1.1 A、3.1.2 AA）。
+    sources: [S01]
+  - id: A11Y-042
+    title: 启用从右到左书写的语言（如阿拉伯语、希伯来语）时，用 dir 属性控制方向，样式用 CSS 逻辑属性（margin-inline-start 等）代替 left/right；用户输入和混排内容用 dir="auto" 或 bdi 隔离
+    level: hard
+    check: semi
+    how: 样式 lint 标出物理方向属性（left、right、margin-left 等）；RTL 语言下跑关键流程截图并人工检查
+    applies: [platform:web]
+    why: 写死 left/right 的布局在 RTL 下全部错位；不隔离的用户名、数字会打乱整句的显示顺序。
+    detail: |
+      - 不要整屏镜像：数字、品牌标志、媒体播放进度、代码、时间轴等是否镜像由本地化评审决定。
+      - 不支持 RTL 语言的项目，新代码也建议用逻辑属性，后期改造成本低。
+    sources: [S17]
+  - id: A11Y-043
+    title: CI 检查翻译资源：缺失键、多余键、各语言占位符不一致、复数分支缺失、消息语法错误，任一项失败即阻断
+    level: hard
+    check: auto
+    how: 在 CI 里运行 i18n 库的抽取和编译或校验命令，并对比各语言文件的键和占位符
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: 占位符写错会让页面报错或显示原始键名；缺失翻译到发布后才发现就晚了。
+    detail: |
+      - 运行时缺少某语言的翻译，回退到指定的默认语言并记录日志，不显示 `order.submit.button` 这种键名。
+      - 翻译记录区分「未翻译」「机器初稿」「已审校」；机器初稿经人工审校后才算完成。
+    see: ["04"]
+  - id: A11Y-044
+    title: 用伪本地化（拉长文字、加带重音的字符、首尾加标记）跑关键页面，检查硬编码、截断和拼接；文本容器不写死宽高、不强制单行
+    level: soft
+    check: auto
+    how: 在 CI 里生成伪语言包并跑关键流程截图；评审时检查文字容器的固定高度和单行截断
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: 不用等真实翻译，就能提前发现没进资源文件的文字和翻译后放不下的布局。
+    ref_value: 伪本地化通常把文字拉长 30%–40%，参考德语、俄语等相对英文的常见扩张幅度；从中文源文案翻成英文扩张更大，项目按目标语言调整。
+    see: ["04"]
+choices:
+  - category: Web 无障碍验收基线
+    pick: WCAG 2.2 AA（全部 A 和 AA 准则）＋ WAI-ARIA APG 作为复杂组件的交互参考
+    alternatives:
+      - { name: GB/T 37668-2026, when: 国内项目；2027-02-01 实施前现行 2019 版，非等效采用 WCAG 2.2，差异要逐条对照正文 }
+      - { name: EN 301 549, when: 面向欧盟市场或公共部门；最新版 V4.1.1 已于 2026-09-02 发布，但尚未在欧盟官方公报引用前，推定合规仍以 V3.2.1 为准 }
+    avoid:
+      - { name: WCAG 3 草案, why: 仍是工作草案，内容还会大改，不能作为验收依据 }
+      - { name: 自动扫描分数（如 Lighthouse 无障碍分）, why: 只覆盖部分可自动检测的问题，不代表达标 }
+    sources: [S01, S03, S04, S23, S26]
+  - category: 无障碍静态检查（lint）
+    pick: eslint-plugin-jsx-a11y（React / JSX 项目）
+    alternatives:
+      - { name: 框架对应的无障碍 lint 插件, when: Vue、Angular、Svelte 等非 JSX 项目 }
+    avoid:
+      - { name: 只靠人工评审, why: 缺失标签、可点击 div 这类问题机器能稳定发现 }
+    license: MIT
+    sources: [S19]
+  - category: 页面无障碍自动扫描
+    pick: axe-core
+    alternatives:
+      - { name: 其他实现 W3C ACT 规则的检测器, when: 已有其他质量平台集成时 }
+    avoid:
+      - { name: 把扫描通过当成合规证明, why: 平均只能发现约一半的问题 }
+    license: MPL-2.0。作为测试工具独立运行没有额外义务；若把 axe-core 打进产品分发，修改过的文件要按 MPL 公开（文件级），口径见 27。
+    sources: [S08]
+  - category: E2E 中的无障碍检查
+    pick: Playwright ＋ @axe-core/playwright
+    alternatives:
+      - { name: Cypress ＋ cypress-axe, when: 项目已统一用 Cypress }
+    avoid:
+      - { name: 只扫页面初始加载状态, why: 弹窗、错误提示等交互后的状态才是问题集中处 }
+    license: Playwright 为 Apache-2.0；@axe-core/playwright 为 MPL-2.0
+    notes: E2E 框架的选择见 04；内网和断网环境要预先镜像浏览器二进制。
+    sources: [S07, S20]
+  - category: 人工读屏检查
+    pick: Windows 上 NVDA ＋ Chrome / Firefox；macOS 上 VoiceOver ＋ Safari
+    alternatives:
+      - { name: JAWS, when: 合同要求或主要用户在用 }
+      - { name: Android TalkBack、iOS VoiceOver, when: 有移动端用户；平台细节见 29 / 30 }
+    avoid:
+      - { name: 只在桌面 Chrome 上用鼠标点, why: 发现不了键盘和读屏问题 }
+  - category: 快捷键
+    pick: 快捷键少时用原生 KeyboardEvent ＋ 项目内的快捷键登记表
+    alternatives:
+      - { name: react-hotkeys-hook, when: React 项目、快捷键多、需要作用域 }
+      - { name: hotkeys-js, when: 非 React 项目、快捷键多 }
+    avoid:
+      - { name: 各组件各自给 window 加键盘监听, why: 冲突、无法查找、忽略输入法 }
+    license: react-hotkeys-hook、hotkeys-js 均为 MIT
+    notes: 命令面板等组件的选型见 07。
+  - category: 消息格式（复数、选择）
+    pick: ICU MessageFormat
+    alternatives:
+      - { name: i18next 自带的 JSON 复数后缀, when: 项目已用 i18next 且不需要复杂的嵌套选择 }
+    avoid:
+      - { name: 自己写复数判断, why: 各语言规则复杂，必然出错 }
+      - { name: 同一项目混用两种消息格式, why: 译者和工具都无法统一校验 }
+    notes: i18n 库的选型见 07。
+    sources: [S14, S15]
+  - category: 本地化格式化
+    pick: 平台 Intl（DateTimeFormat、NumberFormat、PluralRules、RelativeTimeFormat、ListFormat、Collator）＋ BCP 47 语言标签 ＋ IANA 时区名
+    avoid:
+      - { name: 手写日期格式、千分位和货币符号, why: 各地规则不同，必然遗漏 }
+      - { name: 不传语言参数的 toLocaleString(), why: 结果取决于运行机器的设置 }
+    sources: [S16]
+  - category: 翻译管理
+    pick: 小规模时用 Git 管理资源文件，通过 PR 审校
+    alternatives:
+      - { name: Weblate, when: 语言多、译者多、需要私有化部署并与 Git 双向同步 }
+      - { name: Tolgee, when: 需要在界面上就地翻译；先审查企业功能许可和免费版席位限制 }
+    avoid:
+      - { name: 项目初期就上大型翻译平台, why: 部署和维护成本大于收益 }
+    license: Weblate 为 GPL-3.0-or-later（作为独立服务运行，不随产品分发）；Tolgee 核心为 Apache-2.0，企业功能为专有许可，免费自托管版有席位限制，以官网为准
+    sources: [S21, S22]
+  - category: 中文排版
+    pick: W3C CLReq ＋ CSS 原生断行属性 ＋ 人工审校
+    avoid:
+      - { name: 全局正则在中英文之间插空格, why: 破坏网址、代码和数字 }
+    sources: [S18]
+antipatterns:
+  - { bad: "`<div onClick>` 当按钮用，再补 `role=\"button\"`", instead: 用原生 `<button>` }
+  - { bad: 到处加 aria-label 就认为做好了无障碍, instead: 原生语义 ＋ APG 模式 ＋ 自动扫描 ＋ 人工读屏 }
+  - { bad: axe 全绿就宣布符合 WCAG AA, instead: 自动扫描 ＋ 人工键盘和读屏检查，记录在案 }
+  - { bad: 把 24 px 当作触屏的最佳尺寸, instead: 24 px 是 AA 最低线，主要操作做到 44 px }
+  - { bad: "`outline: none` 去掉焦点框不给替代", instead: 用 `:focus-visible` 设计清晰的焦点样式 }
+  - { bad: 每个操作都弹「确定吗？」, instead: 可逆操作给撤销，不可逆操作写清后果再确认 }
+  - { bad: 重要错误只用几秒后消失的轻提示, instead: 放在可持续查看的错误区域 }
+  - { bad: 进度条按时间或 token 速度估算百分比, instead: 没有真实总量时用不确定进度 }
+  - { bad: 全局监听 Ctrl+K 和回车，不管输入法, instead: 登记快捷键、分作用域、组字时不触发 }
+  - { bad: 把翻译片段拼接成句子, instead: 整句消息加占位符 }
+  - { bad: "`count === 1 ? '1 file' : 'files'`", instead: ICU 复数规则 }
+  - { bad: 界面是中文就默认人民币和北京时间, instead: 语言、时区、币种分别设置 }
+  - { bad: RTL 语言整屏水平翻转, instead: dir ＋ CSS 逻辑属性 ＋ 例外清单 }
+  - { bad: 正则在中英文之间强插空格, instead: CLReq ＋ 人工审校 }
+sources:
+  - { id: S01, title: "Web Content Accessibility Guidelines (WCAG) 2.2", url: "https://www.w3.org/TR/WCAG22/", publisher: W3C, date: 2024-12-12, kind: standard, checked: 2026-11-13 }
+  - { id: S02, title: "Understanding SC 2.5.8: Target Size (Minimum)", url: "https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum", publisher: W3C, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S03, title: "W3C Accessibility Guidelines (WCAG) 3.0（工作草案）", url: "https://www.w3.org/TR/wcag3/", publisher: W3C, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: "WAI-ARIA APG: Developing a Keyboard Interface", url: "https://www.w3.org/WAI/ARIA/apg/practices/keyboard-interface/", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S05, title: "MDN: ARIA", url: "https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: Selecting Web Accessibility Evaluation Tools, url: "https://www.w3.org/WAI/test-evaluate/tools/selecting/", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S07, title: "Playwright: Accessibility testing", url: "https://playwright.dev/docs/accessibility-testing", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: axe-core, url: "https://github.com/dequelabs/axe-core", publisher: Deque, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "Understanding SC 1.4.10: Reflow", url: "https://www.w3.org/WAI/WCAG22/Understanding/reflow.html", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S10, title: "Understanding SC 2.1.4: Character Key Shortcuts", url: "https://www.w3.org/WAI/WCAG22/Understanding/character-key-shortcuts", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: "Understanding SC 3.3.8: Accessible Authentication (Minimum)", url: "https://www.w3.org/WAI/WCAG22/Understanding/accessible-authentication-minimum.html", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: "MDN: KeyboardEvent", url: "https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "GOV.UK Design System: Error message", url: "https://design-system.service.gov.uk/components/error-message/", publisher: GOV.UK, date: 2024-01, kind: case, checked: 2026-11-13 }
+  - { id: S14, title: "ICU User Guide: Formatting Messages", url: "https://unicode-org.github.io/icu/userguide/format_parse/messages/", publisher: Unicode, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "i18next: Plurals", url: "https://www.i18next.com/translation-function/plurals", publisher: i18next, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "FormatJS: React Intl Components", url: "https://formatjs.github.io/docs/react-intl/components/", publisher: FormatJS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "MDN: CSS logical properties and values", url: "https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Logical_properties_and_values", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Requirements for Chinese Text Layout（中文排版需求）", url: "https://www.w3.org/TR/clreq/", publisher: W3C, date: 2026-11-04, kind: standard, checked: 2026-11-13 }
+  - { id: S19, title: eslint-plugin-jsx-a11y, url: "https://github.com/jsx-eslint/eslint-plugin-jsx-a11y/releases", publisher: jsx-eslint, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: axe-core-npm（含 @axe-core/playwright）, url: "https://github.com/dequelabs/axe-core-npm/releases", publisher: Deque, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Weblate, url: "https://github.com/WeblateOrg/weblate", publisher: Weblate, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "Tolgee: Self-hosted pricing", url: "https://tolgee.io/pricing/self-hosted", publisher: Tolgee, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "GB/T 37668-2026 信息技术 互联网内容无障碍可访问性技术要求与测试方法", url: "https://std.samr.gov.cn/gb/search/gbDetailed?id=%2B5RvluIDeD0%3D&mode=p", publisher: 国家市场监督管理总局 国家标准化管理委员会, date: 2026-10-30, kind: standard, checked: 2026-11-14 }
+  - { id: S24, title: 中华人民共和国无障碍环境建设法, url: "https://gxca.miit.gov.cn/zwgk/zcwj/flfg/art/2024/art_340a68cb6a8e45ae81c121630dd37346.html", publisher: 全国人民代表大会常务委员会, date: 2023-06-28, kind: standard, checked: 2026-11-13 }
+  - { id: S25, title: "Directive (EU) 2019/882（欧洲无障碍法案）", url: "https://eur-lex.europa.eu/eli/dir/2019/882/oj", publisher: European Union, date: 2019-04-17, kind: standard, checked: 2026-11-13 }
+  - { id: S26, title: EN 301 549 V4.1.1 published, url: "https://nda.ie/news/en301549-published", publisher: National Disability Authority（爱尔兰）, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - GB/T 37668-2026 与 WCAG 2.2 的逐条差异未核对正文（标准信息页已核实：2026-10-30 发布、2027-02-01 实施、非等效采用 ISO/IEC 40500:2025、全部代替 2019 版）。
+  - 《无障碍环境建设法》对互联网信息服务的具体条款（报告称第 32 条，涉及政务和财政资金建设的服务）未核实；适用范围判断归 27。
+  - 欧洲无障碍法案自 2025-06-28 起适用（报告说法，本轮未联网复核）；EN 301 549 V4.1.1 何时在欧盟官方公报引用、成为推定合规依据，待确认。
+  - WCAG 3 最新工作草案的确切日期未核实（已确认仍是工作草案，W3C 明确不替代 WCAG 2）。
+  - eslint-plugin-jsx-a11y 的维护活跃度、Playwright、@axe-core/playwright、Weblate、Tolgee、react-hotkeys-hook、hotkeys-js 的许可证本轮未联网复核（axe-core 已核实为 MPL-2.0）；Tolgee 免费自托管席位数属易变商业条款。
+  - GB/T 45395-2025（小程序无障碍）报告列为来源但未展开，是否需要单独规则待补调研。
+  - 待补调研：界面文案的语气指南与中英文写作规范（标点、中英混排的具体规则）。
+  - 待补调研：通知打扰程度的分级定义。
+  - 待补调研：国产读屏软件、信创浏览器和 WebView 的测试范围。
+  - 待补调研：移动端和桌面端的无障碍等效测试矩阵。
+  - 待补调研：翻译管理平台的更全面对比（Pontoon、Crowdin 等）以及 MessageFormat 2 的成熟度。

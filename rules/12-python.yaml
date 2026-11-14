@@ -1,0 +1,568 @@
+id: "12"
+slug: python
+title: Python
+summary: Python 语言层的工程约定：项目与依赖管理、锁文件、版本策略、Ruff、类型检查、pytest、异步、日志、数据库访问与迁移工具、Web 框架、数据校验和打包发布。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 项目元数据（pyproject.toml）、依赖管理、锁文件、包索引
+    - Python 版本策略、自由线程（无 GIL）版本的使用
+    - Ruff（lint 与格式化）、类型检查器、行内例外
+    - pytest、Hypothesis、异步测试
+    - 异步与并发、HTTP 客户端、日志
+    - 数据库访问库与迁移工具（SQLAlchemy、Alembic、Django 迁移）
+    - Web 框架选型、Pydantic 数据校验、配置加载
+    - 打包与发布到 PyPI 或内部仓库、依赖漏洞审计工具
+  excludes:
+    - { what: 格式化与 lint 的通用原则、日志字段、错误传播、超时与重试的通用要求, see: "02" }
+    - { what: 本地 Git 钩子工具的默认选择、CI 门禁顺序、依赖更新节奏, see: "03" }
+    - { what: 测试分层、覆盖率口径、不稳定测试、断网安装验收, see: "04" }
+    - { what: OpenAPI、错误格式（RFC 9457）、接口破坏性变更检查, see: "16" }
+    - { what: 迁移原则、事务与隔离级别、乐观锁、outbox, see: "17" }
+    - { what: 消息队列、缓存、任务调度与工作流引擎的总体选型, see: "18" }
+    - { what: 登录、JWT、OAuth、密码存储与授权, see: "19" }
+    - { what: PDF、Office、图片等不可信文件的解析, see: "20" }
+    - { what: pandas、Polars、DuckDB、notebook 等数据分析栈, see: "22" }
+    - { what: 大模型 SDK、MCP SDK、分词与评测, see: "24" }
+    - { what: 密钥扫描、SCA 总体方案、SBOM、SSRF、上传安全, see: "25" }
+    - { what: 容器镜像、健康检查、优雅停机、可观测性, see: "26" }
+    - { what: LGPL、AGPL 等许可口径与许可扫描工具, see: "27" }
+overview: |
+  1. **应用锁定，库给范围。** 应用用 `pyproject.toml` 加 uv，提交 `uv.lock`，CI 用 `uv lock --check` 和 `uv sync --locked` 校验，不手改锁文件。供别人安装的库只写版本范围，不把锁强加给使用方。已有 Poetry、PDM 项目不必为统一而迁移。
+  2. **只用还在维护期的 Python。** 以 Python 官方的版本状态表为准，生产不用已停止安全维护的版本；新应用固定一个仍在修复期的小版本，库在声明支持的所有版本上跑 CI。自由线程（无 GIL）版本不作默认。
+  3. **Ruff 一个工具管 lint 和格式化。** `ruff check` 与 `ruff format --check` 必须通过；行内例外指明规则。
+  4. **类型检查选一个做门禁。** 默认 mypy，团队已用 Pyright 生态的可以用 Pyright；ty 仍是测试版，只做旁路对比，不当门禁。
+  5. **边界处校验。** 外部 JSON、HTTP 请求、配置、工具返回先用 Pydantic v2 模型校验再用。
+  6. **异步不是默认的性能优化。** `async def` 里不做阻塞调用；不需要并发收益的代码写同步。
+  7. **数据库默认 SQLAlchemy 2 + psycopg 3 + Alembic**（Django 项目用自带 ORM 和迁移）。迁移原则以 17 为准：向前修复为主，生产不用 `create_all` 建表。
+  8. **Web 默认 FastAPI + Pydantic v2 + Uvicorn**；需要后台管理和完整 ORM 的用 Django；Flask 用于小服务和存量。
+  9. **发布走可信发布。** 发布到 PyPI 用 Trusted Publishing，不在 CI 里存长期令牌。
+  10. **工具链有单一供应商依赖。** uv、Ruff、ty 都出自 Astral，OpenAI 已宣布收购 Astral；工具是宽松许可的开源项目，保留了分叉和替换的余地，但要关注后续动向。
+rules:
+  # ── 项目与依赖 ──
+  - id: PY-001
+    title: 项目用 pyproject.toml 声明元数据和依赖；新项目不写有动态安装逻辑的 setup.py
+    level: hard
+    check: auto
+    how: CI 检查仓库根目录有 pyproject.toml 且含 `[project]` 表；新项目出现 setup.py 时要求说明
+    applies: [lang:python]
+    why: pyproject.toml 是 Python 打包的标准元数据位置，各工具都读它；动态执行的 setup.py 难以静态分析，安装时还会执行任意代码。
+    sources: [S05]
+  - id: PY-002
+    title: 应用必须提交锁文件；CI 先校验锁文件与 pyproject.toml 一致，再按锁安装
+    level: hard
+    check: auto
+    how: "CI 运行 `uv lock --check` 和 `uv sync --locked`（Poetry 项目用 `poetry check --lock`，PDM 项目用 `pdm lock --check`）"
+    applies: [lang:python]
+    why: 不锁定的依赖每次安装结果可能不同，线上问题无法复现；CI 里偷偷重新生成锁会掩盖依赖变化。
+    detail: |
+      - 锁文件只用包管理器更新（如 `uv lock --upgrade-package 名称`），不手工编辑。
+      - 升级依赖的 PR 里附上测试结果；依赖更新节奏见 03。
+      - PEP 751 定义了跨工具的锁文件格式 `pylock.toml`，可用于导出交换，暂不要求替代 `uv.lock`。
+    sources: [S02, S04]
+    see: ["03"]
+  - id: PY-003
+    title: 供别人安装的库在依赖里写版本范围，不写精确版本；开发用的锁文件只服务于本仓库的 CI
+    level: soft
+    check: semi
+    how: 评审 `project.dependencies` 中是否出现 `==` 精确版本
+    applies: [lang:python, kind:library]
+    why: 库的精确版本会和使用方的其他依赖冲突，让对方无法安装。
+    sources: [S05]
+  - id: PY-004
+    title: 使用私有包索引时，内部包名只从内部索引解析；不用 pip 的 `--extra-index-url` 把公网和内网索引混在一起
+    level: hard
+    check: semi
+    how: 检查 CI、Dockerfile 和 pip 配置中的 `--extra-index-url`；uv 项目检查 `[[tool.uv.index]]` 的配置和 `explicit` 设置
+    applies: [lang:python]
+    why: pip 会在所有索引里挑最高版本，攻击者在公网注册同名包即可抢先被安装（依赖混淆）。uv 默认在第一个找到包的索引处停止，更安全，但仍要显式配置。
+    sources: [S03]
+    see: ["25"]
+  - id: PY-005
+    title: 新增依赖时写明用途、许可证和维护状态；能用标准库简单完成的不加依赖
+    level: soft
+    check: semi
+    how: 依赖清单变化的 PR 要求说明这三项；许可证用 27 规定的工具扫描
+    applies: [lang:python]
+    why: Python 生态里有不少 LGPL、AGPL 或已停更的包（如 psycopg 为 LGPL，Arq 已进入只维护模式），不登记就会在交付或升级时才暴露问题。
+    sources: [S16, S24]
+    see: ["27"]
+  - id: PY-006
+    title: CI 用 pip-audit 扫描锁定的依赖；断网环境用离线漏洞库快照，扫描失败不当作零漏洞
+    level: soft
+    check: auto
+    how: CI 运行 `pip-audit`（对 uv 项目先 `uv export` 出带哈希的需求文件再扫描），失败即阻断
+    applies: [lang:python]
+    why: 依赖漏洞是 Python 项目最常见的安全问题来源；SCA 的总体方案和处置时限见 25。
+    sources: [S22]
+    see: ["25"]
+  - id: PY-007
+    title: 要断网交付的项目，按目标操作系统、CPU 架构和 Python 版本准备完整的 wheel 包，在断网环境里用 `--no-index` 安装并启动验证
+    level: hard
+    check: auto
+    how: CI 在无外网的容器里用 `pip install --no-index --find-links` 或 `uv sync --offline` 安装后运行冒烟测试
+    applies: [lang:python, kind:onprem]
+    why: 能 pip install 不等于目标架构有对应的二进制 wheel；缓存下载成功也不等于能在断网机器上装起来。
+    see: ["04", "26"]
+  # ── Python 版本 ──
+  - id: PY-008
+    title: 生产环境只用 Python 官方仍在维护（修复期或安全期）的版本；版本到期前完成升级
+    level: hard
+    check: auto
+    how: CI 读取 `.python-version` 或 `requires-python`，与 Python 官方版本状态表比对，已到期的版本报错
+    applies: [lang:python]
+    why: 停止维护的版本不再收到安全修复。官方状态表列出每个版本处于修复期、安全期还是已终止，以及计划的终止日期。
+    sources: [S01]
+  - id: PY-009
+    title: 新应用固定一个仍处于修复期的小版本（写进 `.python-version` 和 `requires-python`）；升级到新的小版本前先在 CI 里跑完整测试
+    level: soft
+    check: auto
+    how: CI 检查 `.python-version` 存在，并定期在下一个小版本上跑一遍测试
+    applies: [lang:python, kind:service, kind:cli]
+    why: 刚发布的小版本可能还有依赖没有发布对应的二进制 wheel；固定一个小版本让开发、CI 和生产一致。
+    detail: |
+      - 修复期的版本还会收到普通缺陷修复，安全期的只收安全修复，所以新项目从修复期的版本里选。
+      - 最新的小版本发布后，等关键依赖（数据库驱动、带原生扩展的库）都有 wheel 再切换。
+    sources: [S01]
+  - id: PY-010
+    title: 库在 `requires-python` 里声明的每个小版本都要在 CI 里测试；没测过的版本不声明支持
+    level: hard
+    check: auto
+    how: CI 矩阵覆盖 `requires-python` 范围内所有仍在维护的小版本
+    applies: [lang:python, kind:library]
+    why: 声明支持却没测过，使用方会在升级时踩到你没发现的问题。
+    sources: [S01, S05]
+  - id: PY-011
+    title: 自由线程（无 GIL）版本不作为默认运行时；要用时先确认所有原生扩展都支持，并实测并发行为
+    level: soft
+    check: manual
+    how: 评审时查看原生依赖的自由线程兼容记录和并发测试结果
+    applies: [lang:python]
+    why: 官方说明自由线程版本里，不支持它的 C 扩展会让解释器重新打开 GIL，或者出现线程安全问题。
+    sources: [S25]
+  # ── Ruff 与类型检查 ──
+  - id: PY-012
+    title: "`ruff check` 和 `ruff format --check` 必须在 CI 里通过；不同时用 Black、isort、flake8 等第二套格式化或 lint 工具"
+    level: hard
+    check: auto
+    how: CI 运行 `ruff check .` 和 `ruff format --check .`；检查仓库里是否还有 Black、isort 的配置
+    applies: [lang:python]
+    why: 一个工具同时管 lint 和格式化，规则不会互相打架；多套格式化工具会反复改同一段代码。通用原则见 02。
+    detail: |
+      - 起步规则建议 `E4, E7, E9, F, I, B, UP, SIM`；服务端项目审查后加 `S`（安全）、`ASYNC`、`DTZ`（时区）、`BLE`（宽泛捕获）。
+      - 行宽用 Ruff 默认值，团队有理由时再改。
+      - 存量项目已在用 Black + flake8 的，可以分阶段迁移，迁移期间不新增第三套工具。
+    sources: [S06, S07]
+    see: ["COD-038"]
+  - id: PY-013
+    title: "行内例外必须指明规则号并写理由：禁止不带规则号的 `# noqa` 和 `# type: ignore`"
+    level: hard
+    check: auto
+    how: 启用 Ruff 的 `PGH004`（不带规则号的 noqa）、`PGH003`（不带错误码的 type ignore）和 `RUF100`（多余的 noqa）
+    applies: [lang:python]
+    why: 笼统的忽略会把以后出现的新问题一起吞掉；批量加忽略是让检查变绿而不修问题的常见做法。
+    sources: [S07]
+    see: ["COD-039", "COD-040", "AGT-011"]
+  - id: PY-014
+    title: 选定一个类型检查器在 CI 里做门禁；公开接口和跨模块调用的函数写类型注解
+    level: hard
+    check: auto
+    how: "CI 运行 `mypy`（或 `pyright`）并要求零错误；新代码建议 mypy 的 `strict` 模式"
+    applies: [lang:python]
+    why: 类型检查能在运行前发现大量接口误用；两个检查器同时做门禁会互相冲突、增加维护成本。
+    detail: |
+      - 第三方库没有类型时，在边界处用受控的 `Any` 并写一句说明，不让 `Any` 扩散。
+      - 迁移检查器期间可以让另一个检查器只报告不阻断。
+    sources: [S10, S11]
+  - id: PY-015
+    title: ty 在发布稳定版之前不作为唯一的类型检查门禁，只做旁路对比
+    level: soft
+    check: semi
+    how: 检查 CI 中阻断合并的类型检查命令
+    applies: [lang:python]
+    why: ty 官方仍标为测试版，版本号是 0.0.x，并说明任意两个版本之间都可能有破坏性变化，包括诊断结果。
+    sources: [S08]
+  - id: PY-016
+    title: 发布的库包含 `py.typed` 标记文件，让使用方能用到库里的类型注解
+    level: soft
+    check: auto
+    how: 构建后检查 wheel 里包含 `py.typed`
+    applies: [lang:python, kind:library]
+    why: 按 PEP 561，没有 `py.typed` 的包会被类型检查器当作无类型。
+    sources: [S11]
+  - id: PY-017
+    title: 本地 Git 钩子沿用 03 的约定：默认 Lefthook；以 Python 为主的仓库可以用 pre-commit；一个仓库只用一个
+    level: soft
+    check: semi
+    how: 检查仓库里是否同时存在 lefthook.yml 和 .pre-commit-config.yaml
+    applies: [lang:python]
+    why: pre-commit 生态里有现成的 Ruff 等钩子，适合纯 Python 仓库；多语言仓库用 Lefthook 不依赖 Python 运行时。
+    sources: [S28]
+    see: ["FLW-034"]
+  # ── 编码习惯中可被工具查出的坑 ──
+  - id: PY-018
+    title: 不用裸 `except:` 和静默吞掉的 `except Exception`；转换异常时用 `raise ... from err` 保留原因
+    level: hard
+    check: auto
+    how: 启用 Ruff 的 `E722`（裸 except）、`BLE001`（宽泛捕获）、`B904`（except 中抛出新异常未带 from）、`S110`（try-except-pass）
+    applies: [lang:python]
+    why: 裸 except 会连 `KeyboardInterrupt` 一起捕获；不带 from 会丢掉原始异常链，排障时找不到根因。通用要求见 02。
+    sources: [S07]
+    see: ["COD-010", "COD-011"]
+  - id: PY-019
+    title: SQL 用参数绑定或查询构造器，不用字符串拼接或 f-string 拼 SQL
+    level: hard
+    check: semi
+    how: 启用 Ruff 的 `S608`（疑似拼接的 SQL）找候选，人工确认
+    applies: [lang:python]
+    why: 拼接 SQL 是注入漏洞的直接来源。
+    sources: [S07, S15]
+    see: ["25"]
+  - id: PY-020
+    title: 不可信数据不用 `pickle`、`yaml.load`（非安全加载器）、`eval` 反序列化；`subprocess` 不用 `shell=True` 拼接外部输入
+    level: hard
+    check: auto
+    how: 启用 Ruff 的 `S301`（pickle）、`S506`（不安全的 yaml.load）、`S307`（eval）、`S602`/`S604`（shell=True）
+    applies: [lang:python]
+    why: 这些调用会在解析或执行时运行任意代码，是 Python 特有的高危写法。YAML 用 `yaml.safe_load`，命令用参数列表传给 subprocess。
+    sources: [S07]
+    see: ["25"]
+  - id: PY-021
+    title: 时间用带时区的 datetime，时区用标准库 zoneinfo；不用 `datetime.utcnow()` 和不带时区的 `datetime.now()`
+    level: soft
+    check: auto
+    how: 启用 Ruff 的 `DTZ` 规则组
+    applies: [lang:python]
+    why: 不带时区的时间和本地时间混用会在跨时区和夏令时出错；断网环境要预装 tzdata。通用约定见 02。
+    sources: [S07, S30]
+    see: ["COD-026", "COD-027"]
+  # ── 异步与并发 ──
+  - id: PY-022
+    title: "`async def` 里不调用阻塞操作（同步 HTTP 库、`time.sleep`、同步文件和数据库调用、长时间 CPU 计算）；必须调用时放到线程池或独立进程"
+    level: hard
+    check: semi
+    how: 启用 Ruff 的 `ASYNC` 规则组找候选（如 ASYNC210 同步 HTTP、ASYNC251 time.sleep），评审确认；并发测试中观察事件循环延迟
+    applies: [lang:python]
+    why: 一个阻塞调用会卡住同一事件循环上的所有请求。
+    detail: |
+      - 用 `asyncio.to_thread` 或框架提供的线程池把阻塞调用移出事件循环；CPU 密集任务用进程池或任务队列。
+      - FastAPI 中，调用阻塞库的路由函数写成普通 `def`，框架会放到线程池执行。
+    sources: [S07, S12, S18]
+  - id: PY-023
+    title: 简单需求默认写同步代码；用 async 要有明确的并发收益（大量并发 I/O）
+    level: soft
+    check: manual
+    how: 评审时看引入 async 的理由
+    applies: [lang:python]
+    why: async 是并发模型的选择，不会自动变快；同步和异步混用会让调用链复杂、阻塞问题更隐蔽。
+  - id: PY-024
+    title: 并发任务用 `asyncio.TaskGroup` 等结构化方式管理；`create_task` 创建的任务要保存引用并等待结果
+    level: soft
+    check: semi
+    how: 评审时检查未保存引用的 `asyncio.create_task(...)` 调用；Ruff 的 `RUF006` 可找出部分候选
+    applies: [lang:python]
+    why: 官方文档说明事件循环只对任务保持弱引用，不保存引用的任务可能在执行中途被回收；TaskGroup 能保证子任务出错时一并取消。
+    sources: [S07, S18]
+    see: ["COD-035"]
+  - id: PY-025
+    title: 不吞掉 `asyncio.CancelledError`；捕获后做完清理要重新抛出
+    level: hard
+    check: manual
+    how: 评审时检查 `except BaseException`、`except asyncio.CancelledError` 的处理分支
+    applies: [lang:python]
+    why: 官方文档要求取消异常被捕获后应重新抛出；吞掉它会让超时、TaskGroup 和优雅停机失效。
+    sources: [S18]
+  - id: PY-026
+    title: 每个外部 HTTP 调用设置超时；用 `requests` 时必须显式传 `timeout`
+    level: hard
+    check: auto
+    how: 启用 Ruff 的 `S113`（requests 调用缺少 timeout）；HTTPX 不得把超时设为 `None`
+    applies: [lang:python]
+    why: requests 默认不超时，下游挂住时请求会一直等。HTTPX 默认有超时，但可以被关掉。通用要求见 02。
+    sources: [S07, S19]
+    see: ["COD-033", "COD-034"]
+  - id: PY-027
+    title: HTTP 客户端、数据库引擎和连接池在应用生命周期内复用并在退出时关闭，不在每个请求里新建
+    level: soft
+    check: semi
+    how: 评审时检查请求处理函数里是否创建 `httpx.Client`、`create_engine` 等；集成测试检查连接数
+    applies: [lang:python, kind:service]
+    why: HTTPX 官方建议复用 Client 以利用连接池；每次新建会浪费连接、泄漏句柄。
+    sources: [S15, S19]
+  # ── 日志 ──
+  - id: PY-028
+    title: 库代码只通过 `logging.getLogger(__name__)` 记日志，不配置处理器；应用在入口处统一配置结构化输出；生产代码不用 `print` 记日志
+    level: soft
+    check: auto
+    how: 启用 Ruff 的 `T20`（print）规则；评审库代码中是否调用 `logging.basicConfig`
+    applies: [lang:python]
+    why: 官方日志指南要求库不要给自己的日志器加处理器，否则会和应用的配置打架；日志字段与脱敏要求见 02。
+    sources: [S27]
+    see: ["COD-016", "COD-019"]
+  # ── 校验与配置 ──
+  - id: PY-029
+    title: 外部输入（HTTP 请求体、外部 JSON、配置、工具返回）在边界处用 Pydantic v2 模型校验后再使用；新代码不用 `pydantic.v1` 兼容层
+    level: hard
+    check: semi
+    how: 评审边界处是否直接读取未经校验的 `dict`；搜索 `pydantic.v1` 导入
+    applies: [lang:python]
+    why: 未校验的 dict 会把类型错误和恶意字段带进业务逻辑；Pydantic V1 已停止开发，只修严重问题和安全漏洞。
+    sources: [S13]
+  - id: PY-030
+    title: 配置用 pydantic-settings 在启动时集中加载并校验；缺失或非法时启动失败
+    level: soft
+    check: semi
+    how: 启动测试中去掉必填配置，确认进程报错退出
+    applies: [lang:python, kind:service]
+    why: 配置错误在启动时暴露，好过在第一个请求时才失败。通用要求见 02。
+    sources: [S14]
+    see: ["COD-022"]
+  # ── 数据库 ──
+  - id: PY-031
+    title: 生产环境的表结构只由迁移工具（Alembic 或 Django 迁移）变更，不在启动时调用 `metadata.create_all`
+    level: hard
+    check: semi
+    how: 搜索生产代码中的 `create_all` 调用；CI 检查模型变化是否带了迁移文件（Django 用 `makemigrations --check`，Alembic 用 `alembic check`）
+    applies: [lang:python]
+    why: 用 `create_all` 只建缺少的表，不会修改已有表，也不留变更记录。迁移原则（向前修复为主、先扩后缩）见 17。
+    sources: [S17]
+    see: ["17"]
+  - id: PY-032
+    title: Alembic 自动生成的迁移必须人工审查后再提交
+    level: hard
+    check: manual
+    how: 评审迁移文件，重点看重命名、类型变化、约束和数据迁移
+    applies: [lang:python]
+    why: Alembic 官方说明自动生成无法识别表和列的重命名（会生成删除再新建），也检测不到部分约束和类型变化。
+    sources: [S17]
+    see: ["17"]
+  - id: PY-033
+    title: 涉及数据库语义的测试接真实的同款数据库（如用 testcontainers 起 PostgreSQL），不用 SQLite 冒充
+    level: hard
+    check: semi
+    how: 检查集成测试的数据库连接配置
+    applies: [lang:python]
+    why: SQLite 的类型、锁和 SQL 方言与 PostgreSQL 不同，测试通过不代表线上能跑。通用要求见 04。
+    sources: [S31]
+    see: ["TST-010"]
+  # ── Web 与后台任务 ──
+  - id: PY-034
+    title: 不能丢的后台任务交给独立的任务队列执行，不用 FastAPI 的 BackgroundTasks 或进程内线程承担
+    level: hard
+    check: manual
+    how: 评审时检查 BackgroundTasks 中执行的操作是否允许丢失
+    applies: [lang:python, kind:service]
+    why: BackgroundTasks 在当前进程里执行，进程重启或崩溃时任务就丢了。Django 的 Tasks 接口也只定义了接口，需要另配执行后端。队列的总体选型和幂等要求见 18。
+    sources: [S12, S26]
+    see: ["18"]
+  # ── 测试 ──
+  - id: PY-035
+    title: 测试用 pytest；解析器、序列化、数据转换等输入空间大的代码加 Hypothesis 属性测试
+    level: soft
+    check: semi
+    how: 评审时看解析与转换模块是否有属性测试；Hypothesis 失败时保留缩减后的样例
+    applies: [lang:python]
+    why: 属性测试会自动生成大量边界输入并缩减到最小反例，能发现手写用例想不到的情况。测试分层和覆盖率口径见 04。
+    sources: [S20, S21]
+    see: ["04", "TST-014"]
+  - id: PY-036
+    title: 异步测试用 pytest-asyncio 并显式设置事件循环的作用域；测试之间不共享事件循环上的全局状态
+    level: soft
+    check: semi
+    how: 检查 pytest 配置中的 asyncio 模式和循环作用域设置
+    applies: [lang:python]
+    why: 事件循环和连接在测试间泄漏，会造成只在并行或特定顺序下出现的偶发失败。
+    sources: [S29]
+  # ── 打包与发布 ──
+  - id: PY-037
+    title: 发布的库用 `src/` 目录结构，并从构建出的 wheel 安装后运行测试
+    level: soft
+    check: auto
+    how: CI 先 `uv build`，再在干净环境安装 wheel 跑测试
+    applies: [lang:python, kind:library]
+    why: PyPA 指南说明 src 结构能避免测试意外导入仓库里的源码而不是安装后的包，从而发现打包遗漏的文件。
+    sources: [S05]
+  - id: PY-038
+    title: 从 CI 发布到 PyPI 时用 Trusted Publishing（短期令牌），不在 CI 里保存长期 API 令牌
+    level: soft
+    check: semi
+    how: 检查发布流水线的认证方式和仓库密钥列表
+    applies: [lang:python, kind:library]
+    why: Trusted Publishing 用 CI 的身份换取几分钟有效的令牌，泄露风险远低于长期令牌。签名和来源证明见 25。
+    sources: [S23]
+    see: ["25"]
+choices:
+  - category: 项目与依赖管理
+    pick: uv（pyproject.toml + uv.lock）
+    when: 新的应用、命令行工具和库
+    alternatives:
+      - { name: Poetry, when: 已有 Poetry 项目，团队流程稳定，不强制迁移 }
+      - { name: PDM, when: 已有 PDM 项目 }
+      - { name: pip + pip-tools, when: 只能用 pip 的受限环境 }
+    avoid:
+      - { name: 只维护松散的 requirements.txt, why: 不锁传递依赖，安装结果不可复现 }
+      - { name: 在生产机器上 `pip install -U`, why: 没有记录，无法回滚 }
+    license: uv 为 MIT 或 Apache-2.0 双许可
+    notes: uv、Ruff、ty 同属 Astral；OpenAI 于 2026-03-19 宣布收购 Astral，双方承诺工具继续开源。断网环境需预先准备 Python 解释器和 wheel 仓库。
+    sources: [S02, S09]
+  - category: 构建后端
+    pick: Hatchling
+    alternatives:
+      - { name: uv_build, when: 纯 Python 项目、想与 uv 工具链保持一致时 }
+      - { name: setuptools, when: 存量项目 }
+      - { name: maturin, when: 用 Rust 写原生扩展 }
+      - { name: scikit-build-core, when: 用 C/C++（CMake）写原生扩展 }
+    avoid:
+      - { name: 带动态安装逻辑的 setup.py, why: 安装时执行任意代码，难以静态分析 }
+    sources: [S05]
+  - category: lint 与格式化
+    pick: Ruff
+    alternatives:
+      - { name: Black + isort + flake8, when: 存量项目迁移期间 }
+    avoid:
+      - { name: 同时运行多套格式化工具, why: 规则冲突，反复改同一段代码 }
+    license: MIT
+    sources: [S06]
+  - category: 类型检查
+    pick: mypy
+    alternatives:
+      - { name: Pyright, when: 团队主要用 VS Code（Pylance）、想让编辑器和 CI 结果一致；需要 Node 运行时 }
+      - { name: ty, when: 只做旁路对比；官方发布稳定版后再评估是否做门禁 }
+    avoid:
+      - { name: 两个检查器同时做阻断门禁, why: 规则差异导致互相冲突 }
+    license: mypy、Pyright、ty 均为 MIT
+    sources: [S08, S10]
+  - category: Web 框架
+    pick: FastAPI + Pydantic v2 + Uvicorn
+    when: 以 API 为主的服务
+    alternatives:
+      - { name: Django, when: 需要后台管理页面、完整的 ORM、认证和迁移一体化 }
+      - { name: Flask, when: 小服务或存量项目 }
+      - { name: Litestar, when: 受控试点，先验证插件和维护能力 }
+    avoid:
+      - { name: 自己写 ASGI 或 WSGI 框架, why: 有成熟框架，自研维护成本高 }
+    license: FastAPI 为 MIT；Django、Flask 为 BSD-3-Clause
+    notes: FastAPI 仍按 0.x 版本发布、更新频繁，升级前看变更说明。
+    sources: [S12]
+  - category: 数据校验与配置
+    pick: Pydantic v2；配置用 pydantic-settings
+    alternatives:
+      - { name: msgspec, when: 性能热点路径的序列化与校验 }
+      - { name: dataclasses, when: 不需要校验的内部数据结构 }
+    avoid:
+      - { name: pydantic.v1 兼容层, why: V1 已停止开发 }
+      - { name: 每层各写一套校验器, why: 重复且不一致 }
+    license: MIT
+    sources: [S13, S14]
+  - category: 数据库访问
+    pick: SQLAlchemy 2（ORM 与 Core）+ psycopg 3
+    alternatives:
+      - { name: Django ORM, when: Django 项目 }
+      - { name: asyncpg, when: 不用 ORM、追求 PostgreSQL 异步性能 }
+      - { name: SQLModel, when: 简单的 FastAPI 服务；不当作 SQLAlchemy 的完整替代 }
+    avoid:
+      - { name: 自研 ORM, why: 有成熟方案 }
+      - { name: 未经测试就用于各种「兼容 PostgreSQL」的数据库, why: 方言、类型和锁行为可能不同 }
+    license: SQLAlchemy 为 MIT；psycopg 为 LGPL-3.0（分发前按 27 的口径审查）
+    sources: [S15, S16]
+  - category: 数据库迁移工具
+    pick: Alembic
+    alternatives:
+      - { name: Django 迁移, when: Django 项目 }
+    avoid:
+      - { name: 启动时 create_all, why: 不能修改已有表，没有变更记录 }
+    license: MIT
+    notes: 迁移原则见 17。
+    sources: [S17]
+  - category: HTTP 客户端
+    pick: HTTPX
+    alternatives:
+      - { name: requests, when: 同步的存量项目；必须显式传 timeout }
+      - { name: aiohttp, when: 需要它特有的流式或 WebSocket 能力 }
+    avoid:
+      - { name: urllib 加手写连接池和重试, why: 边角情况多 }
+    notes: 重试用 Tenacity，次数和退避要求见 02。
+    sources: [S19]
+  - category: 后台任务库
+    pick: Celery
+    when: 需要路由、定时、多种消息中间件的任务系统；队列和调度的总体选型见 18
+    alternatives:
+      - { name: RQ, when: 已有 Redis、任务简单 }
+      - { name: Dramatiq, when: 许可证审查允许 LGPL 时 }
+    avoid:
+      - { name: Arq 作为新项目默认, why: 官方已声明只维护模式 }
+      - { name: FastAPI BackgroundTasks 承担不能丢的任务, why: 进程退出即丢失 }
+    sources: [S24]
+  - category: 日志
+    pick: 标准库 logging + JSON 格式化器
+    alternatives:
+      - { name: structlog, when: 需要更方便地绑定上下文字段 }
+    avoid:
+      - { name: print 当生产日志, why: 没有级别和结构，无法检索 }
+    sources: [S27]
+  - category: 测试
+    pick: pytest + Hypothesis + pytest-asyncio + testcontainers
+    alternatives:
+      - { name: unittest, when: 不能引入第三方依赖的场合 }
+      - { name: pytest-xdist, when: 测试多、需要并行；先保证测试互相隔离 }
+    avoid:
+      - { name: 用 SQLite 冒充 PostgreSQL, why: 方言和锁行为不同 }
+    license: pytest 为 MIT；Hypothesis 为 MPL-2.0
+    sources: [S20, S21, S29, S31]
+  - category: 依赖漏洞审计
+    pick: pip-audit
+    alternatives:
+      - { name: OSV-Scanner, when: 多语言仓库想用一个工具；总体选型见 25 }
+    sources: [S22]
+antipatterns:
+  - { bad: 因为最新的 Python 小版本发布了就全仓立即升级, instead: 先在 CI 里跑完整测试，确认原生依赖都有 wheel 再切换 }
+  - { bad: "用 `# noqa` 或 `# type: ignore` 批量消除报错让 CI 变绿", instead: 修问题；必须例外的逐条写规则号和理由 }
+  - { bad: 在 `async def` 里用 requests 或 time.sleep, instead: 用 HTTPX 的 AsyncClient、asyncio.sleep，阻塞调用放到线程池 }
+  - { bad: 每个请求新建数据库连接或 HTTP 客户端, instead: 在应用生命周期内复用并在退出时关闭 }
+  - { bad: 在每个服务里都预装 torch、pandas、Celery 全家桶, instead: 按需用可选依赖（extras），数据和模型依赖单独管理（见 22、24） }
+  - { bad: 公网索引和内网索引用 `--extra-index-url` 混用, instead: 内部代理镜像，内部包名只从内网解析 }
+  - { bad: 把 Alembic 自动生成的迁移直接提交, instead: 人工审查重命名、类型和约束变化 }
+  - { bad: 在 CI 联网安装成功就声称支持离线部署, instead: 在断网环境里用 --no-index 安装并启动 }
+sources:
+  - { id: S01, title: "Python Developer's Guide: Status of Python versions", url: "https://devguide.python.org/versions/", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "uv documentation: Locking and syncing", url: "https://docs.astral.sh/uv/concepts/projects/sync/", publisher: Astral, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "uv documentation: Package indexes", url: "https://docs.astral.sh/uv/concepts/indexes/", publisher: Astral, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S04, title: "PEP 751: A file format to record Python dependencies for installation reproducibility", url: "https://peps.python.org/pep-0751/", publisher: Python Software Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S05, title: Python Packaging User Guide, url: "https://packaging.python.org/en/latest/", publisher: PyPA, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: Ruff, url: "https://github.com/astral-sh/ruff", publisher: Astral, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Ruff: Rules", url: "https://docs.astral.sh/ruff/rules/", publisher: Astral, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: ty, url: "https://github.com/astral-sh/ty", publisher: Astral, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: OpenAI to acquire Astral, url: "https://openai.com/index/openai-to-acquire-astral", publisher: OpenAI, date: 2026-03-19, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: mypy documentation, url: "https://mypy.readthedocs.io/", publisher: mypy, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "PEP 561: Distributing and Packaging Type Information", url: "https://peps.python.org/pep-0561/", publisher: Python Software Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: FastAPI, url: "https://pypi.org/project/fastapi/", publisher: FastAPI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "Pydantic: Version policy", url: "https://pydantic.dev/docs/validation/latest/get-started/version-policy/", publisher: Pydantic, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: pydantic-settings, url: "https://pypi.org/project/pydantic-settings/", publisher: Pydantic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: SQLAlchemy documentation, url: "https://docs.sqlalchemy.org/en/21/", publisher: SQLAlchemy, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: Psycopg, url: "https://www.psycopg.org/", publisher: Psycopg, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Alembic: Auto Generating Migrations", url: "https://alembic.sqlalchemy.org/en/latest/autogenerate.html", publisher: SQLAlchemy, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "asyncio: Coroutines and Tasks", url: "https://docs.python.org/3/library/asyncio-task.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "HTTPX: Timeouts", url: "https://www.python-httpx.org/advanced/timeouts/", publisher: Encode, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: pytest documentation, url: "https://docs.pytest.org/", publisher: pytest, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Hypothesis documentation, url: "https://hypothesis.readthedocs.io/", publisher: Hypothesis, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: pip-audit, url: "https://github.com/pypa/pip-audit", publisher: PyPA, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "PyPI: Trusted Publishers", url: "https://docs.pypi.org/trusted-publishers/", publisher: PyPI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: arq, url: "https://github.com/python-arq/arq", publisher: arq, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S25, title: "Python support for free threading", url: "https://docs.python.org/3/howto/free-threading-python.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "Django: Tasks framework", url: "https://docs.djangoproject.com/en/6.0/topics/tasks/", publisher: Django Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Logging HOWTO: Configuring logging for a library", url: "https://docs.python.org/3/howto/logging.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: pre-commit, url: "https://pre-commit.com/", publisher: pre-commit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: pytest-asyncio, url: "https://pytest-asyncio.readthedocs.io/", publisher: pytest-dev, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "zoneinfo: IANA time zone support", url: "https://docs.python.org/3/library/zoneinfo.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: testcontainers-python, url: "https://testcontainers-python.readthedocs.io/", publisher: Testcontainers, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - OpenAI 收购 Astral 是否已完成交割、之后 uv/Ruff/ty 的治理和许可是否变化（2026-03-19 宣布时需监管审批，未查到交割公告）
+  - pydantic.v1 兼容层在较新 Python 版本上是否仍可用（版本策略页未说明）；Pydantic V3 的时间表
+  - uv_build 构建后端是否已标为稳定、适合作为默认（未核实）
+  - 许可证沿用原调研、未逐一对照官方 LICENSE 核实：uv、Hatchling、mypy、Pyright、Django、Flask、SQLAlchemy、psycopg、Alembic、Celery、RQ、Dramatiq、pytest、Hypothesis、pip-audit、structlog
+  - Ruff 规则编号（PGH003/PGH004、RUF006、ASYNC210/251、S113 等）按原调研和既有知识写出，未逐条对照当前规则页核实
+  - 国产数据库（openGauss、达梦、人大金仓等）与 psycopg 3、SQLAlchemy、Alembic 的兼容性：待补调研
+  - 待补调研：Python 变异测试工具（如 mutmut、cosmic-ray）的成熟度与推荐
+  - 待补调研：FastAPI 导出 OpenAPI 后的破坏性变更检查工具（与 16 一起定）
