@@ -1,0 +1,520 @@
+id: "28"
+slug: mobile
+title: 移动端总体策略
+summary: 移动应用跨 Android 和 iOS 的共同决策：原生、跨平台框架和 Web/PWA 怎么选，跨平台工程规范，离线与同步，推送，崩溃与性能监控，发布与热更新的边界，权限与隐私的工程做法，以及移动端 E2E 工具。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - 原生、跨平台（React Native、Flutter、Kotlin Multiplatform）、PWA、小程序的选型门槛
+    - 跨平台框架的工程规范与代码共享策略
+    - 离线优先的数据流与同步
+    - 推送客户端与国内厂商推送通道
+    - 崩溃与性能监控
+    - 热更新（OTA）的边界和应用商店政策
+    - 移动端认证、凭据存储、权限请求的工程做法
+    - 移动端 E2E 测试工具
+  excludes:
+    - { what: Android 平台细节（Gradle、签名、后台任务、Data safety 表单）, see: "29" }
+    - { what: iOS 平台细节（Keychain、BGTask、隐私清单、企业分发）, see: "30" }
+    - { what: 测试分层、不稳定测试、验收证据的通用原则, see: "04" }
+    - { what: 对比度、触控尺寸、读屏与国际化的通用要求, see: "09" }
+    - { what: 设计令牌, see: "08" }
+    - { what: 接口版本、破坏性变化、幂等语义, see: "16" }
+    - { what: OIDC、令牌轮换、会话, see: "19" }
+    - { what: 推送服务端接口（APNs、FCM 的调用方式）, see: "21" }
+    - { what: 埋点与产品分析, see: "22" }
+    - { what: 证书、密钥扫描、SBOM、供应链安全, see: "25" }
+    - { what: App 备案、个人信息保护法规、SDK 合规清单, see: "27" }
+    - { what: PWA 与 Service Worker 的 Web 侧细节, see: "07" }
+overview: |
+  1. **先看能力，再选框架。** 后台定位、蓝牙、相机实时处理、系统扩展是核心功能时，先在目标机型上验证原生能力，通过了才谈跨端。
+  2. **默认选择。** TypeScript 团队做双端业务 App，默认 React Native + Expo；重视觉、要统一渲染时评估 Flutter；只想共享业务逻辑、UI 保持原生时用 Kotlin Multiplatform（Compose Multiplatform 的 iOS 支持已稳定，UI 也可以共享）；系统集成很深时用双原生。PWA 和小程序是分发渠道的选择，不是原生 App 的替代。
+  3. **React Native 只有新架构。** 旧架构已经移除，引入原生依赖前先确认它支持新架构。
+  4. **共享契约，不强求共享代码。** 接口类型从 OpenAPI 生成，设计令牌统一导出；共享比例不是指标。
+  5. **离线优先是架构。** 本地数据库是读模型，写入先进持久化待发队列，每个操作有幂等键，冲突按数据类型定策略，删除要同步。系统不保证后台任务准点执行。
+  6. **推送不保证送达。** 重要业务要有应用内待办和主动拉取兜底；中国大陆的 Android 要接厂商通道；推送内容只放标识。
+  7. **热更新只改脚本和资源。** 原生代码、权限、主要功能的变化必须发新安装包并过商店审核。App Center CodePush 已停服，React Native 用 EAS Update 或自托管兼容服务。
+  8. **凭据进系统安全存储。** 登录走系统浏览器 + PKCE；客户端不放永久密钥；生物识别只做本地解锁。
+  9. **权限用到时再要。** 先说明用途，被拒后降级；用户同意前不初始化第三方 SDK。
+  10. **发布前在真机上跑 Release 包。** 关键流程加上断网、弱网和旧数据迁移的用例。
+rules:
+  # ── 选型 ──
+  - id: MOB-001
+    title: 选定移动端技术栈前写决策记录，写明候选方案、取舍理由和推翻条件
+    level: soft
+    check: semi
+    how: CI 检查决策记录文件存在；评审时看是否比较了原生、跨平台和 Web/PWA
+    applies: [platform:mobile]
+    why: 移动端技术栈换起来代价很大，没有记录的决定事后说不清为什么，也不知道什么时候该重新评估。
+    see: ["05"]
+  - id: MOB-002
+    title: 后台定位、蓝牙、相机实时处理、系统扩展是核心功能时，先在目标机型上验证原生能力，验证通过前不承诺跨端实现
+    level: soft
+    check: manual
+    how: 评审时检查有没有能力清单和真机验证记录（机型、系统版本、权限、前后台切换）
+    applies: [platform:mobile]
+    why: 这些能力受系统权限和生命周期限制最严，跨端框架的插件常常只覆盖一部分，项目后期才发现做不到最难补救。
+  - id: MOB-003
+    title: PWA 和小程序只用于轻量入口；需要可靠推送、后台运行或深度硬件访问时，不用它们替代原生 App
+    level: soft
+    check: manual
+    how: 选型评审时对照需求里的后台、推送、硬件、存储容量要求
+    applies: [platform:mobile]
+    why: 浏览器和小程序宿主对后台执行、推送、存储回收的限制比原生更严，iOS 上差异尤其大，承诺能力对等会落空。
+    see: ["07"]
+  - id: MOB-004
+    title: 跨端共享接口契约、设计令牌和纯领域逻辑；不把代码共享率当指标，不强求各平台界面像素一致
+    level: soft
+    check: manual
+    how: 评审共享模块：不依赖 DOM、Node、Android Context 等平台对象；交互遵循各平台的设计规范
+    applies: [platform:mobile]
+    why: 跨语言时共享接口定义比共享源码划算；强推共享率会让代码迁就框架，用户体验变差。
+    detail: |
+      - 接口类型：从同一份 OpenAPI 或 JSON Schema 生成各端代码，不手写各端的数据结构。
+      - 设计：共享颜色、字体、间距等语义令牌（见 08），不复制 Web 的 CSS 组件。
+      - 交互：共享产品意图和验收标准，导航、返回手势、系统弹窗遵循 Material Design 和 Apple HIG。
+    see: ["08", "16"]
+  - id: MOB-005
+    title: 要做鸿蒙原生应用时，单独建立 ArkTS 工程规范和构建流程，只共享接口契约、资源和设计令牌
+    level: soft
+    check: manual
+    how: 评审时检查鸿蒙端是否有独立的依赖、签名、权限和推送方案，以及 Android 依赖的逐项替换清单
+    applies: [platform:mobile]
+    why: 鸿蒙原生应用不运行 Android 安装包，Google 服务、推送、地图、支付等依赖都要逐项替换，不能假定跨端框架能直接覆盖。
+  # ── 跨平台框架工程规范 ──
+  - id: MOB-006
+    title: React Native 项目使用新架构；引入原生依赖前确认它支持新架构
+    level: hard
+    check: auto
+    how: Expo 项目在 CI 运行 `npx expo-doctor`；裸 React Native 项目对照 React Native Directory 的新架构标记
+    applies: [platform:mobile]
+    why: React Native 0.82 起旧架构已移除，Expo SDK 55 起新架构始终开启且不能关闭；不支持新架构的库无法使用。
+    sources: [S01, S02]
+  - id: MOB-007
+    title: 依赖用锁文件固定，CI 用冻结安装；Expo 项目用 `npx expo install` 添加依赖，并在 CI 运行 `npx expo install --check`
+    level: hard
+    check: auto
+    how: CI 用 `npm ci` / `pnpm install --frozen-lockfile` / `flutter pub get --enforce-lockfile`；Expo 项目加跑 `npx expo install --check`
+    applies: [platform:mobile]
+    why: 移动端构建链长、原生依赖多，版本漂移会让同一份代码在不同时间打出不同的安装包；Expo 的依赖版本要与 SDK 配套。
+    detail: 创建项目时也不用 `@latest` 模板，固定到团队审过的 SDK 版本。通用依赖规则见 10。
+    sources: [S02]
+    see: ["10"]
+  - id: MOB-008
+    title: 引入跨平台插件或原生模块前，检查维护状态、Android 和 iOS 两端的支持情况和许可证
+    level: soft
+    check: semi
+    how: 依赖评审清单：最近发布时间、未解决问题、两端是否都有实现、许可证；工具辅助可用 React Native Directory、pub.dev 评分
+    applies: [platform:mobile]
+    why: 插件停更或只实现一端，问题往往到发布前真机测试才暴露；插件里的原生代码同样受许可证约束。
+    see: ["27"]
+  - id: MOB-009
+    title: 导航、状态管理、本地数据库各只用一套；引入第二套要写理由
+    level: soft
+    check: semi
+    how: 依赖审查脚本列出同类库，命中多套时要求决策记录
+    applies: [platform:mobile]
+    why: 两套导航或两套数据库会让状态不一致、包变大，迁移也只做一半。
+  - id: MOB-010
+    title: 业务数据存在 SQLite 等结构化数据库里，不用 AsyncStorage 这类键值存储存业务主数据
+    level: soft
+    check: semi
+    how: 代码扫描键值存储的写入，评审是否存了列表或实体数据
+    applies: [platform:mobile]
+    why: 键值存储没有事务、索引和迁移，数据一多就慢，出错时也无法局部恢复。
+  # ── 认证与凭据 ──
+  - id: MOB-011
+    title: 登录用系统浏览器 + 授权码 + PKCE；不在 WebView 里收集用户密码
+    level: hard
+    check: semi
+    how: 代码扫描登录流程是否用系统认证会话（AppAuth、expo-auth-session、ASWebAuthenticationSession、Custom Tabs）；E2E 覆盖登录
+    applies: [platform:mobile]
+    why: 内嵌 WebView 让 App 能读到用户密码，也绕过了浏览器已有的登录状态；RFC 8252 要求原生应用用外部用户代理。
+    sources: [S03]
+    see: ["19"]
+  - id: MOB-012
+    title: 访问令牌、刷新令牌等凭据只存系统安全存储（Keychain、Android Keystore 的封装），不明文落盘、不写日志
+    level: hard
+    check: semi
+    how: 代码扫描令牌写入普通存储和日志的调用；日志断言测试里查找令牌格式
+    applies: [platform:mobile]
+    why: 普通文件和键值存储在备份、越狱或 root 设备上可被读取，日志会被收集和转发。
+    detail: 平台存储的细节见 29、30。
+    see: ["25", "29", "30"]
+  - id: MOB-013
+    title: 客户端不内置永久 API 密钥或服务端密钥；需要调用第三方服务时经自己的服务端转发或换取短期凭据
+    level: hard
+    check: auto
+    how: 对仓库和构建产物跑密钥扫描
+    applies: [platform:mobile]
+    why: 安装包可以被任何人下载和反编译，打进去的密钥等于公开。
+    see: ["25"]
+  - id: MOB-014
+    title: 生物识别只用于解锁本机保存的凭据，不作为服务端的身份验证依据
+    level: hard
+    check: manual
+    how: 评审认证设计：服务端是否只认令牌或签名，而不是客户端上报的「已通过生物识别」
+    applies: [platform:mobile]
+    why: 客户端上报的布尔值可以被篡改；生物识别只能证明「这台设备上有人通过了验证」。
+  - id: MOB-015
+    title: 退出登录、切换账户、切换租户时，清除凭据、本地敏感缓存和推送令牌绑定
+    level: hard
+    check: semi
+    how: E2E 用例：退出后检查安全存储、本地库、图片缓存为空，服务端已解除推送令牌
+    applies: [platform:mobile]
+    why: 共用设备或换号后，残留数据会让下一个用户看到上一个人的内容，残留绑定会把通知推到旧设备。
+    detail: 推送令牌被系统轮换、用户关闭通知时，也要及时更新服务端的绑定（服务端处理见 21）。
+    see: ["21"]
+  - id: MOB-016
+    title: 启用证书固定时，必须固定多个公钥（含备用）并有轮换和应急恢复方案；没有这些就不启用
+    level: hard
+    check: manual
+    how: 安全评审检查固定的公钥数量、轮换流程和固定失败时的恢复手段（远程配置关闭或强制升级）
+    applies: [platform:mobile]
+    why: 证书一换，所有固定了旧证书的客户端同时连不上，只能靠发新版补救；私有化客户自己的 CA 轮换更难预料。
+    see: ["25"]
+  # ── 离线与同步 ──
+  - id: MOB-017
+    title: 需要离线写入时，先把本地实体和待发操作一起写入持久化队列（outbox），界面标出「待同步」，不显示为已提交
+    level: hard
+    check: semi
+    how: 集成测试：断网写入后杀进程重启，检查数据和待发操作都还在，联网后被提交
+    applies: [platform:mobile]
+    why: 只放内存或只靠请求缓存的写入，进程一被系统杀掉就丢；把待同步显示成已提交会误导用户。
+    detail: |
+      最小数据结构（示意）：
+      - 实体：id、服务端版本、更新时间、删除时间、内容
+      - 待发操作：操作 id、实体 id、操作类型、基于的版本、内容、创建时间、重试次数、状态
+      - 同步游标：范围、游标、最近成功时间
+    sources: [S04]
+    see: ["17"]
+  - id: MOB-018
+    title: 每个离线操作带唯一的幂等键，服务端据此去重；重试用指数退避加随机抖动
+    level: hard
+    check: semi
+    how: 契约测试：同一操作重复提交、乱序提交，服务端结果只生效一次
+    applies: [platform:mobile]
+    why: 移动网络经常出现「请求到了、响应丢了」，没有幂等键的重试会重复下单或重复审批。
+    see: ["16"]
+  - id: MOB-019
+    title: 按数据类型写明冲突策略；金额、审批、不可逆操作不得用「最后写入者胜」
+    level: hard
+    check: manual
+    how: 评审同步设计文档：每类实体的冲突策略（拒绝覆盖、字段级合并、转人工）和对应测试
+    applies: [platform:mobile]
+    why: 「最后写入者胜」会静默覆盖别人的修改，对金额和审批来说就是数据错误。
+  - id: MOB-020
+    title: 删除用墓碑记录同步；增量同步的游标失效时能回退到全量
+    level: soft
+    check: semi
+    how: 同步测试覆盖删除、游标过期、时钟偏差、重复和乱序事件
+    applies: [platform:mobile]
+    why: 直接物理删除时离线设备不知道该删什么，会把旧数据再同步回来。
+  - id: MOB-021
+    title: 不在需求或验收中承诺固定间隔的后台同步；以进入前台、网络恢复、用户操作作为同步时机
+    level: hard
+    check: manual
+    how: 评审需求和验收标准里有没有「每 N 分钟后台同步」之类的表述
+    applies: [platform:mobile]
+    why: Android 和 iOS 都会按电量、使用频率推迟或跳过后台任务，跨平台框架的定时器在后台不会准点运行。
+    detail: 后台任务接口（WorkManager、BGTask）的用法见 29、30。
+    sources: [S04]
+    see: ["29", "30"]
+  - id: MOB-022
+    title: 有本地数据库的应用，每次升级用旧版本的数据样本测试迁移
+    level: hard
+    check: auto
+    how: CI 里保留各历史 schema 版本的数据样本，逐个跑迁移到当前版本并校验
+    applies: [platform:mobile]
+    why: 服务端迁移出错可以修库，用户手机上的数据迁移失败往往只能清空重来。
+    see: ["17"]
+  # ── 推送 ──
+  - id: MOB-023
+    title: 不承诺推送必达；重要业务提供应用内待办或消息列表，打开应用时主动拉取
+    level: hard
+    check: manual
+    how: 验收文档检查：关闭通知权限、断网、应用被系统终止时，用户打开应用仍能看到待处理事项
+    applies: [platform:mobile]
+    why: 用户可能关掉通知，系统可能限流，内网环境可能连不到 APNs 和 FCM；推送只能作为提醒。
+    sources: [S05]
+    see: ["21"]
+  - id: MOB-024
+    title: 面向中国大陆 Android 用户时，接入主要厂商推送通道（华为、荣耀、小米、OPPO、vivo 等）或经评估的聚合推送 SDK；鸿蒙原生用 Push Kit
+    level: soft
+    check: manual
+    how: 发布前在各厂商真机上验证通知送达和点击跳转
+    applies: [platform:mobile]
+    why: 中国大陆的 Android 设备多数没有 Google 服务，收不到 FCM；各厂商通道要单独申请、单独适配。
+    detail: 聚合推送 SDK 属于第三方 SDK，要进隐私政策和 SDK 清单（见 27）。只用 Expo 的推送服务无法覆盖国内厂商通道。
+    sources: [S05]
+    see: ["27"]
+  - id: MOB-025
+    title: 推送标题和正文不含敏感业务内容，只带标识和中性提示，打开应用后再拉取详情
+    level: hard
+    check: semi
+    how: 推送载荷的 schema 校验禁止正文字段；安全测试检查锁屏显示
+    applies: [platform:mobile]
+    why: 锁屏通知谁都能看到，推送内容还要经过第三方推送服务。
+    see: ["21"]
+  # ── 监控 ──
+  - id: MOB-026
+    title: 接入崩溃上报，覆盖原生崩溃和 JS/Dart 未捕获异常；发布时上传符号表和 source map
+    level: soft
+    check: auto
+    how: 发布流水线检查符号表和 source map 已上传，并用测试崩溃验证能还原堆栈
+    applies: [platform:mobile]
+    why: 用户手机上的崩溃无法复现，没有符号化的堆栈基本看不懂。
+  - id: MOB-027
+    title: 崩溃和性能数据上传前脱敏，不含令牌、用户正文、定位原始值；私有化部署时能关闭第三方上报或改指向客户自建的服务
+    level: hard
+    check: semi
+    how: 出站流量测试或抓包检查上报内容；配置检查上报地址可配置
+    applies: [platform:mobile, kind:onprem]
+    why: 崩溃日志常常带上请求内容和用户输入；私有化客户通常不允许数据发到公网 SaaS。
+    see: ["26", "27"]
+  - id: MOB-028
+    title: 在 Release 构建上监控启动耗时、卡顿和应用无响应（ANR）、同步积压和待发队列失败率
+    level: soft
+    check: semi
+    how: 监控看板有这些指标；性能测试用 Release 包而不是 Debug 包
+    applies: [platform:mobile]
+    why: Debug 包的性能和 Release 差别很大；同步积压是离线应用特有的故障信号。
+    see: ["26"]
+  # ── 发布与热更新 ──
+  - id: MOB-029
+    title: 热更新（OTA）只更新脚本和资源；改原生代码、新增权限或原生依赖时必须发新安装包并过商店审核
+    level: hard
+    check: semi
+    how: 发布流水线比对原生部分的指纹，有变化时阻止走 OTA
+    applies: [platform:mobile]
+    why: Apple 审核指南 2.5.2 禁止下载会引入或改变功能的代码；Google Play 禁止从 Play 以外下载 dex、so 等可执行代码，只放行在虚拟机或解释器里运行的代码；把原生变更推给旧安装包还会直接崩溃。
+    sources: [S06, S07, S08]
+    see: ["29", "30"]
+  - id: MOB-030
+    title: 热更新不得改变应用的主要用途，不得绕过审核上线新的主要功能
+    level: hard
+    check: manual
+    how: 发布评审检查每次 OTA 的改动说明，涉及新功能的走安装包发版
+    applies: [platform:mobile]
+    why: 应用商店允许用解释执行的脚本修 bug 和调整内容，但用 OTA 偷换功能会导致应用下架。
+    sources: [S06, S07]
+  - id: MOB-031
+    title: 使用 EAS Update 时用 runtimeVersion 约束兼容性，原生部分变化必须改 runtimeVersion
+    level: hard
+    check: auto
+    how: 用 `runtimeVersion.policy` 设为 `fingerprint`，由工具按原生部分自动计算
+    applies: [platform:mobile]
+    why: runtimeVersion 不变而原生部分变了，更新包会下发到不兼容的安装包上导致启动崩溃。
+    sources: [S08]
+  - id: MOB-032
+    title: OTA 更新分批发布、可回滚，每次记录对应的安装包版本、runtimeVersion 和提交编号
+    level: soft
+    check: semi
+    how: 发布记录检查这三项；演练过一次回滚
+    applies: [platform:mobile]
+    why: OTA 一推就是全部在线用户，出问题时要能快速定位和撤回。
+    see: ["03"]
+  - id: MOB-033
+    title: 不使用 App Center CodePush 托管服务
+    level: hard
+    check: auto
+    how: 依赖扫描 `react-native-code-push` 及指向 App Center 的配置
+    applies: [platform:mobile]
+    why: Microsoft App Center 已于 2025-03-31 停服，托管的 CodePush 随之关闭，客户端收不到更新。
+    sources: [S09]
+  - id: MOB-034
+    title: 服务端删除接口或改变语义前，按仍在使用的客户端版本做兼容计划，并预留强制升级通道
+    level: hard
+    check: semi
+    how: CI 用 OpenAPI 比对工具发现破坏性变化，要求 PR 附兼容计划；客户端有最低版本检查
+    applies: [platform:mobile, kind:service]
+    why: 已安装的客户端不会同时升级，服务端一改旧版本就坏；没有强制升级通道就只能等用户自己更新。
+    detail: 支持多少个旧版本由产品和客户约定；能力按接口协商，不按 User-Agent 猜测。接口版本策略见 16。
+    see: ["16"]
+  - id: MOB-035
+    title: 要求完全断网构建时，在隔离环境里从干净状态完成依赖恢复、编译、签名和安装验证
+    level: hard
+    check: auto
+    how: 在无公网的 CI runner 上执行完整构建并安装到测试设备
+    applies: [platform:mobile, kind:onprem]
+    why: 「业务接口走内网」不等于构建能离线；`eas build --local` 仍要校验 Expo 账户，Gradle、CocoaPods、npm 都会联网下载。
+    sources: [S10]
+    see: ["26"]
+  # ── 测试 ──
+  - id: MOB-036
+    title: 发布前在真机上用 Release 构建跑关键流程 E2E，包括断网、弱网、应用被杀后恢复和旧数据升级
+    level: hard
+    check: semi
+    how: 发布检查表要求附真机测试报告（机型、系统版本、构建号）
+    applies: [platform:mobile]
+    why: Debug 包和模拟器不代表正式包：代码压缩、签名、厂商系统的权限和后台管理只在 Release 真机上出现。
+    see: ["04"]
+  - id: MOB-037
+    title: E2E 用可访问性标识或测试 ID 定位元素，不靠屏幕坐标和截图比对代替断言
+    level: soft
+    check: semi
+    how: 评审 E2E 脚本：查找坐标点击和只截图不断言的步骤
+    applies: [platform:mobile]
+    why: 坐标随机型和字体大小变化，截图对比不能说明功能对不对；可访问性标识还能同时服务读屏。
+    see: ["04", "09"]
+  - id: MOB-038
+    title: 核心流程在系统最大字体和读屏（TalkBack、VoiceOver）下真机验证
+    level: soft
+    check: manual
+    how: 发布前的无障碍检查记录
+    applies: [platform:mobile]
+    why: 跨平台框架的控件不一定正确映射到系统无障碍接口，只有真机读屏能发现。
+    detail: 通用要求见 09，平台接口见 29、30。
+    see: ["09", "29", "30"]
+  # ── 权限与隐私 ──
+  - id: MOB-039
+    title: 系统权限在用到对应功能时再请求，请求前说明用途；被拒绝后功能降级，不退出、不反复弹窗
+    level: hard
+    check: manual
+    how: 评审首次启动流程和每个权限的请求时机；E2E 覆盖拒绝权限后的路径
+    applies: [platform:mobile]
+    why: 启动时一次要全部权限，用户多半全部拒绝；Apple 审核指南要求尊重用户的权限设置，不得诱导或强迫授权。
+    sources: [S06]
+    see: ["27"]
+  - id: MOB-040
+    title: 只申请功能必需的权限；用户同意隐私政策前，不初始化会采集数据的第三方 SDK
+    level: hard
+    check: semi
+    how: 构建产物的权限清单与需求比对；启动阶段抓包，检查同意前没有第三方上报
+    applies: [platform:mobile]
+    why: 多余权限和同意前的采集是应用商店和监管检查的常见问题，具体法规要求见 27。
+    detail: 设备标识、剪贴板、定位、通讯录等敏感接口，使用前核对必要性；日志不记录定位原始值。
+    see: ["27"]
+choices:
+  - category: 双端业务 App 框架
+    pick: React Native + Expo
+    when: TypeScript / React 团队，表单、审批、内容类应用
+    alternatives:
+      - { name: Flutter, when: 重视觉、要各端渲染一致，或团队熟悉 Dart }
+      - { name: Kotlin Multiplatform + 原生 UI, when: 只想共享业务逻辑，界面保持各平台原生 }
+      - { name: 双原生（Kotlin + Swift）, when: 系统集成很深，或后台、硬件能力是核心 }
+      - { name: React Native CLI（不用 Expo）, when: 有大量自有原生工程，且不需要 Expo 的工具链 }
+    avoid:
+      - { name: 纯 WebView 包壳, why: 系统能力有限，体验和审核都容易出问题 }
+    license: React Native、Expo、Flutter 的框架主体为宽松许可（MIT / BSD-3-Clause）；插件逐个核查
+    notes: React Native 只剩新架构；Expo 本地构建仍需 Expo 账户校验，完全断网要单独验证。
+    sources: [S01, S02, S10]
+  - category: 共享业务逻辑
+    pick: Kotlin Multiplatform
+    alternatives:
+      - { name: Compose Multiplatform（共享 UI）, when: 能接受 iOS 上非原生控件观感，想同时共享界面；iOS 支持已稳定 }
+      - { name: TypeScript 工作区包, when: Web 和 React Native 共享纯逻辑 }
+    avoid:
+      - { name: 在共享模块里直接调用平台对象或厂商 SDK, why: 共享层被平台绑死，无法测试 }
+    license: Apache-2.0
+    sources: [S11, S12]
+  - category: 轻量入口
+    pick: PWA
+    when: 已有 Web 应用，只要轻量的移动入口
+    alternatives:
+      - { name: Capacitor, when: 已有 Web 代码，但需要上架或调用少量原生能力 }
+      - { name: 微信小程序官方框架, when: 只做微信渠道 }
+      - { name: Taro / uni-app, when: 多个小程序渠道且要复用 TypeScript 代码，先做验证 }
+    avoid:
+      - { name: 用 PWA 承担强后台、可靠推送或深度硬件功能, why: 浏览器限制多，iOS 上尤其明显 }
+  - category: React Native 导航与状态
+    pick: Expo Router；服务端数据用 TanStack Query；界面局部状态用 Zustand
+    alternatives:
+      - { name: React Navigation, when: 不用 Expo 或需要它特有的配置方式 }
+    avoid:
+      - { name: 自制路由, why: 深链、状态恢复、返回手势都要重做 }
+      - { name: 把请求缓存当主数据源, why: 离线写入和进程重启时会丢 }
+  - category: Flutter 导航与状态
+    pick: go_router + Riverpod
+  - category: 本地数据库
+    pick: SQLite（React Native 用 expo-sqlite；Flutter 用 drift；KMP 用 SQLDelight 或 Room）
+    alternatives:
+      - { name: MMKV 等键值库, when: 只存少量配置 }
+    avoid:
+      - { name: AsyncStorage 存业务数据, why: 没有事务、索引和迁移 }
+    license: SQLite 为公有领域；外围库另核
+  - category: 凭据存储
+    pick: 系统安全存储的封装（expo-secure-store、flutter_secure_storage）
+    avoid:
+      - { name: 明文文件、键值存储、代码常量, why: 可被读取和反编译 }
+  - category: 移动端 E2E
+    pick: Maestro
+    when: 跨 React Native、Flutter、原生的黑盒 E2E，用 YAML 写流程，能本地运行
+    alternatives:
+      - { name: Detox, when: React Native 项目要灰盒同步（自动等待应用空闲） }
+      - { name: Patrol, when: Flutter 项目要在测试里操作系统弹窗和权限 }
+      - { name: Appium, when: 要用多种编程语言写测试、已有 WebDriver 基建或接真机云 }
+    avoid:
+      - { name: 只截图不断言, why: 不能说明功能是否正确 }
+      - { name: 把含客户数据的包传到公有真机云, why: 数据出境和泄露风险 }
+    license: Maestro 为 Apache-2.0（Maestro Cloud 是另行收费的服务）；Detox、Patrol、Appium 的许可证待核
+    sources: [S13]
+  - category: 推送客户端
+    pick: iOS 用 APNs；海外 Android 用 FCM；中国大陆 Android 接各厂商通道；鸿蒙用 Push Kit
+    alternatives:
+      - { name: 聚合推送 SDK（如极光、个推）, when: 厂商通道多、团队不想逐个适配；要做 SDK 合规评估 }
+      - { name: 前台长连接 + 增量拉取 + 应用内待办, when: 内网私有化、连不到公共推送网络 }
+    avoid:
+      - { name: 只靠 Expo 推送服务覆盖国内设备, why: 不包含国内厂商通道 }
+    notes: expo-notifications 可以直接取得 APNs / FCM 设备令牌，不必经过 Expo 推送服务。
+    sources: [S05]
+  - category: 热更新（React Native）
+    pick: EAS Update（runtimeVersion 用 fingerprint 策略）
+    alternatives:
+      - { name: 自托管兼容 expo-updates 协议的更新服务, when: 私有化或不能用 Expo 云服务 }
+    avoid:
+      - { name: App Center CodePush, why: 2025-03-31 已停服 }
+      - { name: 用 OTA 改原生能力, why: 违反商店政策，且会让旧安装包崩溃 }
+    sources: [S08, S09]
+  - category: 崩溃与性能监控
+    pick: Sentry SDK
+    alternatives:
+      - { name: Sentry 自托管, when: 数据不能出客户网络；注意服务端许可证 }
+      - { name: Firebase Crashlytics, when: 只面向有 Google 服务的海外用户 }
+      - { name: 本地崩溃转储 + 企业自有收集器, when: 完全断网或规模很小 }
+    avoid:
+      - { name: 私有化项目默认上传到公有 SaaS, why: 客户数据出网 }
+    license: Sentry 客户端 SDK 为 MIT；自托管服务端为 FSL，不是 OSI 认可的开源许可
+    sources: [S14]
+antipatterns:
+  - { bad: 只加一个请求缓存插件就叫离线优先, instead: 本地库 + 持久化待发队列 + 幂等键 + 冲突策略 + 删除同步 }
+  - { bad: 用定时器保证每 5 分钟后台同步, instead: 以进入前台、网络恢复、用户操作为同步时机 }
+  - { bad: 一个公共推送 SDK 解决所有中国 Android 设备, instead: 按厂商通道在真机上逐个验证 }
+  - { bad: 跨平台插件跑不通就用 WebView 绕过, instead: 先验证原生能力和权限边界，必要时写原生模块 }
+  - { bad: 把 `eas build --local` 当成完全离线构建, instead: 在无公网环境从干净状态实测完整构建 }
+  - { bad: 强制 Web 和移动端共用 UI 组件, instead: 共享语义和设计令牌，交互遵循各平台习惯 }
+  - { bad: 默认开启证书固定，只固定一张证书, instead: 默认不开；要开就固定多个公钥并准备轮换方案 }
+  - { bad: 用 OTA 上线新功能或改原生能力, instead: 原生变更发新安装包，OTA 只修脚本和资源 }
+  - { bad: 应用启动时一次请求所有权限, instead: 用到时再请求，先说明用途 }
+  - { bad: 只用模拟器验证兼容性, instead: 关键流程在真机 Release 包上测，覆盖主要厂商机型 }
+  - { bad: 自己实现 OAuth 登录、令牌存储、扫码, instead: 用 AppAuth、系统安全存储和维护良好的框架模块 }
+sources:
+  - { id: S01, title: "Expo: React Native's New Architecture", url: "https://docs.expo.dev/guides/new-architecture/", publisher: Expo, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Expo SDK 55 changelog", url: "https://expo.dev/changelog/sdk-55", publisher: Expo, date: 2026-02-25, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "RFC 8252: OAuth 2.0 for Native Apps", url: "https://datatracker.ietf.org/doc/html/rfc8252", publisher: IETF, date: 2017-10, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: "Build an offline-first app", url: "https://developer.android.com/topic/architecture/data-layer/offline-first", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "Expo: Send notifications with FCM and APNs", url: "https://docs.expo.dev/push-notifications/sending-notifications-custom/", publisher: Expo, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "App Review Guidelines", url: "https://developer.apple.com/app-store/review/guidelines/", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Google Play: Device and Network Abuse", url: "https://support.google.com/googleplay/android-developer/answer/9888379", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "Expo: Runtime versions and updates", url: "https://docs.expo.dev/eas-update/runtime-versions/", publisher: Expo, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "How to replace App Center and CodePush", url: "https://expo.dev/blog/how-to-replace-app-center-and-codepush", publisher: Expo, date: null, kind: case, checked: 2026-11-14 }
+  - { id: S10, title: "Expo: Run EAS Build locally", url: "https://docs.expo.dev/build-reference/local-builds/", publisher: Expo, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "Kotlin Multiplatform", url: "https://developer.android.com/kotlin/multiplatform", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "Compose Multiplatform 1.8.0 Released: Compose Multiplatform for iOS Is Stable and Production-Ready", url: "https://blog.jetbrains.com/kotlin/2025/05/compose-multiplatform-1-8-0-released-compose-multiplatform-for-ios-is-stable-and-production-ready/", publisher: JetBrains, date: 2025-05, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "Maestro", url: "https://github.com/mobile-dev-inc/maestro", publisher: mobile.dev, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "Sentry self-hosted LICENSE", url: "https://github.com/getsentry/self-hosted/blob/master/LICENSE.md", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - Expo 当前最新 SDK 与对应 React Native 版本（原报告称 SDK 58 / RN 0.88，本次只核实到 SDK 55 起强制新架构、RN 0.82 起移除旧架构）
+  - Flutter 当前稳定版及渲染引擎现状（原报告称 3.50 / Dart 3.14，未核实）
+  - Apple 开发者协议 3.3.1(B) 关于解释执行代码的现行原文（本次只核实审核指南 2.5.2 的大意）
+  - Flutter 热更新方案（如 Shorebird）在应用商店政策下的适用边界
+  - EAS Update 自托管的官方支持范围；自托管 CodePush 服务端仓库是否已归档
+  - Detox、Patrol、Appium 的许可证与维护状态（以官方仓库 LICENSE 为准）
+  - Sentry 自托管 FSL 许可的现行条款（沿用原报告，未重新核实）
+  - 鸿蒙开发套件的版本命名与稳定基线（原报告称 26.0.1 Beta1，命名方式存疑）
+  - 待补调研：统一推送联盟的现状和各厂商支持情况
+  - 待补调研：国内崩溃与性能监控方案（含可私有化的），国内应用市场（华为、小米、OPPO、vivo）上架材料
+  - 待补调研：应用内统计埋点 SDK 选型（与 22 协调）
+  - 待补调研：小程序（Taro、uni-app）和鸿蒙的工程模板与维护状态
