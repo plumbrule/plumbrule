@@ -1,0 +1,546 @@
+id: "31"
+slug: desktop
+title: 桌面应用
+summary: 做 Windows、macOS、Linux 桌面应用时怎么选框架、怎么守住渲染层和系统之间的安全边界、怎么签名公证、打包、自动更新、上报崩溃，以及怎么在真机上验收。
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - 桌面框架选型（Electron、Tauri、Wails、Flutter 桌面、Compose Multiplatform、Qt 等）
+    - 渲染层与系统之间的进程隔离和权限配置
+    - 代码签名、macOS 公证、Windows 签名
+    - 安装包格式与分发渠道、自动更新
+    - 本地凭据与数据存储、离线首启
+    - 托盘、通知、自启动、深链、文件关联等系统集成
+    - 崩溃上报
+    - 多平台真机验收与桌面 E2E 工具
+  excludes:
+    - { what: 本机 HTTP 服务的防护（只监听回环地址、令牌鉴权、校验 Host/Origin）, see: "32" }
+    - { what: 本机后台进程的沙箱、进程回收与服务化, see: "32" }
+    - { what: 对比度、键盘可达、读屏、国际化行为, see: "09" }
+    - { what: 测试分层、覆盖率、验收证据的通用口径, see: "04" }
+    - { what: 锁文件、SBOM、依赖扫描、签名密钥管理等供应链通用规则, see: "25" }
+    - { what: 开源许可证义务的通用口径、崩溃数据出境, see: "27" }
+    - { what: 登录流程与令牌生命周期, see: "19" }
+    - { what: Rust、Go、TypeScript 的通用工程规范, see: "10-15" }
+    - { what: 移动端跨端策略, see: "28" }
+overview: |
+  1. **按应用类型选框架，不定唯一答案。** 要复用 Web 前端、做轻量工具，默认 Tauri；要 Chromium 渲染一致、依赖 Node 原生模块，用 Electron；Go 为主可选 Wails；已有 Flutter、Kotlin 或 C++/Qt 代码就沿用。选型写进决策记录。
+  2. **渲染层一律当低信任。** 界面只能调用命名的、带类型校验、逐方法授权的窄命令；不向界面暴露通用的 shell、文件、进程接口。
+  3. **Electron 的安全开关默认全开。** contextIsolation、sandbox、webSecurity 打开，nodeIntegration 关闭；preload 只用 contextBridge 暴露命名方法；IPC 校验发送方和参数；拦截导航和新窗口。主版本保持在官方支持的最新三个之内。
+  4. **Tauri 按窗口给最小权限。** capability 绑定到具体窗口，不开通用命令执行；权限文件的改动要评审。
+  5. **系统签名和更新包签名是两层信任。** macOS 非商店分发要 Developer ID 签名、Hardened Runtime、公证并附票；Windows 公开发布要 Authenticode 签名加时间戳。更新器自己的签名代替不了这些。
+  6. **每个安装渠道只有一个更新负责方。** 企业 IT、系统包管理器、应用内更新器三选一；用成熟更新器，不自己写。
+  7. **离线要提前想清楚。** 首次启动不依赖 CDN、远程字体；Windows 离线目标要带 WebView2 离线安装包或由 IT 预装。
+  8. **凭据只放系统凭据库，崩溃数据未经同意不出网。**
+  9. **真机说了算。** 每个声明支持的「系统 × CPU × 安装格式」都要真机装一遍；网页测试通过不算桌面通过。国产系统只认客户同款真机。
+  10. **本机 HTTP 服务的防护见 32**，对比度和键盘可达见 09，本主题只引用。
+rules:
+  # ── 选型与版本 ──
+  - id: DSK-001
+    title: 写明支持矩阵：每个目标的操作系统和版本、CPU 架构、窗口系统（Linux）、安装格式和分发渠道；CI 构建矩阵与之一致
+    level: soft
+    check: semi
+    how: 仓库里有一份结构化的支持矩阵文件；CI 脚本比对矩阵和构建任务，缺项时报错
+    applies: [platform:desktop]
+    why: 「支持 Linux」「支持 Windows」不是一个布尔值；不列清楚，就没法决定构建目标、测试机器和安装格式。
+    detail: |
+      - Linux 要写到发行版和版本、glibc 和 WebKitGTK 的基线、X11 还是 Wayland。
+      - 系统已停止支持的版本（如已结束支持的 Windows 版本）若仍要支持，写明理由和风险。
+    sources: [S14]
+  - id: DSK-002
+    title: 框架选型写进决策记录，列出至少一个备选、取舍理由和推翻条件；不在规范层规定「一律用某个框架」
+    level: soft
+    check: manual
+    how: 评审决策记录是否包含候选、取舍、推翻条件；有条件时附同场景小样的安装包大小、内存和启动时间对比
+    applies: [platform:desktop]
+    why: 包体积、内存这类宣传数字受是否打包运行时影响很大，不在自己的场景里比一次，选型就是凭印象。
+    see: ["01"]
+  - id: DSK-003
+    title: 使用 Qt 开源版时，按 LGPLv3 履行义务：动态链接、允许用户替换并重新链接 Qt 库、随附许可证文本和源码获取方式，且不使用仅 GPL 授权的模块；做不到就购买商业许可
+    level: hard
+    check: manual
+    how: 发布前由负责人核对：链接方式、所用 Qt 模块的许可证、随包的许可证声明和源码获取说明；拿不准的交法务确认
+    applies: [platform:desktop]
+    why: Qt 采用商业和开源双许可，部分模块只有 GPL；不满足 LGPL 要求时不能分发，锁死设备或静态链接也可能违约。
+    detail: |
+      - 静态链接可能使应用本身受 LGPL 约束；Qt 官方建议动态链接。
+      - LGPLv3 要求提供足够的安装信息，让用户能运行重新链接后的程序，封闭设备基本做不到。
+      - 部分应用商店条款可能与 LGPL 冲突，上架前核对。
+    sources: [S27]
+    see: ["27"]
+  - id: DSK-004
+    title: 正式发布构建不使用 alpha、beta、nightly 版的框架、打包工具和更新器
+    level: soft
+    check: auto
+    how: CI 检查锁文件里这些依赖的版本号不含预发布标记
+    applies: [platform:desktop]
+    why: 预发布版的接口、权限默认值和签名格式还会变，出了安全问题也不一定有补丁。
+    detail: 需要试用新特性时，放在单独的预发布渠道，不混进正式渠道。
+    see: ["25"]
+  - id: DSK-005
+    title: Electron 应用使用官方仍在支持的主版本（最新的三个稳定主版本之一），并跟随安全补丁升级
+    level: hard
+    check: auto
+    how: CI 或定时任务比对项目的 Electron 主版本和官方发布时间表，超出支持范围时报错
+    applies: [platform:desktop]
+    why: Electron 每 8 周发布一个主版本，只给最新三个稳定主版本修安全问题；落后的版本带着已公开的 Chromium 漏洞。
+    ref_value: 「最新三个稳定主版本」「每 8 周一个主版本」来自 Electron 官方发布时间表。
+    sources: [S02]
+    see: ["25"]
+  # ── 渲染层与系统之间的边界 ──
+  - id: DSK-006
+    title: 界面只通过命名的、带类型和参数校验、逐方法授权的窄命令调用系统能力；不向界面暴露通用的执行命令、读写任意文件、结束任意进程的接口
+    level: hard
+    check: semi
+    how: 列出桥接层暴露的全部命令并评审；用 lint 或架构检查禁止在桥接层出现通用执行、任意路径、按进程号操作的接口；为每个命令写拒绝用例
+    applies: [platform:desktop]
+    why: 渲染层一旦被跨站脚本或恶意内容控制，桥接层暴露什么，攻击者就拿到什么。
+    detail: |
+      - 命令按业务语义设计（如「启动任务 123」），由宿主层查到对应资源再操作，不接受界面传来的命令行、绝对路径或进程号。
+      - 每个命令有请求和返回的结构定义、错误码；改变状态的命令记录调用者、时间和结果，不记录明文密钥。
+    sources: [S01, S09]
+  - id: DSK-007
+    title: Electron 的所有窗口必须保持 contextIsolation、sandbox、webSecurity 打开，nodeIntegration 关闭
+    level: hard
+    check: auto
+    how: lint 或静态扫描检查所有 BrowserWindow / webPreferences 配置；启动时断言这些选项的实际值
+    applies: [platform:desktop]
+    why: 这几个开关是 Electron 官方安全清单的基础项；关掉任何一个，渲染层的脚本漏洞就可能变成本机代码执行。
+    sources: [S01]
+  - id: DSK-008
+    title: Electron 的 preload 只用 contextBridge 暴露命名的具体方法，不把 ipcRenderer、require 或整个模块暴露给页面
+    level: hard
+    check: auto
+    how: 静态扫描 preload 文件，发现暴露 ipcRenderer、require 或透传任意通道名的写法时报错
+    applies: [platform:desktop]
+    why: 整个 ipcRenderer 暴露出去，页面就能向任意通道发消息，白名单形同虚设，而且以后只会越开越大。
+    sources: [S01]
+  - id: DSK-009
+    title: Electron 主进程的每个 IPC 处理函数都校验消息发送方和入参结构
+    level: hard
+    check: semi
+    how: 处理函数集中注册，单元测试覆盖「来自非预期来源」和「参数不合法」两类反例
+    applies: [platform:desktop]
+    why: 任何能加载进来的页面或子框架都可能发 IPC 消息，不校验发送方就等于对所有来源开放。
+    detail: 处理函数在应用启动时注册一次，不要写在创建窗口的函数里，否则开第二个窗口会重复注册。
+    sources: [S01]
+  - id: DSK-010
+    title: 拦截不受控的页面跳转和新窗口；打开外部链接只放行白名单协议，不把用户输入直接交给 shell.openExternal 一类接口
+    level: hard
+    check: semi
+    how: 测试覆盖跳转到非预期地址、window.open、`file:` 协议和自定义协议链接等情况；静态扫描 openExternal 的调用点
+    applies: [platform:desktop]
+    why: 能被诱导跳到外部页面的窗口会把原生能力交给外部页面；openExternal 传入恶意地址可能直接执行本机程序。
+    sources: [S01]
+  - id: DSK-011
+    title: 生产版设置经过评审的内容安全策略（CSP），不加载远程脚本、不使用 eval
+    level: hard
+    check: auto
+    how: 静态检查页面和打包配置中的 CSP；启动后的冒烟测试读取实际生效的 CSP
+    applies: [platform:desktop]
+    why: CSP 是阻止注入脚本执行的最后一道防线；远程脚本一旦被篡改，就以应用的身份运行。
+    sources: [S01]
+  - id: DSK-012
+    title: 不可信的远程网页、第三方插件内容、HTML 预览不放进有原生桥的窗口；需要展示时用不带桥的隔离视图或交给系统浏览器
+    level: hard
+    check: manual
+    how: 评审时列出每个窗口和视图加载的内容来源，核对加载远程内容的视图没有 preload 或 capability
+    applies: [platform:desktop]
+    why: 远程内容一旦出现脚本注入，就能直接调用本机能力。
+    sources: [S01, S09]
+  - id: DSK-013
+    title: Tauri 的 capability 必须绑定到具体窗口，只授予该窗口用到的权限；不授予通用的命令执行权限
+    level: hard
+    check: auto
+    how: CI 解析 capabilities 目录，检查每个 capability 指定了窗口，且不含禁用清单里的权限（如 shell 插件的通用执行权限）；权限文件变化时要求安全评审
+    applies: [platform:desktop]
+    why: 同一窗口命中的多个 capability 权限会合并，一个宽泛的配置就会让所有窗口获得高危能力。
+    detail: 需要调用外部程序时，用 sidecar 或 shell 插件的作用域限定程序名和参数，不开放任意命令。
+    sources: [S09, S10]
+  - id: DSK-014
+    title: 改动 preload、主进程窗口配置、Tauri capability、深链处理、凭据存储、更新器和签名脚本时，必须经安全负责人评审
+    level: soft
+    check: auto
+    how: 把这些路径写进 CODEOWNERS，分支保护要求负责人批准
+    applies: [platform:desktop]
+    why: 这些文件决定安全边界，功能测试全绿也看不出权限被放宽了。
+    see: ["03", "23"]
+  - id: DSK-015
+    title: 界面和本机后台之间优先用框架自带的进程间通信；确需开本机 HTTP 端口时，遵守 32 的本机服务防护规则
+    level: soft
+    check: semi
+    how: 评审时检查是否新开了监听端口；开了的按 RUN-038、RUN-039、RUN-040 逐项核对
+    applies: [platform:desktop]
+    why: 多开一个端口就多一个能被网页和同机其他程序访问的入口。
+    see: ["RUN-038", "RUN-039", "RUN-040"]
+  # ── 凭据与本地数据 ──
+  - id: DSK-016
+    title: 令牌和密码只存系统凭据库（macOS 钥匙串、Windows 凭据管理器或 DPAPI、Linux Secret Service），不放 localStorage、明文配置文件或日志
+    level: hard
+    check: semi
+    how: 密钥扫描覆盖仓库和构建日志；测试登录后检查应用数据目录和浏览器存储里没有明文令牌
+    applies: [platform:desktop]
+    why: 明文文件和浏览器存储会被备份、同步、被其他程序读走，泄露后也难以察觉。
+    detail: 系统凭据库挡不住同一用户权限下运行的恶意程序，仍要配合短期令牌和服务端撤销。
+    sources: [S05]
+    see: ["19"]
+  - id: DSK-017
+    title: Linux 上没有可用的安全凭据后端时（如 Electron safeStorage 退化为 basic_text），不保存敏感令牌，提示用户配置凭据服务或改为每次登录
+    level: hard
+    check: auto
+    how: 启动时读取实际使用的存储后端并在退化时走专门分支；在 GNOME、KDE、无钥匙环三种环境下测试
+    applies: [platform:desktop]
+    why: basic_text 的「加密」用的是固定口令，实际上等于明文。
+    sources: [S05]
+  - id: DSK-018
+    title: 用户数据写入系统规定的用户数据目录，不写安装目录；有本地数据库的，每次升级用旧版本数据测试迁移
+    level: soft
+    check: semi
+    how: 测试在只读安装目录、普通用户权限下运行；发布前用上一版的数据样本跑升级
+    applies: [platform:desktop]
+    why: 安装目录在升级和卸载时会被替换，普通用户往往也没有写权限；迁移失败会让用户打不开应用。
+    see: ["17"]
+  # ── 系统集成 ──
+  - id: DSK-019
+    title: 深链只认固定的协议名，参数按结构严格校验，只映射到预先定义的动作；不执行链接里的命令，不直接打开链接里的文件路径
+    level: hard
+    check: semi
+    how: 对深链解析函数做模糊测试；测试应用已在运行时深链能交给已有实例处理（单实例）
+    applies: [platform:desktop]
+    why: 深链能被任何网页或文档触发，是来自外部的不可信输入。
+    sources: [S15]
+  - id: DSK-020
+    title: 托盘、通知、自启动、文件关联用框架官方接口或插件实现；自启动默认关闭，用户和企业策略都能关掉
+    level: soft
+    check: semi
+    how: 依赖评审确认使用官方插件；测试设置页开关后读取系统里的实际状态
+    applies: [platform:desktop]
+    why: 这些功能的系统差异和生命周期边界很多，自己造容易出错；暗中自启动会引起用户和企业 IT 的反感。
+    detail: 明确「关闭窗口」是退出还是缩到托盘，并在第一次缩到托盘时提示用户。
+    sources: [S06, S15]
+  # ── 离线 ──
+  - id: DSK-021
+    title: 要求离线可用时，首次启动不依赖开发服务器、CDN、远程字体或远程配置，所有关键资源随包打包
+    level: hard
+    check: semi
+    how: 在断网的干净虚拟机里安装并首启，同时记录 DNS 和网络请求；静态扫描打包产物里的外部地址
+    applies: [platform:desktop, kind:onprem]
+    why: 内网或断网环境下，一个远程字体或脚本加载失败就可能白屏。
+  - id: DSK-022
+    title: 使用系统 WebView 的应用（Tauri、Wails）面向不能联网的 Windows 环境时，安装包内置 WebView2 离线安装包或固定版本运行时，或由 IT 预装并验证
+    level: hard
+    check: semi
+    how: 检查打包配置中 WebView2 的安装方式；在断网的 Windows 虚拟机上首装首启
+    applies: [platform:desktop, kind:onprem]
+    why: 默认的下载引导方式和内嵌引导程序在安装时都要联网下载运行时，断网就装不上。
+    ref_value: Tauri 官方给出的量级：离线安装包约增加 127 MB，固定版本运行时约增加 180 MB。
+    sources: [S12]
+  - id: DSK-023
+    title: 要求在内网构建时，提前准备 npm、Cargo、Go 等依赖镜像、框架二进制下载镜像和离线安装物料，并在无外网环境里完整构建一次
+    level: soft
+    check: semi
+    how: 在断网的构建机上从干净状态完成依赖恢复、构建、签名和打包
+    applies: [platform:desktop, kind:onprem]
+    why: Electron 等框架在安装时会额外下载二进制，没有镜像就构建不起来。
+    sources: [S08]
+    see: ["25", "26"]
+  # ── 签名与公证 ──
+  - id: DSK-024
+    title: 在 Mac App Store 之外分发的 macOS 应用和安装包，必须用 Developer ID 证书签名、开启 Hardened Runtime、用 notarytool 公证并附上公证票据
+    level: hard
+    check: auto
+    how: 发布任务里运行 `codesign --verify --deep --strict`、`spctl -a -vv`、`xcrun stapler validate`，任一失败即阻断发布
+    applies: [platform:desktop]
+    why: 用 Developer ID 分发的软件必须公证，否则 Gatekeeper 会拦截；附票后离线机器也能验证。
+    detail: |
+      - .app 用 Developer ID Application 证书，.pkg 用 Developer ID Installer 证书；签名带安全时间戳。
+      - 应用包里的子程序、动态库、sidecar 都要签名。
+      - Apple 自 2023-11-01 起不再接受 altool 提交公证。
+      - 公证要联网，完全断网的客户可以接收在联网流水线里签好、公证好、附好票的成品。
+      - Electron 应用在 macOS 上要自动更新，必须先签名。
+    sources: [S18, S03]
+  - id: DSK-025
+    title: 面向公众分发的 Windows 安装包和可执行文件，必须用公共信任的证书做 Authenticode 签名并加时间戳；企业内部用私有证书时，要有 IT 已下发根证书的证明
+    level: hard
+    check: auto
+    how: 发布任务用 signtool verify 或 Get-AuthenticodeSignature 检查每个可执行文件和安装包的签名状态与时间戳
+    applies: [platform:desktop]
+    why: 未签名的程序会被 SmartScreen 拦截并显示警告；没有时间戳的签名在证书过期后就失效了。
+    detail: 扩展验证（EV）证书已不再自动免除 SmartScreen 提示，新签名的应用仍需积累信誉。
+    sources: [S19, S20]
+  - id: DSK-026
+    title: 签名证书和私钥放在硬件安全模块或云签名服务里，只在受保护的发布任务中使用，不放进仓库、普通文件或开发者电脑
+    level: soft
+    check: semi
+    how: 密钥扫描覆盖仓库；评审发布流水线，确认签名步骤只在受保护分支和环境里运行
+    applies: [platform:desktop]
+    why: 签名私钥泄露后，攻击者可以用你的身份发布恶意软件。
+    sources: [S21]
+    see: ["25"]
+  - id: DSK-027
+    title: Linux 的 deb、rpm 通过签名的软件仓库分发；AppImage 等独立文件同时提供校验和与签名，并说明验证方法
+    level: soft
+    check: semi
+    how: 发布任务检查仓库元数据签名和校验和文件存在；安装测试从仓库安装
+    applies: [platform:desktop]
+    why: 没有签名的包无法证明没被替换；AppImage 本身不会自动验证签名。
+  # ── 安装包与分发 ──
+  - id: DSK-028
+    title: 面向企业统一部署的安装包，必须支持静默安装、升级和卸载，退出码可靠
+    level: hard
+    check: semi
+    how: 在虚拟机里用静默参数安装、升级、卸载，检查退出码和检测规则
+    applies: [platform:desktop]
+    why: Intune 这类部署工具要求 Win32 应用能静默安装，需要用户点击的安装器无法批量部署。
+    detail: 写清是按用户安装还是按机器安装、安装路径、是否需要管理员权限和重启。
+    sources: [S23, S24]
+  - id: DSK-029
+    title: Linux 版在支持的最老发行版上构建，或在每个目标发行版上分别构建；不把一个 AppImage 当作支持所有 Linux
+    level: soft
+    check: semi
+    how: CI 构建环境与支持矩阵里最老的发行版一致；每个目标发行版真机启动一次
+    applies: [platform:desktop]
+    why: 在新系统上构建的程序会依赖新版 glibc，在老系统上直接起不来；AppImage 仍依赖宿主的 glibc、FUSE、WebKitGTK。
+    sources: [S13, S32]
+  - id: DSK-030
+    title: Flatpak 应用通过 portal 访问文件和系统能力，不常开主机文件系统等宽泛权限
+    level: soft
+    check: auto
+    how: CI 检查 Flatpak 清单里的 finish-args，出现宽泛文件系统权限时要求写明理由
+    applies: [platform:desktop]
+    why: 宽泛权限破坏沙箱隔离，也可能不符合分发平台的审核要求。
+    sources: [S25]
+  # ── 自动更新 ──
+  - id: DSK-031
+    title: 每个安装渠道只指定一个更新负责方（企业 IT、系统包管理器或应用内更新器）；企业部署的 MSI、MSIX、PKG、deb、rpm 默认由 IT 管控，关闭应用内更新
+    level: hard
+    check: manual
+    how: 发布配置里为每个渠道写明更新负责方；评审时核对企业包已关闭应用内更新
+    applies: [platform:desktop]
+    why: 应用自更新和 IT 部署同时改同一份安装，会互相覆盖、版本错乱，还绕过了企业的变更流程。
+    sources: [S03]
+  - id: DSK-032
+    title: 自动更新用成熟的更新器，不自己写；更新包必须签名，安装前验证签名、版本和目标架构
+    level: hard
+    check: semi
+    how: 评审更新器选型；测试被篡改的更新包、错误架构的包会被拒绝
+    applies: [platform:desktop]
+    why: 签名校验、断电恢复、文件占用、回退都很难做对；更新通道一旦能被篡改，就能把恶意程序推到所有用户机器上。
+    detail: |
+      - Tauri 的更新插件强制校验更新签名，不能关闭。
+      - electron-updater 在 macOS 和 Windows 上都校验代码签名，Windows 上会做 Authenticode 校验。
+      - 更新包签名和系统代码签名是两层信任，不能互相代替。
+    sources: [S11, S04]
+  - id: DSK-033
+    title: 发布前测试更新的异常情况：下载中断、更新包被篡改、降级、从上一个正式版升级后数据可用
+    level: soft
+    check: semi
+    how: 发布测试清单包含这些场景并记录结果
+    applies: [platform:desktop]
+    why: 更新失败会让用户卡在打不开的版本上，而且只有在真实升级时才会暴露。
+    see: ["04"]
+  # ── 崩溃上报 ──
+  - id: DSK-034
+    title: 接入崩溃上报，覆盖原生崩溃和主进程、渲染进程的未捕获异常；发布时保存符号文件和 source map，以便还原堆栈
+    level: soft
+    check: semi
+    how: 每次发布的产物清单里有符号文件；测试版人为触发一次崩溃，确认能看到还原后的堆栈
+    applies: [platform:desktop]
+    why: 桌面应用运行环境千差万别，没有崩溃上报，只能靠用户描述猜问题。
+    sources: [S30]
+    see: ["26"]
+  - id: DSK-035
+    title: 未经用户或企业配置同意，不向公网上传崩溃报告和使用数据；上传前脱敏，上报地址可改为客户自建的服务或关闭
+    level: hard
+    check: semi
+    how: 在未同意状态下抓包确认没有对外请求；对脱敏函数做单元测试；检查上报地址是配置项
+    applies: [platform:desktop, kind:onprem]
+    why: 崩溃转储可能含内存片段、本机路径、令牌和业务数据，未经同意外传有隐私和合规风险。
+    see: ["27", "25"]
+  # ── 测试与验收 ──
+  - id: DSK-036
+    title: 每个声明支持的「系统 × CPU 架构 × 安装格式」，发布前都在真机或对应的虚拟机上完成安装、首启、升级和卸载；不以交叉编译成功或 x64 仿真代替
+    level: soft
+    check: manual
+    how: 发布记录里按支持矩阵逐项附安装日志或截图
+    applies: [platform:desktop]
+    why: CPU 架构、系统证书、WebView 版本、原生模块的问题只有在目标机器上才会暴露。
+    detail: Windows ARM64 上，Electron 的原生模块要按 ARM64 重新编译。
+    sources: [S07]
+    see: ["04"]
+  - id: DSK-037
+    title: 测试报告分开写网页功能、桥接层、系统集成、安装发布四层结果；网页 E2E 通过不得报告为桌面集成通过
+    level: hard
+    check: semi
+    how: 测试报告模板固定四层栏目，评审时核对每层的证据
+    applies: [platform:desktop]
+    why: 浏览器里的测试测不到托盘、安装器、凭据库、系统通知和签名，混在一起报告会掩盖没测的部分。
+    sources: [S17, S16]
+    see: ["04"]
+  - id: DSK-038
+    title: 在每个目标系统上验证深色模式、系统缩放、输入法、多显示器、睡眠唤醒后恢复和断网；键盘与读屏按 09 的要求人工测试
+    level: soft
+    check: manual
+    how: 真机检查清单逐项记录；Windows 用 Accessibility Insights 辅助检查
+    applies: [platform:desktop]
+    why: 这些是桌面应用特有、自动化测试很难覆盖的高发故障点。
+    sources: [S31]
+    see: ["09"]
+  - id: DSK-039
+    title: 国产操作系统和 CPU（统信、麒麟、龙芯、飞腾、鲲鹏等）只在客户同款系统和 CPU 上真机验证通过后才宣称支持，不从「支持 Linux」推出
+    level: soft
+    check: manual
+    how: 支持矩阵里国产平台逐项标注验证状态和验证机型
+    applies: [platform:desktop, kind:onprem]
+    why: 内核、CPU 指令集、WebKitGTK 供给和桌面环境都可能不同，没测过的承诺到交付时才暴露。
+choices:
+  - category: 用 Web 技术做界面的桌面框架
+    pick: Tauri（系统 WebView + Rust 宿主）
+    when: 要复用 React 等 Web 前端代码，做轻量工具、控制台或离线客户端
+    alternatives:
+      - { name: Electron, when: 要求各平台 Chromium 渲染一致、依赖 Node 原生模块或成熟的 Electron 生态 }
+      - { name: Wails, when: 业务逻辑以 Go 为主；有不可信的子框架或远程内容时先核实其安全公告 }
+    avoid:
+      - { name: 把 WKWebView、WebKitGTK 当 Chrome 用, why: 渲染和接口有差异，要在三个系统上分别验证 }
+      - { name: 只因为「Electron 包大」就一律不用, why: 渲染一致性、Node 生态和调试成本也要算进去 }
+    license: Tauri 为 MIT 或 Apache-2.0 双许可；Electron 为 MIT
+    notes: Tauri 和 Wails 依赖系统 WebView，Windows 离线环境要带 WebView2；Linux 要核对目标发行版的 WebKitGTK。
+    sources: [S14, S12, S35]
+  - category: 不用 Web 技术的跨平台桌面界面
+    pick: 沿用团队已有的技术栈：已有 Flutter 用 Flutter 桌面，已有 Kotlin 用 Compose Multiplatform，已有 C++ 或需要嵌入式、工业场景用 Qt
+    avoid:
+      - { name: 为了复用 React 代码选 Flutter 或 Compose, why: 界面要用另一种语言重写，复用不了 }
+      - { name: 不核实许可证就用 Qt 开源版做闭源产品, why: LGPLv3 有动态链接、可重新链接等义务，部分模块只有 GPL（见 DSK-003） }
+    license: Flutter 核心为 BSD-3-Clause；Compose Multiplatform 为 Apache-2.0；Qt 为商业许可或 LGPLv3/GPL 双许可
+    sources: [S33, S34, S27]
+  - category: Electron 打包工具
+    pick: Electron Forge（Electron 官方维护）
+    alternatives:
+      - { name: electron-builder, when: 需要 electron-updater，或要一次产出 NSIS、AppImage、deb、rpm 等多种格式 }
+    avoid:
+      - { name: 两套打包工具同时用, why: 配置和产物互相冲突，排查困难 }
+  - category: Electron 自动更新
+    pick: 与打包工具配套：electron-builder 配 electron-updater；Forge 配 Electron 内建的 autoUpdater
+    avoid:
+      - { name: 自己写更新器, why: 签名校验、断电恢复和回退很难做对 }
+      - { name: 在 Linux 上指望内建 autoUpdater, why: 内建 autoUpdater 只支持 macOS 和 Windows，Linux 交给包管理器 }
+    notes: 内建 autoUpdater 在 macOS 基于 Squirrel.Mac，在 Windows 按打包方式选 MSIX 更新或 Squirrel.Windows；electron-updater 支持 dmg、NSIS、AppImage、deb、rpm 等，不支持 Squirrel.Windows。macOS 上自动更新要求应用已签名。
+    sources: [S03, S04]
+  - category: Tauri 自动更新
+    pick: Tauri 官方更新插件（强制校验更新签名）
+    sources: [S11]
+  - category: 企业设备的安装与更新
+    pick: Windows 用 MSI 或 MSIX + Intune 等管理工具；macOS 用签名公证的 PKG + MDM；Linux 用签名的 deb/rpm 私有仓库
+    avoid:
+      - { name: 需要用户点击的安装器, why: 无法静默批量部署 }
+      - { name: 应用内更新和 IT 部署同时开启, why: 互相覆盖，绕过企业变更流程 }
+    notes: Tauri 官方只产出 MSI 和 NSIS，需要 MSIX 要另做打包。
+    sources: [S23, S24]
+  - category: 个人用户下载安装
+    pick: Windows 用 NSIS；macOS 用签名公证的 DMG；Linux 用 AppImage 或发行版包
+    alternatives:
+      - { name: Flatpak, when: 希望在沙箱里运行，并通过 portal 访问系统能力 }
+      - { name: Mac App Store、Microsoft Store, when: 需要商店分发；规则待补调研 }
+    avoid:
+      - { name: 未签名的 ZIP 当安装包, why: 会被系统拦截，也无法证明来源 }
+    notes: Flatpak 单文件包不一定含运行时，离线分发要另外准备。
+    sources: [S13, S26]
+  - category: Windows 代码签名
+    pick: 云端托管的签名服务（如 Microsoft Artifact Signing，原名 Trusted Signing），符合资格时使用
+    alternatives:
+      - { name: 商业 CA 的组织验证（OV）证书，私钥放在硬件安全模块或云密钥服务, when: 所在地区或主体类型不符合托管签名服务的资格 }
+      - { name: 企业私有证书, when: 只在企业内部分发，且 IT 已向所有终端下发根证书 }
+    avoid:
+      - { name: 私钥文件放在仓库或开发者电脑上, why: 泄露后可被用来冒名签发恶意软件 }
+      - { name: 指望 EV 证书免除 SmartScreen 提示, why: EV 已不再自动免除，仍需积累信誉 }
+    notes: Artifact Signing 的公共信任证书只面向部分国家和地区的组织，个人资格范围官方未明确列出；使用前在官方文档和门户核实。
+    sources: [S21, S22, S19, S20]
+  - category: 本地凭据存储
+    pick: 系统凭据库（macOS 钥匙串、Windows 凭据管理器或 DPAPI、Linux Secret Service）；Electron 用 safeStorage
+    avoid:
+      - { name: localStorage、明文 JSON 配置, why: 易被读取和同步，泄露难察觉 }
+      - { name: 自己用硬编码口令加密, why: 口令就在程序里，等于没加密 }
+    sources: [S05]
+  - category: 崩溃上报
+    pick: 本地脱敏日志和转储 + Sentry 协议的 SDK（Electron 用 sentry-electron），上报地址可配置
+    alternatives:
+      - { name: GlitchTip 自托管, when: 私有化部署，需要轻量的错误收集服务；原生转储的支持程度先验证 }
+      - { name: Sentry 自托管, when: 需要完整功能且接受其许可证条款 }
+    avoid:
+      - { name: 默认上传到公有云服务, why: 私有化客户通常不允许，转储里可能有敏感数据 }
+    license: GlitchTip 为 MIT；Sentry 自托管仓库为 FSL-1.1-Apache-2.0，不是宽松许可证，集成或对外提供服务前按 27 评审
+    sources: [S30, S28, S29]
+  - category: 桌面 E2E 测试工具
+    pick: Electron 用 Playwright 的 Electron 支持；Tauri 用 WebdriverIO（Tauri 官方文档介绍的 WebDriver 方案）
+    alternatives:
+      - { name: Appium 或系统 UI 自动化接口（Windows UI Automation 等）, when: 要测安装器、托盘、系统对话框等框架外的界面 }
+    avoid:
+      - { name: 只跑浏览器里的网页测试, why: 测不到系统集成和安装发布 }
+    license: Playwright 为 Apache-2.0
+    notes: Playwright 的 Electron 支持仍标为实验性；托盘、安装器、无障碍要另外测。
+    sources: [S17, S16, S31]
+antipatterns:
+  - { bad: Electron 里开 nodeIntegration 或关掉 sandbox 图省事, instead: 保持安全开关全开，通过 preload 暴露命名方法 }
+  - { bad: 把整个 ipcRenderer 暴露给页面, instead: contextBridge 只暴露具体方法，主进程逐个校验 }
+  - { bad: Tauri 里全局开放命令执行权限, instead: 用 sidecar 或作用域限定程序名和参数 }
+  - { bad: 界面把进程号传给宿主让它结束进程, instead: 按业务资源编号由宿主查找并在授权后操作 }
+  - { bad: 深链 `app://run?cmd=...` 直接执行, instead: 只解析预定义动作和编号，严格校验参数 }
+  - { bad: 把更新器的签名当成系统代码签名, instead: 系统签名公证和更新包签名两层都做 }
+  - { bad: .app 签了名就当公证完成, instead: 签名后用 notarytool 公证并附票 }
+  - { bad: 把 Tauri 的内嵌引导程序当作离线 WebView2, instead: 用离线安装包或由 IT 预装 }
+  - { bad: 页面运行时从 CDN 加载字体和样式, instead: 关键静态资源全部随包打包 }
+  - { bad: 应用内更新和 Intune 同时更新同一份安装, instead: 每个渠道只指定一个更新负责方 }
+  - { bad: 崩溃转储默认全部上传到公有云, instead: 本地保存脱敏数据，经同意或按企业配置上报到指定地址 }
+  - { bad: 用 Qt 开源版静态链接后闭源分发, instead: 动态链接并履行 LGPL 义务，或购买商业许可 }
+  - { bad: 同一台 CI 机器编译成功就算各平台都支持, instead: 按支持矩阵逐项真机安装验证 }
+sources:
+  - { id: S01, title: "Electron: Security", url: "https://www.electronjs.org/docs/latest/tutorial/security", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S02, title: "Electron Releases (timelines and support policy)", url: "https://www.electronjs.org/docs/latest/tutorial/electron-timelines", publisher: Electron, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Electron: autoUpdater", url: "https://www.electronjs.org/docs/latest/api/auto-updater", publisher: Electron, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "electron-builder: Auto Update", url: "https://www.electron.build/docs/features/auto-update", publisher: electron-builder, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S05, title: "Electron: safeStorage", url: "https://www.electronjs.org/docs/latest/api/safe-storage", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "Electron: app (setLoginItemSettings)", url: "https://www.electronjs.org/docs/latest/api/app", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Electron: Windows on ARM", url: "https://www.electronjs.org/docs/latest/tutorial/windows-arm", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Electron README（下载镜像说明）", url: "https://github.com/electron/electron/blob/main/README.md", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "Tauri: Capabilities", url: "https://v2.tauri.app/security/capabilities/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "Tauri: Shell plugin", url: "https://v2.tauri.app/plugin/shell/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "Tauri: Updater plugin", url: "https://v2.tauri.app/plugin/updater/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "Tauri: Windows Installer", url: "https://v2.tauri.app/distribute/windows-installer/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "Tauri: AppImage", url: "https://v2.tauri.app/distribute/appimage/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "Tauri: Webview Versions", url: "https://tauri.app/reference/webview-versions/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "Tauri: Official plugins", url: "https://v2.tauri.app/plugin/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Tauri: WebDriver testing", url: "https://tauri.app/develop/tests/webdriver/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Playwright: Electron", url: "https://playwright.dev/docs/api/class-electron", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Apple: Notarizing macOS software before distribution", url: "https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "Microsoft: Code signing options for Windows app developers", url: "https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Microsoft: SmartScreen reputation for Windows app developers", url: "https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "What is Artifact Signing?", url: "https://learn.microsoft.com/en-us/azure/artifact-signing/overview", publisher: Microsoft, date: 2026-01-02, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: "Artifact Signing quickstart", url: "https://learn.microsoft.com/azure/artifact-signing/quickstart", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "Intune: Add and assign Win32 apps", url: "https://learn.microsoft.com/en-us/mem/intune-service/apps/apps-win32-add", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Manage MSIX deployment with Intune", url: "https://learn.microsoft.com/en-us/windows/msix/desktop/managing-your-msix-deployment-intune", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "Flatpak: Sandbox Permissions", url: "https://docs.flatpak.org/en/latest/sandbox-permissions.html", publisher: Flatpak, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "Flatpak: Single-file bundles", url: "https://docs.flatpak.org/en/latest/single-file-bundles.html", publisher: Flatpak, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Qt: Obligations of the open-source LGPL license", url: "https://www.qt.io/licensing/open-source-lgpl-obligations", publisher: The Qt Company, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "GlitchTip: Installation", url: "https://glitchtip.com/documentation/install/", publisher: GlitchTip, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: "Sentry self-hosted", url: "https://github.com/getsentry/self-hosted", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "Sentry SDK for Electron", url: "https://github.com/getsentry/sentry-electron", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: "Microsoft: Accessibility testing", url: "https://learn.microsoft.com/en-us/windows/apps/design/accessibility/accessibility-testing", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S32, title: "Tauri: RPM", url: "https://v2.tauri.app/distribute/rpm/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: "Flutter: Desktop support", url: "https://docs.flutter.dev/platform-integration/desktop", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: "Compose Multiplatform", url: "https://github.com/JetBrains/compose-multiplatform", publisher: JetBrains, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: "Tauri repository", url: "https://github.com/tauri-apps/tauri", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - Tauri 2 仍在持续发布，v3 的阶段（报告称 alpha）未核实。
+  - Wails v3 已正式发布、安全公告 GHSA-2p5f-2gx8-mh8m 只部分修复、Linux 默认改用 GTK4/WebKitGTK 6.0：报告说法，未核实。
+  - Electron safeStorage 同步接口弃用并将在后续主版本移除：报告说法，未核实；升级 Electron 主版本时查看官方文档。
+  - Artifact Signing 对个人开发者开放的国家和地区官方没有明确列出，社区说法不一；中国大陆主体能否使用未核实。
+  - EV 证书不再自动免除 SmartScreen 提示：沿用报告引用的微软文档，本次未重新核实。
+  - Tauri 用 WebdriverIO 在 macOS 上测试的具体方式（报告称原生 tauri-driver 在 macOS 上可能依赖商业方案）说法含糊，待核实。
+  - GlitchTip 对原生崩溃转储（minidump）的支持程度未核实。
+  - 待补调研：.NET 系桌面框架（MAUI、Avalonia、WinUI）的选型与许可。
+  - 待补调研：原生 SwiftUI/AppKit 桌面应用、Qt 的模块级许可证清单与商业许可条款。
+  - 待补调研：Snap 分发、Mac App Store 与 Microsoft Store 的上架规则。
+  - 待补调研：统信 UOS、麒麟等国产系统的应用商店上架、签名体系和 WebKitGTK 供给情况。
+  - 待补调研：Linux deb/rpm 签名仓库和 AppImage 签名的推荐工具。
