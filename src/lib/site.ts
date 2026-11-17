@@ -1,4 +1,4 @@
-// 网站页面共用的数据和小函数。中文在根路径，英文在 /en/。
+// 网站页面共用的数据和小函数。英文在根路径（默认），中文在 /zh/。
 import { marked } from 'marked';
 import {
   loadTopics, loadOwnership, loadVocab, topicGroups as rawTopicGroups, config,
@@ -8,10 +8,10 @@ import {
 export { config };
 export type { Topic, Rule, Lang };
 
-export const getLang = (path: string): Lang => (path === '/en' || path.startsWith('/en/') ? 'en' : 'zh');
+export const getLang = (path: string): Lang => (path === '/zh' || path.startsWith('/zh/') ? 'zh' : 'en');
 
 /** 给站内路径加上语言前缀。 */
-export const localize = (path: string, lang: Lang) => (lang === 'en' ? (path === '/' ? '/en/' : `/en${path}`) : path);
+export const localize = (path: string, lang: Lang) => (lang === 'zh' ? (path === '/' ? '/zh/' : `/zh${path}`) : path);
 
 type Site = {
   lang: Lang;
@@ -26,7 +26,7 @@ type Site = {
 
 const cache = new Map<Lang, Site>();
 
-export function getSite(lang: Lang = 'zh'): Site {
+export function getSite(lang: Lang = 'en'): Site {
   const hit = cache.get(lang);
   if (hit) return hit;
   const topics = loadTopics(lang);
@@ -56,22 +56,22 @@ export function getSite(lang: Lang = 'zh'): Site {
 export const md = (s?: string) => (s ? (marked.parse(s, { async: false }) as string) : '');
 export const mdi = (s?: string) => (s ? (marked.parseInline(s, { async: false }) as string) : '');
 
-export const topicHref = (id: string, lang: Lang = 'zh') => {
+export const topicHref = (id: string, lang: Lang = 'en') => {
   const t = getSite(lang).topicById.get(id);
   return t ? localize(`/topics/${t.slug}/`, lang) : undefined;
 };
 export const ruleAnchor = (id: string) => id.toLowerCase();
 
-export const statusName = (s: string, lang: Lang = 'zh') =>
+export const statusName = (s: string, lang: Lang = 'en') =>
   lang === 'en' ? (s === 'reviewed' ? 'Reviewed' : 'Draft') : (s === 'reviewed' ? '已复核' : '草稿');
 
-export const scopeName = (a: string, lang: Lang = 'zh') => getSite(lang).vocab['适用范围'][a] as string;
-export const levelName = (l: string, lang: Lang = 'zh') => getSite(lang).vocab['级别'][l]['名称'] as string;
-export const checkName = (c: string, lang: Lang = 'zh') => getSite(lang).vocab['检查方式'][c]['名称'] as string;
-export const sourceKindName = (k: string, lang: Lang = 'zh') => getSite(lang).vocab['来源类型'][k] as string;
+export const scopeName = (a: string, lang: Lang = 'en') => getSite(lang).vocab['适用范围'][a] as string;
+export const levelName = (l: string, lang: Lang = 'en') => getSite(lang).vocab['级别'][l]['名称'] as string;
+export const checkName = (c: string, lang: Lang = 'en') => getSite(lang).vocab['检查方式'][c]['名称'] as string;
+export const sourceKindName = (k: string, lang: Lang = 'en') => getSite(lang).vocab['来源类型'][k] as string;
 
 /** 解析「另见」：主题编号（如 04）或规则编号（如 TST-012）。没整理的主题不给链接。 */
-export function resolveSee(ref: string, lang: Lang = 'zh'): { label: string; href?: string } {
+export function resolveSee(ref: string, lang: Lang = 'en'): { label: string; href?: string } {
   const site = getSite(lang);
   if (/^\d{2}$/.test(ref)) {
     const name = site.topicNames[ref]?.名称 ?? '';
@@ -88,9 +88,9 @@ export function resolveSee(ref: string, lang: Lang = 'zh'): { label: string; hre
 }
 
 /** 给浏览器用的精简规则数据，结构与技能里的 data/rules.json 一致。 */
-export function browserData(lang: Lang = 'zh') {
+export function browserData(lang: Lang = 'en') {
   const site = getSite(lang);
-  const base = lang === 'en' ? `${config.siteUrl}/en` : config.siteUrl;
+  const base = lang === 'zh' ? `${config.siteUrl}/zh` : config.siteUrl;
   return {
     version: config.version,
     siteUrl: base,

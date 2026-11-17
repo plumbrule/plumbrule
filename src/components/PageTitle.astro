@@ -8,12 +8,12 @@ const lang = getLang(path);
 const site = getSite(lang);
 const s = strings[lang];
 const title = Astro.locals.starlightRoute.entry.data.title;
-const m = path.match(/^(?:\/en)?\/topics\/([^/]+)\/$/);
+const m = path.match(/^(?:\/zh)?\/topics\/([^/]+)\/$/);
 const topic = m ? site.topics.find((t) => t.slug === m[1]) : undefined;
 const group = topic ? site.groups.find((g) => g.ids.includes(topic.id))?.name : undefined;
 ---
 
-{path === '/' || path === '/en/' ? null : <>
+{path === '/' || path === '/zh/' ? null : <>
 {topic && <p class="crumb"><a href={localize('/topics/', lang)}>{s.topics}</a> / {group}</p>}
 <h1 id={PAGE_TITLE_ID}>{topic ? <><span class="num">{topic.id}</span> {topic.title}</> : title}</h1>
 </>}

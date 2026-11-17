@@ -10,12 +10,13 @@ import { getLang, localize, strings } from '../lib/site.ts';
 const path = Astro.url.pathname;
 const lang = getLang(path);
 const s = strings[lang];
+const base = lang === 'zh' ? '/zh' : '';
 const nav = [
-  { href: '/topics/', label: s.nav.topics, on: path.startsWith('/topics/') || path.startsWith('/en/topics/') },
-  { href: '/rules/', label: s.nav.rules, on: path.startsWith('/rules/') || path.startsWith('/en/rules/') },
-  { href: '/install/', label: s.nav.install, on: path.startsWith('/install/') || path.startsWith('/en/install/') },
-  { href: '/guide/', label: s.nav.guide, on: path.startsWith('/guide/') || path.startsWith('/en/guide/') },
-  { href: '/changelog/', label: s.nav.changelog, on: path.startsWith('/changelog/') || path.startsWith('/en/changelog/') },
+  { href: '/topics/', label: s.nav.topics, on: path.startsWith(`${base}/topics/`) },
+  { href: '/rules/', label: s.nav.rules, on: path.startsWith(`${base}/rules/`) },
+  { href: '/install/', label: s.nav.install, on: path.startsWith(`${base}/install/`) },
+  { href: '/guide/', label: s.nav.guide, on: path.startsWith(`${base}/guide/`) },
+  { href: '/changelog/', label: s.nav.changelog, on: path.startsWith(`${base}/changelog/`) },
 ].map((n) => ({ ...n, href: localize(n.href, lang) }));
 ---
 

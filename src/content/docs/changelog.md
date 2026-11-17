@@ -1,10 +1,10 @@
 ---
-title: 更新记录
-description: 准绳每个版本改了什么。
+title: Changelog
+description: What changed in each version of Plumbrule.
 ---
 
-## 0.1.0（2026-11-14）
+## 0.1.0 (2026-11-14)
 
-- 首个版本：32 个主题、1247 条规则（硬约束 687 条），以及规则格式、公共词表和主题归属表。全部主题目前都是草稿。
-- 网站：主题页、全部规则筛选、安装与生成 AGENTS.md 片段。
-- 技能：Agent Skills 格式，可装到 Claude Code 和 Codex；提供命令行安装器。AGENTS.md 片段默认只生成主题索引，加 `--full` 逐条列出。
+- First release: 32 topics and 1,247 rules (687 hard constraints), plus the rule format, shared vocabulary, and topic ownership table. All topics are currently drafts.
+- Website: topic pages, filtering across all rules, installation, and AGENTS.md snippet generation.
+- Skill: Agent Skills format, installable into Claude Code and Codex, with a command-line installer. The AGENTS.md snippet lists only topic indexes by default; add `--full` to list every rule.

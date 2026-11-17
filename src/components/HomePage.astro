@@ -1,7 +1,7 @@
 ---
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
 import TopicGrid from './TopicGrid.astro';
-import { getLang } from '../lib/site.ts';
+import { getLang, localize } from '../lib/site.ts';
 
 const lang = getLang(Astro.url.pathname);
 const copy = lang === 'en' ? {
@@ -44,8 +44,8 @@ const copy = lang === 'en' ? {
         <h1>{copy.h1}</h1>
         <p class="intro">{copy.intro}</p>
         <div class="actions">
-          <a class="pr-btn" href={lang === 'en' ? '/en/topics/' : '/topics/'}>{copy.browse}</a>
-          <a class="pr-btn ghost" href={lang === 'en' ? '/en/install/' : '/install/'}>{copy.install}</a>
+          <a class="pr-btn" href={localize('/topics/', lang)}>{copy.browse}</a>
+          <a class="pr-btn ghost" href={localize('/install/', lang)}>{copy.install}</a>
         </div>
       </div>
       <div class="pr-code hero-code">

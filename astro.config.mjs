@@ -7,15 +7,15 @@ const zhTopics = new Map(loadTopics('zh').map((t) => [t.id, t]));
 const enTopics = new Map(loadTopics('en').map((t) => [t.id, t]));
 const sidebar = topicGroups
   .map((g) => ({
-    label: g.name,
-    translations: { en: g.nameEn },
-    items: g.ids.filter((id) => zhTopics.has(id)).map((id) => {
+    label: g.nameEn,
+    translations: { 'zh-CN': g.name },
+    items: g.ids.filter((id) => enTopics.has(id)).map((id) => {
       const zh = zhTopics.get(id);
       const en = enTopics.get(id);
       return {
-        label: `${id} ${zh.title}`,
-        translations: en ? { en: `${id} ${en.title}` } : undefined,
-        link: `/topics/${zh.slug}/`,
+        label: `${id} ${en.title}`,
+        translations: zh ? { 'zh-CN': `${id} ${zh.title}` } : undefined,
+        link: `/topics/${en.slug}/`,
       };
     }),
   }))
@@ -28,11 +28,11 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'Plumbrule',
-      description: '做软件的准绳：一套通用的工程规范，网页可查，编码 Agent 可用。',
+      description: 'Engineering standards for software: a general engineering standard, readable on the web and usable by coding agents.',
       defaultLocale: 'root',
       locales: {
-        root: { label: '简体中文', lang: 'zh-CN' },
-        en: { label: 'English', lang: 'en' },
+        root: { label: 'English', lang: 'en' },
+        zh: { label: '简体中文', lang: 'zh-CN' },
       },
       favicon: '/favicon.svg',
       social: [{ icon: 'github', label: 'GitHub', href: config.repoUrl }],

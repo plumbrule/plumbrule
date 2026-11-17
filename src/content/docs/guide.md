@@ -1,38 +1,38 @@
 ---
-title: 怎么读规则
-description: 硬约束、软指导、待确认分别是什么意思，规则卡片上每一项怎么看。
+title: How to read the rules
+description: What hard constraints, soft guidance, and pending items mean, and how to read each field on a rule card.
 ---
 
-## 三种标记
+## Three markers
 
-- **硬约束**：必须遵守。只有同时满足下面三点才定为硬约束：有可靠出处，或者违反的后果严重且业内公认；写得出检查方法；措辞里没有「尽量」「酌情」这类软话，适用前提写进了规则本身。做不到时停下来说明，不要悄悄绕过。
-- **软指导**：默认照做。有理由可以不做，但要写明理由，并引用规则编号，方便评审。
-- **待确认**：还没核实的说法或待补的调研，单独列在每个主题的末尾，**不当成规则执行**。核实之后才转成规则。
+- **Hard constraint**: must be followed. A rule is a hard constraint only when all three conditions hold: there is a reliable source, or violating it has serious and widely recognized consequences; a concrete check can be written; and the wording contains no soft phrases such as “try to” or “as appropriate”, with any preconditions stated in the rule itself. If you cannot comply, stop and explain; do not quietly work around it.
+- **Soft guidance**: follow by default. You may deviate for a reason, but state the reason and cite the rule ID so reviewers can see it.
+- **Pending**: statements that have not been verified or research that still needs to be done. They are listed separately at the end of each topic and **are not enforced as rules**. They become rules only after verification.
 
-## 规则卡片上的各项
+## Fields on a rule card
 
-| 项目 | 含义 |
+| Field | Meaning |
 |---|---|
-| 编号 | 如 `AGT-013`，全站唯一、不复用，可以直接链接到 `/topics/agents/#agt-013` |
-| 检查方式 | **自动**：工具或 CI 能直接判定；**半自动**：工具找出候选，人来确认；**人工**：只能靠评审或演练记录确认 |
-| 适用范围 | 不标的规则适用于所有项目；标了「Go」「Web 前端」等的只适用于这类项目。同时标了语言和项目类型的（如「Python」+「对外提供服务的后端」），要两者都符合才适用 |
-| 怎么检查 | 判断是否做到的具体办法 |
-| 参考值 | 没有权威出处的数字，只作起点，按项目调整 |
-| 来源 | 规则的出处，每个来源都标了核实日期 |
-| 另见 | 相关内容归别的主题管时，跳过去看 |
+| ID | Such as `AGT-013`. Unique across the site and never reused. You can link directly to `/topics/agents/#agt-013`. |
+| Check method | **Automated**: a tool or CI can decide directly; **Semi-automated**: a tool finds candidates and a human confirms; **Manual**: only review or drill records can confirm it. |
+| Applies to | A rule with no tags applies to all projects; one tagged “Go” or “Web frontend” applies only to that kind of project. When both a language and a project type are tagged (for example “Python” + “backend service exposed to clients”), both must match. |
+| How to check | The concrete way to decide whether the rule is satisfied. |
+| Reference value | A number without an authoritative source. Treat it as a starting point and adjust it for the project. |
+| Sources | Where the rule comes from. Every source shows the date it was checked. |
+| See also | When related material is owned by another topic, follow the link there. |
 
-## 和项目自己的规范冲突时
+## When a project has its own standards
 
-项目自己写明的约定优先。准绳是没有约定时的默认值，也是写约定时的参考。
+The project's own written conventions take precedence. Plumbrule is the default when a project has no convention, and a reference when writing one.
 
-## 每类事项只在一个主题里定
+## Each concern is defined in exactly one topic
 
-比如幂等的语义只在「16 接口契约与事件」里定，其他主题只引用。这样同一件事不会有两种说法。
+For example, the semantics of idempotency are defined only in “16 API Contracts and Events”; other topics reference it. This prevents the same concern from having two different answers.
 
-## 复核
+## Review
 
-每个主题标了复核日期和下次复核日期。变化快的主题（编码 Agent、大模型、前端等）三个月复核一次，其余半年一次。状态是「草稿」的主题还没经过独立复核。
+Every topic shows the date it was reviewed and the date of its next review. Fast-moving topics (coding agents, large language models, frontend, and so on) are reviewed every three months; the rest every six months. Topics whose status is “Draft” have not yet had an independent review.
 
-## 不构成法律意见
+## Not legal advice
 
-涉及法律、隐私和许可证的内容只是工程上的参考，不构成法律意见。
+Content about law, privacy, and licenses is engineering reference only and is not legal advice.

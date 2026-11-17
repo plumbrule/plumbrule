@@ -60,8 +60,8 @@ export function loadOwnership(lang: Lang = 'zh'): any {
 
 export const levelName = (l: string, lang: Lang = 'zh') => loadVocab(lang)['级别'][l]['名称'] as string;
 export const checkName = (c: string, lang: Lang = 'zh') => loadVocab(lang)['检查方式'][c]['名称'] as string;
-export const ruleUrl = (t: Topic, r: Rule, lang: Lang = 'zh') => `${config.siteUrl}${lang === 'en' ? '/en' : ''}/topics/${t.slug}/#${r.id.toLowerCase()}`;
-export const topicUrl = (t: Topic, lang: Lang = 'zh') => `${config.siteUrl}${lang === 'en' ? '/en' : ''}/topics/${t.slug}/`;
+export const ruleUrl = (t: Topic, r: Rule, lang: Lang = 'zh') => `${config.siteUrl}${lang === 'zh' ? '/zh' : ''}/topics/${t.slug}/#${r.id.toLowerCase()}`;
+export const topicUrl = (t: Topic, lang: Lang = 'zh') => `${config.siteUrl}${lang === 'zh' ? '/zh' : ''}/topics/${t.slug}/`;
 
 /** 规则是否适用于给定的范围标签集合，规则见 agents-md-core.mjs 的 appliesTo。 */
 export const ruleApplies = (r: Rule, tags: Set<string>) => appliesTo(r.applies, tags);
