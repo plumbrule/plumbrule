@@ -1,0 +1,568 @@
+id: "25"
+slug: security
+title: Security
+summary: "Cross-language, cross-project security baseline: when to do threat modeling, how to manage secrets, how to protect dependencies and artifacts from poisoning, generic defenses against common web vulnerabilities, prompt injection and data egress when calling large language models, and which tool to use by default for each class of security tooling."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - "Overall security tool selection (secret scanning, dependency vulnerability scanning, SAST, container image scanning, DAST, SBOM, signing)"
+    - Triggers and minimum content for threat modeling
+    - "Secret management: keep secrets out of repositories and command-line arguments, register them, rotate them, and handle leaks"
+    - "Software supply chain: lockfiles, pinning third-party CI components, SBOM, signing and provenance (SLSA, Sigstore)"
+    - "Vulnerability triage and remediation deadlines, security advisory subscriptions, security exceptions"
+    - "Generic rules for injection, deserialization, SSRF, XSS/CSP, CSRF, open redirects, and upload endpoints"
+    - "Generic rules for prompt injection, model output handling, and data egress to models"
+    - SECURITY.md and coordinated disclosure
+  excludes:
+    - { what: "Specific usage of language-specific security tools (govulncheck, pip-audit, cargo-deny, npm audit, Dependency-Check, etc.)", see: "10-15" }
+    - { what: "Implementation details and component selection for frontend CSP and rich-text sanitization", see: "07" }
+    - { what: "Login, sessions, tokens, authorization models, multi-tenant isolation", see: "19" }
+    - { what: "Parsing and conversion of untrusted files, and parser isolation", see: "20" }
+    - { what: "Model gateways, prompt management, call budgets, and evaluation", see: "24" }
+    - { what: "Coding agent permissions, rule files, and the skill supply chain", see: "23" }
+    - { what: "Container runtime hardening, deployment, incident response process, and on-call", see: "26" }
+    - { what: "Open-source licensing policy, license scanning, privacy and cross-border data regulations", see: "27" }
+    - { what: "Local sandboxes, egress proxies, process isolation", see: "32" }
+    - { what: "CI gate order, branch protection, and release process", see: "03" }
+overview: |
+  1. **Security relies on enforcement, not discipline.** Rules must be implemented as scanners, required CI checks, permission settings, and network policies; writing "forbidden" in a document is not protection.
+  2. **One default per tool category.** Secret scanning: Betterleaks; dependency vulnerability scanning: OSV-Scanner; container images: Trivy; SAST: the Semgrep Community Edition engine with self-reviewed rules; SBOM: Syft generating CycloneDX; signing: Cosign. Language-specific tools are covered in 10–15.
+  3. **Scanners are dependencies too.** In March 2026 Trivy's release pipeline was compromised (CVE-2026-33634); trojaned releases and rewritten GitHub Action tags stole CI credentials. Pin every third-party component in CI by full commit SHA or digest.
+  4. **Secrets stay out of repositories, command-line arguments, logs, and prompts.** Run secret scanning before commit and on every PR; for a suspected leak, revoke first and clean up afterwards — rewriting Git history is not remediation.
+  5. **Dependencies are determined by lockfiles and digests.** Untrusted PRs get no long-lived credentials; new versions go through a cooldown period; release artifacts ship with an SBOM and a signature, and deployments verify the signing identity plus the digest.
+  6. **Triage vulnerabilities by "known exploited + severity + exposure"**, not by CVSS score alone; remediation deadlines are given as reference values, and exceptions need an owner and an expiry date.
+  7. **Generic web baseline:** parameterized SQL, commands as argument arrays, no deserialization of untrusted objects, SSRF protection for server-side URL fetching, context-aware output encoding plus CSP, CSRF protection for cookie-based sessions, content-based validation and isolated storage for uploads.
+  8. **All external content in front of a model is data.** Prompt injection cannot be fully blocked, so the security boundary lives outside the model: tool calls are authorized independently, model output is validated against its target type, and data sent to external models is classified first.
+  9. **How to use the standards:** OWASP ASVS serves as verifiable security requirements; Top 10:2025, LLM Top 10 2026, and Agentic Top 10 serve as coverage checklists, not as acceptance criteria.
+rules:
+  # ── Process and governance ──
+  - id: SEC-001
+    title: Before adding an external entry point, crossing a trust boundary, handling untrusted files or URLs, adding a model tool with side effects, or handling sensitive data, write a lightweight threat model in the repository
+    level: soft
+    check: manual
+    how: Add an "Does this touch any of the above?" checkbox to the PR template; when checked, reviewers verify that a threat model file was added or updated
+    applies: [all]
+    why: Problems found at design time are the cheapest to fix; using triggers avoids pushing every small change through a heavy process.
+    detail: |
+      Minimum content: assets (secrets, customer data, release capability, etc.), data flows and trust boundaries, main threats (you can walk through STRIDE item by item), mitigations, corresponding tests, and an owner.
+      A Markdown file with a Mermaid data-flow diagram in the repository is enough, reviewed together with the code; privacy threats (LINDDUN) are handled in 27.
+      Risk acceptance is a human decision: an agent may draft it, but may not approve risks it identified itself.
+    sources: [S06, S42]
+    see: ["27"]
+  - id: SEC-002
+    title: Use OWASP ASVS as the source of verifiable security requirements; Top 10-style lists are only for coverage checks, not acceptance criteria
+    level: soft
+    check: manual
+    how: During security review, check that requirements or tests cite ASVS requirement numbers rather than just stating "complies with the Top 10"
+    applies: [kind:service, platform:web]
+    why: The Top 10 is a risk ranking with no requirements that can be verified one by one; every ASVS requirement can be written as a test.
+    sources: [S01, S02]
+  - id: SEC-003
+    title: Every security exception (suppression rule, ignored vulnerability, relaxed gate) must state an owner, a reason, compensating controls, and an expiry date; permanent suppressions are not allowed
+    level: hard
+    check: auto
+    how: CI validates that every entry in exception files (e.g. .gitleaksignore, ignore entries in osv-scanner.toml, .trivyignore) has an expiry date and a reason, and fails once an entry has expired
+    applies: [all]
+    why: Exceptions without expiry dates permanently accumulate into invisible risk.
+    sources: [S06]
+  - id: SEC-004
+    title: "Security check failures must not be swallowed: security jobs must not pass via `|| true`, continue-on-error, or similar; when a scan errors or the vulnerability database is stale, record the result as \"inconclusive\", not as passed"
+    level: hard
+    check: auto
+    how: "Use a script or static analysis of Actions workflows to find `|| true` and `continue-on-error: true` in security jobs; a non-zero scanner exit code must fail the job"
+    applies: [all]
+    why: A silently failing scan is more dangerous than no scan, because everyone assumes the check has been done.
+  - id: SEC-005
+    title: Repositories that are published or delivered externally must have a SECURITY.md stating a private reporting channel and the supported versions; details of unfixed vulnerabilities must not be disclosed in public issues, commit messages, or PR descriptions
+    level: hard
+    check: auto
+    how: CI checks that SECURITY.md exists and contains contact information; enable the code hosting platform's private vulnerability reporting feature
+    applies: [all]
+    why: Without a private channel, reporters can only open public issues, which amounts to publishing the vulnerability.
+    detail: Projects delivered for private deployment must provide a reporting channel that does not depend on a public platform (a customer-side contact or delivery ticketing). Example email addresses must be replaced with a real, monitored address before going live.
+    sources: [S36]
+  - id: SEC-006
+    title: Subscribe to security advisories for the language ecosystems, frameworks, base images, and security tools themselves that you use, and enable automated dependency security updates
+    level: soft
+    check: semi
+    how: Enable Dependabot or Renovate security updates in the repository; record the advisory lists for key components in the repository documentation
+    applies: [all]
+    why: Without subscriptions you only find out on the next scanner run, or never.
+    sources: [S41, S43]
+  - id: SEC-007
+    title: Triage vulnerabilities by "known exploited, severity, reachability, exposure" and set a remediation deadline; do not rely on CVSS score alone
+    level: soft
+    check: semi
+    how: Vulnerability tickets record the triage basis and deadline; periodic reports list overdue items
+    applies: [all]
+    why: Looking only at scores wastes effort on unreachable high-score vulnerabilities while missing medium-severity vulnerabilities that are being actively exploited.
+    ref_value: |
+      Reference values (organizational policy, not mandated by a standard): known exploited (listed in CISA KEV) and externally exposed — contain immediately and fix within two weeks (based on the default deadline CISA BOD 22-01 sets for federal agencies; that directive has been superseded by a new one, see open questions); critical within 30 days; high within 60 days; medium within 90 days; low with routine updates.
+      Rationale: KEV represents real attacks; the other tiers are common industry practice — adjust them to your release cadence and write them into your security policy.
+    sources: [S37]
+  - id: SEC-008
+    title: Run active DAST scans and penetration tests only against explicitly authorized test environments, with a fixed target list and rate
+    level: hard
+    check: manual
+    how: Scan jobs configure a target allowlist and run only in environments marked as test; reviewers verify the authorization record
+    applies: [kind:service, platform:web]
+    why: Active scans write data and send requests; hitting production or third-party assets causes real damage and legal risk.
+    sources: [S28]
+  # ── Secrets ──
+  - id: SEC-009
+    title: Real secrets, tokens, and passwords must not appear in source code (including Git history), configuration files, image layers, build outputs, logs, test snapshots, or prompts
+    level: hard
+    check: auto
+    how: Pre-commit hooks and PRs run secret scanning (incremental); the main branch is periodically scanned across full history; images and artifacts are scanned before release
+    applies: [all]
+    why: A secret that has entered a repository or image gets copied to countless places and is almost impossible to recall.
+    detail: |
+      `.gitignore` is not protection: committed history, CI logs, and caches may still contain secrets. Fake secrets used in tests must be obviously fake (e.g. contain the word EXAMPLE) and be allowlisted by path in the scanner configuration.
+      A scanner's "verify online whether the secret is valid" feature actively connects to external services; keep it off by default and approve it separately when needed; it must not be enabled in air-gapped environments.
+    sources: [S07, S08]
+    see: ["AGT-008"]
+  - id: SEC-010
+    title: Do not pass secrets via command-line arguments; use environment variable injection, temporary files with permission 0600, standard input, or a secret management system instead
+    level: hard
+    check: semi
+    how: During review, check whether scripts and CI configuration splice secrets into command lines (e.g. `--password=`, `-p<value>`); secret scanning rules cover CI configuration files
+    applies: [all]
+    why: Command-line arguments are visible to other users on the same machine via the process list, and they end up in shell history and CI logs.
+    see: ["15"]
+  - id: SEC-011
+    title: Runtime secrets are injected by a secret management system or the deployment platform, not baked into images or written into plaintext configuration files; the small amount of configuration that must be versioned with the repository is encrypted with SOPS
+    level: hard
+    check: semi
+    how: Image scanning checks layers for secrets; reviewers check that configuration files contain no plaintext secrets
+    applies: [all]
+    why: Images and configuration files get distributed, cached, and backed up; secrets inside them are effectively public.
+    detail: Do not keep the private key used for encryption and the ciphertext in the same artifact or the same repository.
+    sources: [S07, S24]
+  - id: SEC-012
+    title: Register each credential's owner, purpose, permission scope, expiry, and revocation method; prefer short-lived, on-demand credentials
+    level: soft
+    check: semi
+    how: The credential inventory file is validated against a schema; periodically list entries without an owner or that have expired
+    applies: [kind:service, kind:onprem]
+    why: If no owner can be found and nobody knows how to revoke a credential during an incident, containment is delayed.
+    sources: [S07]
+  - id: SEC-013
+    title: "Production-related static credentials need a rehearsed rotation procedure: issue the new credential, run old and new in parallel, switch over, revoke the old credential, confirm the old credential no longer works"
+    level: soft
+    check: manual
+    how: The drill record contains evidence that "calls with the old credential fail"
+    applies: [kind:service, kind:onprem]
+    why: Unrehearsed rotations often get rolled back during a real leak because some service was missed.
+    detail: There is no universal "rotate every N days" rule; set the cycle based on impact, leak risk, and provider requirements, but you must be able to revoke immediately when a leak occurs.
+    sources: [S07]
+  - id: SEC-014
+    title: Revoke or rotate a suspected leaked secret immediately, then clean up copies in Git history, logs, and artifacts; rewriting history cannot replace revocation
+    level: hard
+    check: manual
+    how: The leak ticket must record the revocation time and the verification result that "the old secret no longer works"
+    applies: [all]
+    why: Once a secret is exposed, assume it has been taken; deleting the copies does not make it safe again.
+    sources: [S07]
+  # ── Supply chain ──
+  - id: SEC-015
+    title: The dependency set of official builds is determined by lockfiles and digests; builds and deployments do not use unreviewed latest tags or floating versions
+    level: hard
+    check: auto
+    how: CI installs from the lockfile (e.g. `npm ci`, `--frozen-lockfile`, `--require-hashes`) and fails if the lockfile and manifest disagree; image references are checked for digests
+    applies: [all]
+    why: Floating versions switch to new code without your knowledge, including poisoned versions.
+    sources: [S34]
+    see: ["10-15", "26"]
+  - id: SEC-016
+    title: Third-party Actions, plugins, scanners, and container images referenced in CI must be pinned by full commit SHA or image digest, not referenced by mutable tags
+    level: hard
+    check: auto
+    how: "Use the OpenSSF Scorecard Pinned-Dependencies check, or a script that verifies every `uses:` in workflows is a 40-character SHA"
+    applies: [all]
+    why: Tags can be rewritten. In March 2026 most tags of trivy-action and setup-trivy were force-pushed to credential-stealing versions, and pipelines referencing them by tag were compromised directly.
+    detail: After pinning, let Dependabot or Renovate open update PRs, and merge them after a human review. When a scanner downloads binaries, also verify signatures or checksums.
+    sources: [S13, S35, S23]
+  - id: SEC-017
+    title: PRs from external contributors or untrusted branches must not receive long-lived credentials or production secrets when installing dependencies and running tests; CI tokens are read-only by default
+    level: hard
+    check: auto
+    how: Check workflow triggers (do not check out and run PR code in contexts with secrets such as pull_request_target) and token permission settings
+    applies: [all]
+    why: Dependency install scripts and tests are arbitrary code execution; npm attacks such as Shai-Hulud used exactly this to steal CI and cloud credentials.
+    sources: [S34, S35]
+    see: ["03"]
+  - id: SEC-018
+    title: When adding a dependency, evaluate its provenance, maintenance activity, install scripts, license, and whether a lighter alternative exists
+    level: soft
+    check: semi
+    how: CI prompts for review when dependency manifests change; OpenSSF Scorecard scores can serve as a reference
+    applies: [all]
+    why: Every dependency enlarges the attack surface; typosquatting, account takeover, and abandonment are all real risks.
+    sources: [S23, S34]
+    see: ["27"]
+  - id: SEC-019
+    title: After a new dependency version is released, wait for a cooldown period before upgrading, except for urgent security fixes
+    level: soft
+    check: auto
+    how: Use the minimum release age setting of the package manager or dependency update bot (configuration details in 10–15)
+    applies: [all]
+    why: Most malicious versions are discovered and taken down within a few days of release; a cooldown period avoids that window.
+    ref_value: "Reference value: a few days to a week. Rationale: recent npm poisoning incidents were mostly discovered and handled within a few days; too long a period delays security fixes, hence the exception for security updates."
+    sources: [S34]
+    see: ["10-15"]
+  - id: SEC-020
+    title: PRs run dependency vulnerability scanning on changed dependencies, and the main branch is periodically scanned in full; releases are blocked when unacceptable vulnerabilities exist
+    level: hard
+    check: auto
+    how: A required CI check runs OSV-Scanner (or a language-specific tool); the blocking threshold is written in the security policy, and exceptions go through SEC-003
+    applies: [all]
+    why: Known vulnerabilities are the easiest entry point for mass exploitation, and also the cheapest to fix.
+    sources: [S11]
+    see: ["10-15"]
+  - id: SEC-021
+    title: Container images are scanned at build time and periodically in the registry, covering OS packages and language dependencies; base images are pinned by digest
+    level: hard
+    check: auto
+    how: CI runs Trivy on built images, and the registry rescans on a schedule; Dockerfiles are checked for digests in FROM
+    applies: [kind:service, kind:onprem]
+    why: OS packages in images keep surfacing new vulnerabilities; clean at build time does not mean clean now.
+    sources: [S12, S14]
+    see: ["26"]
+  - id: SEC-022
+    title: Artifacts published externally or delivered to customers must ship with an SBOM (CycloneDX or SPDX) generated from the build output
+    level: hard
+    check: auto
+    how: The release pipeline generates the SBOM and validates its format; the SBOM is archived together with the artifact
+    applies: [all]
+    why: When a new vulnerability is announced, an SBOM is what lets you quickly find which deliverables are affected; NIST SSDF requires keeping component provenance data for each release.
+    detail: An SBOM is an inventory, not a security verdict; store vulnerability scan results separately. For air-gapped delivery, also include the signing public key or trust root, the verification tool, and the vulnerability database snapshot date.
+    sources: [S06, S15, S16, S17]
+  - id: SEC-023
+    title: Container images and externally published binaries must be signed; at deployment, verify against the allowed signing identities plus the digest, and do not trust tags
+    level: hard
+    check: auto
+    how: The release job signs with Cosign; signature verification runs before deployment or in admission control, and failure means rejection
+    applies: [kind:service, kind:onprem, kind:cli, kind:library]
+    why: Comparing hashes alone cannot stop "the hash being replaced along with the artifact"; only verifying the signing identity proves who published it.
+    detail: A signature only proves "who published this digest", not that the code is free of vulnerabilities or that upstream is trustworthy. Signing happens only in a controlled release job, and signing credentials are not exposed to ordinary build jobs.
+    sources: [S18]
+  - id: SEC-024
+    title: Generate build provenance level by level along the SLSA Build track; do not merely claim a level verbally
+    level: soft
+    check: semi
+    how: Release artifacts ship with provenance that is verified at deployment; any claimed level must be backed by corresponding build platform evidence
+    applies: [kind:library, kind:cli, kind:service]
+    why: Provenance answers "which code, on which build machine, produced this artifact", and is the basis for investigating supply chain incidents.
+    detail: The current version of SLSA splits requirements into two tracks, Build and Source, which must not be merged into a single certificate. First get the build platform to generate provenance automatically, then raise the level for high-risk projects.
+    sources: [S19]
+  - id: SEC-025
+    title: In air-gapped or private environments, mirror the vulnerability database locally and record its update date; beyond the agreed staleness limit, record scan results as "inconclusive"
+    level: soft
+    check: auto
+    how: The scan job reads the generation time of the local vulnerability database, and fails or marks the result inconclusive when it is too old
+    applies: [kind:onprem]
+    why: A stale vulnerability database lets scans "pass everything" while new vulnerabilities are simply not in the database.
+    ref_value: "Reference value: within one week. Rationale: mainstream vulnerability databases update daily; beyond a week, newly published high-severity vulnerabilities are almost certainly missed; adjust to the risk your environment can accept."
+    sources: [S11, S12]
+  # ── Generic application security rules ──
+  - id: SEC-026
+    title: Run high-confidence SAST rules on PRs and block on them; run the full rule set periodically
+    level: soft
+    check: auto
+    how: A required CI check runs the Semgrep Community Edition engine and language-specific tools; false positives go into exceptions with expiry dates
+    applies: [all]
+    why: Only if PRs run fast and accurate rules will the team not look for ways around them; the full rule set finds existing issues.
+    sources: [S20]
+    see: ["10-15"]
+  - id: SEC-027
+    title: Database queries must be parameterized, and dynamic table names and sort fields may only come from an allowlist mapping; system commands invoke a fixed program with an argument array, never by concatenating shell strings
+    level: hard
+    check: semi
+    how: SAST rules look for string-concatenated SQL and patterns such as `shell=True` and concatenated `exec`; injection unit tests
+    applies: [all]
+    why: Injection remains one of the most common vulnerability classes with the most severe consequences.
+    detail: Parameterization does not solve authorization, and argument arrays do not stop dangerous arguments (e.g. `--output=/etc/...`); those still need per-argument validation. Model-generated text must not be spliced directly into SQL or commands either.
+    sources: [S43, S44, S02]
+    see: ["17"]
+  - id: SEC-028
+    title: Do not deserialize untrusted data into executable objects; use pure data formats such as JSON, use a safe loader for YAML, and forbid pickle and instantiation by arbitrary class name
+    level: hard
+    check: semi
+    how: SAST rules look for calls such as `pickle.loads`, `yaml.load` (non-safe), and Java native deserialization
+    applies: [all]
+    why: Insecure deserialization usually leads directly to remote code execution.
+    sources: [S39]
+  - id: SEC-029
+    title: When the server makes requests to URLs supplied by users or models, restrict the scheme, validate the target IP after DNS resolution (reject loopback, private, link-local, and cloud metadata addresses), revalidate on every redirect, and go through a restricted egress
+    level: hard
+    check: semi
+    how: The test suite covers private addresses, IPv6, decimal IPs, redirects to private addresses, DNS rebinding, and similar cases; reviewers check whether URLs are validated with regexes only
+    applies: [kind:service, kind:llm]
+    why: SSRF lets attackers use the server to reach the internal network and cloud metadata and obtain cloud credentials; regex-only URL validation cannot stop it.
+    sources: [S31]
+    see: ["32"]
+  - id: SEC-030
+    title: Encode output by context when rendering to pages, and do not render unsanitized HTML or raw HTML in Markdown; when rich text must be rendered, use a mature sanitization library and configure a Content Security Policy (CSP) as defense in depth
+    level: hard
+    check: semi
+    how: Lint or SAST rules look for usages such as `dangerouslySetInnerHTML`, `v-html`, and `innerHTML`; check that response headers include a CSP
+    applies: [platform:web, platform:desktop]
+    why: XSS can impersonate the user in their browser and do anything; framework default escaping only covers text interpolation.
+    detail: CSP does not replace output encoding. Script policies use nonces or hashes, not `unsafe-inline`; observe new policies in report-only mode before enforcing them. Implementation details and sanitization library selection are in 07.
+    sources: [S30, S40]
+    see: ["07"]
+  - id: SEC-031
+    title: For applications that maintain sessions with cookies, state-changing endpoints must have CSRF protection (the framework's built-in tokens or Origin checks), not SameSite alone
+    level: hard
+    check: semi
+    how: Negative browser tests issue state-changing requests from a third-party page and confirm they are rejected
+    applies: [platform:web, kind:service]
+    why: Browsers attach cookies automatically, so cross-site pages can act with the user's identity; SameSite does not take effect in some scenarios and older browsers.
+    sources: [S33]
+    see: ["19"]
+  - id: SEC-032
+    title: Redirects such as post-login redirects only allow relative paths or allowlisted domains
+    level: hard
+    check: semi
+    how: Test with inputs such as `//evil.example`, `https://evil.example`, encoded schemes, and `user@host`, and confirm they are rejected
+    applies: [platform:web, kind:service]
+    why: Open redirects are commonly used for phishing and stealing OAuth authorization codes.
+    sources: [S38]
+  - id: SEC-033
+    title: Upload endpoints must require authentication, limit size and count, identify file type by content (not trusting the extension or Content-Type), store files under generated names outside the web root, and return them as attachments on download
+    level: hard
+    check: semi
+    how: The test suite covers oversized files, forged extensions, path-traversal file names, and executable content; reviewers check the storage path and download response headers
+    applies: [kind:service, platform:web]
+    why: Uploads are the entry point for external files into the system; using the original file name directly or storing in an executable directory leads to file overwrites and code execution.
+    detail: Where possible, serve user files from a separate domain and scan files for malware. Upload and parsing processes do not share high-privilege credentials. File parsing, decompression bombs, and parser isolation are in 20.
+    sources: [S32]
+    see: ["20"]
+  - id: SEC-034
+    title: In production, disable debug mode and directory listing, allow only explicit origins in CORS, and set security response headers; error responses do not return stack traces, SQL, or secrets
+    level: hard
+    check: auto
+    how: ZAP baseline scans check response headers and error messages; configuration lint checks debug switches and CORS wildcards
+    applies: [kind:service, platform:web]
+    why: Security misconfiguration is number two in the OWASP Top 10:2025, and debug information often directly exposes internal structure and credentials.
+    sources: [S02, S28]
+    see: ["16"]
+  # ── Applications that call large language models ──
+  - id: SEC-035
+    title: External content entering a model (web pages, files, retrieval results, tool output, emails, messages from other agents) is always treated as data; it cannot change system instructions, permissions, or security policies
+    level: hard
+    check: semi
+    how: The regression test suite includes inputs carrying embedded instructions, and checks that the model did not call tools beyond its authorization and that policy decisions were not changed
+    applies: [kind:llm, kind:agent]
+    why: Prompt injection is number one in the OWASP LLM Top 10 and cannot be fully prevented by filtering; the only option is to ensure that even a successful injection cannot escalate privileges.
+    detail: Do not treat security filters or the system prompt as the only line of defense; verify by turning the filters off and confirming the policies still hold. When external content is written into long-term memory or a knowledge base, record its source and make it revocable.
+    sources: [S03, S04]
+    see: ["23", "24"]
+  - id: SEC-036
+    title: Before model output enters commands, SQL, HTML, URLs, file paths, or tool arguments, validate and encode it according to the target type, the same as user input
+    level: hard
+    check: semi
+    how: SAST looks for model output flowing directly into dangerous calls such as `exec`, SQL concatenation, and `innerHTML`; negative tests
+    applies: [kind:llm]
+    why: Model output can be manipulated by injection; treating it as trusted input turns injection into code execution or XSS.
+    sources: [S03]
+  - id: SEC-037
+    title: Tool calls with side effects are authorized and their arguments schema-validated by code outside the model; human approval of high-risk operations is bound to the specific target and arguments, and any change to the arguments voids the approval
+    level: hard
+    check: semi
+    how: Test cases tamper with arguments or swap the target after approval and confirm execution is rejected; the approval UI shows the real diff generated by the system, not just the model's explanation
+    applies: [kind:llm, kind:agent]
+    why: Models can be induced to misuse tools; approving based only on the model's own description makes it easy to be fooled by a "polished but distorted" explanation.
+    sources: [S05]
+    see: ["19", "23"]
+  - id: SEC-038
+    title: Classify data before sending it to external model services; secrets must never be sent, sensitive personal data and customer data are redacted or blocked per policy; environments required to be air-gapped do not call external models unless approved in advance
+    level: hard
+    check: semi
+    how: All model calls go through a gateway, which redacts or blocks by data classification and logs the categories of data sent; air-gapped environments are verified with egress policies and DNS logs
+    applies: [kind:llm, kind:onprem]
+    why: Once data is sent out it leaves your control; it may be retained by the provider, used for training, or leaked through its logs.
+    detail: Gateway and service selection are in 24; compliance requirements for personal information and cross-border data transfer are in 27.
+    sources: [S03]
+    see: ["24", "27", "32"]
+  - id: SEC-039
+    title: "Manage MCP servers, agent skills, plugins, model weights, and prompt templates as dependencies: pin versions or digests, and review changes"
+    level: soft
+    check: semi
+    how: A manifest file records versions and digests; changes go through PR review
+    applies: [kind:llm, kind:agent]
+    why: Tool descriptions and skills can be updated or replaced at runtime, forming a new supply chain.
+    sources: [S05]
+    see: ["23"]
+choices:
+  - category: Secret scanning
+    pick: Betterleaks (pre-commit hook + incremental on PRs + periodic full-history scans of the main branch)
+    when: All repositories
+    alternatives:
+      - { name: Gitleaks, when: "When configuration and pipelines already exist and migration is not planned yet. The official README states the project is feature-frozen and receives security patches only, with the author's focus shifting to Betterleaks; Betterleaks is positioned as a drop-in replacement" }
+      - { name: TruffleHog, when: "When you need to verify whether secrets are still valid, or scan many sources beyond Git; run it as a standalone tool in CI. Licensed AGPL-3.0 — do not embed it in externally distributed products or external services" }
+    avoid:
+      - { name: "Using grep or hand-written regexes instead", why: "Poor coverage and many false positives, and no history scanning" }
+    license: Betterleaks MIT; Gitleaks MIT; TruffleHog AGPL-3.0
+    sources: [S08, S09, S10]
+  - category: Dependency vulnerability scanning (SCA)
+    pick: OSV-Scanner (reads lockfiles or SBOMs directly, covers many language ecosystems, data from the OSV database)
+    when: All projects with third-party dependencies
+    alternatives:
+      - { name: "Language-specific tools (govulncheck, pip-audit, cargo-deny / cargo-audit, npm audit, OWASP Dependency-Check)", when: "Single-language projects, or when call-reachability analysis is needed (e.g. govulncheck); usage in 10–15" }
+      - { name: Trivy or Grype, when: "When the same pipeline also scans container images and OS packages, it can scan dependencies along the way" }
+    avoid:
+      - { name: Writing your own CVE matcher, why: "Version ranges, package name aliases, and withdrawn advisories are all hard to get right" }
+      - { name: Deciding blocking by CVSS score alone, why: "Ignores whether a vulnerability is exploited and reachable; see SEC-007" }
+    license: Apache-2.0
+    notes: Air-gapped environments need a local mirror of the vulnerability database with its date recorded (SEC-025).
+    sources: [S11]
+  - category: Container image scanning
+    pick: Trivy
+    when: At image build time and periodic rescans in the registry; can also scan IaC configuration
+    alternatives:
+      - { name: Grype (with SBOMs generated by Syft), when: "When you already generate SBOMs with Syft and want SBOM-based scanning, or need a second scanner for cross-checking" }
+    avoid:
+      - { name: "Referencing scanner Actions or images by mutable tags", why: "In March 2026 Trivy's release pipeline was compromised (CVE-2026-33634), and pipelines referencing trivy-action by tag had credential-stealing code injected; pin by SHA or digest and verify signatures" }
+    license: Trivy Apache-2.0; Grype Apache-2.0
+    sources: [S12, S13, S14]
+  - category: SAST (cross-language)
+    pick: Semgrep Community Edition engine + a team-reviewed rule set
+    when: All projects; language-specific tools (gosec, Bandit, etc.) are in 10–15
+    alternatives:
+      - { name: Opengrep, when: "When you want a community-governed engine not subject to a single vendor's policies; it is a community fork of the Semgrep engine, also LGPL-2.1" }
+      - { name: CodeQL, when: "When critical services need deeper interprocedural data-flow analysis; confirm the licensing terms for private repositories first" }
+    avoid:
+      - { name: "Using cloud-hosted scanning without reading the rules", why: "Code is uploaded to a third party, and it is unusable in air-gapped environments" }
+    license: "Engine LGPL-2.1; the rules maintained by Semgrep use the Semgrep Rules License v1.0, which is limited to internal use and may not be used in competing products or offered as a service; if you need to redistribute rules, find another rule source or write your own"
+    notes: Used as a standalone tool in CI; licensing policy is in 27.
+    sources: [S20, S21, S22]
+  - category: SBOM
+    pick: Syft generating CycloneDX JSON
+    alternatives:
+      - { name: SPDX format, when: "When customers or regulations specify SPDX" }
+      - { name: "Native build tool plugins (e.g. the CycloneDX Maven / Gradle plugins)", when: "When more accurate build-time dependency relationships are needed; see 10–15" }
+    avoid:
+      - { name: "Treating output such as `npm list` as an SBOM", why: "It lacks hashes, purls, and artifact-level components" }
+    license: Syft Apache-2.0; CycloneDX specification Apache-2.0
+    sources: [S15, S16, S17]
+  - category: Signing and provenance
+    pick: Cosign (Sigstore) signing + provenance generated along the SLSA Build track
+    alternatives:
+      - { name: Cosign private-key signing, when: "When air-gapped environments cannot use keyless signing and the public transparency log" }
+      - { name: "The code hosting platform's built-in artifact attestation feature", when: "When builds run entirely on that platform" }
+    avoid:
+      - { name: Publishing only SHA256 checksums, why: "Checksums can be replaced together with the artifact and do not prove the publisher" }
+    license: Apache-2.0
+    sources: [S18, S19]
+  - category: Secret management
+    pick: The secret service already provided by the deployment platform (cloud KMS / Secrets Manager, etc.); configuration that must be versioned with the repository is encrypted with SOPS + age
+    alternatives:
+      - { name: OpenBao, when: "When you need dynamically issued database credentials, short-lived tokens, and unified auditing, and can operate a critical service" }
+      - { name: HashiCorp Vault, when: "Keep using it if the organization already does; newer versions are BUSL-1.1, which is not an open-source license — consult legal before self-hosting it for external services" }
+      - { name: Infisical, when: "When the team needs a ready-made secret management UI; the core is MIT, the ee directory is under a commercial license — confirm the features you need are not in ee" }
+    avoid:
+      - { name: "Plaintext in Git relying on .gitignore", why: "It still leaks through history and copies" }
+      - { name: "Deploying a multi-node secret cluster just to hide a few API keys", why: "Operational cost and failure points far outweigh the benefit" }
+    license: SOPS MPL-2.0; age BSD-3-Clause; OpenBao MPL-2.0; Vault BUSL-1.1; Infisical MIT + ee commercial license
+    notes: Public cloud KMS is not suitable for physically air-gapped environments.
+    sources: [S24, S25, S26, S27]
+  - category: DAST
+    pick: ZAP (passive / baseline scans on PRs or staging; active scans only against authorized test environments)
+    avoid:
+      - { name: "Running active scans against production or customer assets", why: "It writes data, triggers alerts, and may be illegal; see SEC-008" }
+    license: Apache-2.0
+    sources: [S28]
+  - category: Threat modeling
+    pick: Markdown documents in the repository + Mermaid data-flow diagrams
+    alternatives:
+      - { name: OWASP Threat Dragon, when: "When the team wants a graphical UI to draw data-flow diagrams and annotate them with STRIDE" }
+    avoid:
+      - { name: Building your own modeling tool, why: "High cost; existing options are sufficient" }
+    license: Threat Dragon Apache-2.0
+    sources: [S29, S42]
+  - category: Dependency and repository security health
+    pick: OpenSSF Scorecard
+    when: Evaluating the maintenance status of new dependencies, and checking your own repository's branch protection, Action pinning, token permissions, etc.
+    license: Apache-2.0
+    sources: [S23]
+  - category: Security advisories and dependency security updates
+    pick: Dependabot (for repositories hosted on GitHub)
+    alternatives:
+      - { name: Renovate, when: "For self-hosted code platforms, multiple platforms, or when finer grouping and cooldown configuration is needed; licensed AGPL-3.0, run as a standalone tool" }
+    license: Renovate AGPL-3.0
+    sources: [S41, S43]
+antipatterns:
+  - { bad: "Assuming secrets won't leak because there is a .gitignore", instead: "Run secret scanning before commit and on PRs; real secrets are always injected by a secret service" }
+  - { bad: "Rewriting Git history first after discovering a leaked secret", instead: "Revoke or rotate first, confirm the old secret no longer works, then clean up the copies" }
+  - { bad: "Using mutable tags in CI such as `uses: some-scanner@v1`", instead: "Pin by full commit SHA and let an update bot open PRs for upgrades" }
+  - { bad: "External PRs running npm install and tests on runners holding repository and cloud credentials", instead: "Run untrusted PRs in environments with no secrets and read-only tokens" }
+  - { bad: "Treating \"zero findings\" from a scan as secure", instead: "Also check the vulnerability database date and coverage blind spots, and combine with negative tests and human review" }
+  - { bad: "Defending against SSRF with a URL regex allowlist", instead: "Validate the IP after resolution, recheck on every hop, and go through a restricted egress" }
+  - { bad: "Considering injection prevented because security rules are in the system prompt", instead: "Enforce permissions, approvals, and egress controls outside the model" }
+  - { bad: "Assuming upstream is trustworthy because there is an SBOM and a signature", instead: "An SBOM is an inventory and a signature only proves the publisher; dependencies still need review and vulnerability scanning" }
+  - { bad: "Blocking every high CVSS finding and letting every medium one through", instead: "Triage by exploitation status, reachability, and exposure" }
+  - { bad: "Security exceptions written into ignore files and then forgotten", instead: "Every exception has an owner and an expiry date, and fails automatically when expired" }
+  - { bad: "Implementing your own encryption, signing, SBOM generation, or CVE matching", instead: "Use existing tools such as SOPS, Cosign, Syft, and OSV-Scanner" }
+sources:
+  - { id: S01, title: OWASP Application Security Verification Standard (ASVS), url: "https://asvs.owasp.org/", publisher: OWASP, date: 2025-05-30, kind: standard, checked: 2026-11-13 }
+  - { id: S02, title: "OWASP Top 10:2025", url: "https://top10.owasp.org/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: OWASP GenAI Security Project unveils 2026 Top 10 for LLM Applications, url: "https://genai.owasp.org/announcement/owasp-genai-security-project-unveils-2026-top-10-for-llm-applications-new-agent-control-standard-and-sponsors-as-community-tops-30000-members/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: "OWASP LLM01: Prompt Injection", url: "https://genai.owasp.org/llmrisk/llm01-prompt-injection/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S05, title: OWASP Top 10 for Agentic Applications, url: "https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/", publisher: OWASP, date: 2025-12-09, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: "NIST SP 800-218 Secure Software Development Framework (SSDF) v1.1", url: "https://csrc.nist.gov/pubs/sp/800/218/final", publisher: NIST, date: 2022-02-03, kind: standard, checked: 2026-11-13 }
+  - { id: S07, title: OWASP Secrets Management Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S08, title: Betterleaks, url: "https://github.com/betterleaks/betterleaks", publisher: Betterleaks, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: Gitleaks README, url: "https://github.com/gitleaks/gitleaks", publisher: Gitleaks, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: TruffleHog, url: "https://github.com/trufflesecurity/trufflehog", publisher: Truffle Security, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: OSV-Scanner, url: "https://github.com/google/osv-scanner", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: Trivy, url: "https://github.com/aquasecurity/trivy", publisher: Aqua Security, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "GHSA-69fq-xp46-6x23 / CVE-2026-33634: Trivy release pipeline compromised", url: "https://osv.dev/vulnerability/GHSA-69fq-xp46-6x23", publisher: OSV, date: 2026-03-23, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: Grype, url: "https://github.com/anchore/grype", publisher: Anchore, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: Syft, url: "https://github.com/anchore/syft", publisher: Anchore, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: CycloneDX Specification, url: "https://github.com/CycloneDX/specification", publisher: OWASP CycloneDX, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S17, title: SPDX Specification, url: "https://spdx.github.io/spdx-spec/", publisher: Linux Foundation, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S18, title: Cosign, url: "https://github.com/sigstore/cosign", publisher: Sigstore, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: SLSA Specification v1.2, url: "https://slsa.dev/spec/v1.2/", publisher: OpenSSF, date: 2025-11, kind: standard, checked: 2026-11-14 }
+  - { id: S20, title: Semgrep, url: "https://github.com/semgrep/semgrep", publisher: Semgrep, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: Semgrep Rules License, url: "https://semgrep.dev/legal/rules-license", publisher: Semgrep, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: Opengrep, url: "https://github.com/opengrep/opengrep", publisher: Opengrep, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S23, title: OpenSSF Scorecard, url: "https://github.com/ossf/scorecard", publisher: OpenSSF, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: SOPS, url: "https://github.com/getsops/sops", publisher: CNCF, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S25, title: OpenBao, url: "https://github.com/openbao/openbao", publisher: OpenBao, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: HashiCorp Vault LICENSE, url: "https://github.com/hashicorp/vault/blob/main/LICENSE", publisher: HashiCorp, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: Infisical LICENSE, url: "https://github.com/Infisical/infisical/blob/main/LICENSE", publisher: Infisical, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: ZAP, url: "https://www.zaproxy.org/", publisher: ZAP, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: OWASP Threat Dragon, url: "https://github.com/OWASP/threat-dragon", publisher: OWASP, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: OWASP Cross Site Scripting Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S31, title: OWASP SSRF Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S32, title: OWASP File Upload Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S33, title: OWASP CSRF Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S34, title: "CISA: Widespread Supply Chain Compromise Impacting npm Ecosystem", url: "https://content.govdelivery.com/accounts/USDHSCISA/bulletins/3f408db", publisher: CISA, date: 2025-09-23, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: Security hardening for GitHub Actions, url: "https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: Adding a security policy to your repository, url: "https://docs.github.com/en/code-security/getting-started/adding-a-security-policy-to-your-repository", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: "CISA BOD 22-01: Reducing the Significant Risk of Known Exploited Vulnerabilities", url: "https://www.cisa.gov/news-events/directives/bod-22-01-reducing-significant-risk-known-exploited-vulnerabilities", publisher: CISA, date: 2021-11-03, kind: official, checked: 2026-11-14 }
+  - { id: S38, title: OWASP Unvalidated Redirects and Forwards Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S39, title: OWASP Deserialization Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Deserialization_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S40, title: OWASP Content Security Policy Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S41, title: Renovate, url: "https://github.com/renovatebot/renovate", publisher: Mend, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S42, title: OWASP Threat Modeling Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Threat_Modeling_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S43, title: GitHub Dependabot, url: "https://docs.github.com/en/code-security/dependabot", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S44, title: OWASP SQL Injection Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+open_questions:
+  - "CISA BOD 22-01 has been revoked and superseded by BOD 26-04 (as noted on the official page); the new directive's remediation deadline for KEV vulnerabilities has not been verified yet; the \"two weeks\" reference value in SEC-007 is pending an update per the new directive"
+  - "Betterleaks was only released in March 2026, and third-party sources disagree about its latest version and license (the official repository showed MIT on 2026-11-14); compatibility with Gitleaks configuration and the false positive rate remain to be tested"
+  - "Whether the remediation of the March 2026 Trivy incident (CVE-2026-33634) was complete, and whether all subsequent releases are signed, needs follow-up on official announcements; the official Aqua blog could not be opened directly this time"
+  - "The numbering and names of each OWASP LLM Top 10 2026 entry (other than prompt injection at number one, sensitive information disclosure at number two, and excessive agency at number three) have not been checked against the original text one by one; there are two accounts of the official release date: 2026-08-04, or September together with the Agent Control Standard"
+  - The official finalization date of OWASP Top 10:2025 has not been verified
+  - "The content and release dates of OWASP AISVS 1.0 and the OWASP Agent Control Standard have not been verified, and they are not yet included in the rules"
+  - The licensing conditions for using CodeQL on private commercial repositories have not been verified (the supporting link given in the report is questionable)
+  - Whether NIST SSDF has a newer revision has not been verified
+  - The exact release date of SLSA v1.2 (the official blog only goes as far as November 2025) has not been verified
+  - The feature boundary between Semgrep Community Edition and the paid edition (e.g. cross-file analysis) has not been verified
+  - "Research pending: WAF selection (self-hosted vs. cloud WAF, ModSecurity/Coraza and OWASP CRS)"
+  - "Research pending: selection of fuzzing, policy engines (OPA/Conftest/Kyverno), dedicated IaC scanning (Checkov, KICS), and AI red-teaming tools (garak, PyRIT, promptfoo, etc.)"
+  - "Research pending: comparison of false positive rates and vulnerability database synchronization methods for OSV-Scanner, Trivy, and Grype in air-gapped environments"
+  - "Research pending: more external references for vulnerability remediation deadlines (e.g. PCI DSS requirements for critical patches)"

@@ -1,0 +1,705 @@
+id: "07"
+slug: web
+title: Web Frontend
+summary: "How to choose and organize the web frontend: frameworks and build tools, when to use SSR/SSG, routing, data fetching and caching, state, forms, component libraries, styling, heavy features such as charts and editors, frontend monitoring, bundle size and performance, and localizing assets for private deployments."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - Project types and choice of framework and build tool; when to use SSR/SSG
+    - Routing, data fetching and caching, UI state, forms
+    - Choosing base and business component libraries; maintaining copied components
+    - Styling approach, icons, frontend i18n libraries
+    - Tables, virtual lists, drag and drop, charts, code editing, Markdown, rich text, collaboration, whiteboards, uploads, PDF/Office preview
+    - Client-side handling of real-time connections (SSE/WebSocket)
+    - Frontend error monitoring, real user performance monitoring, bundle size budgets and loading performance
+    - Frontend-side requirements for XSS, token storage, and CSP compatibility
+    - Localizing frontend assets for private and air-gapped deployments
+    - Packaging embeddable components (widgets) and reusable component libraries
+  excludes:
+    - { what: "Strict tsconfig options, lint and formatting tools, package managers and lockfiles, unit testing libraries", see: "10" }
+    - { what: "General principles of formatting and linting", see: "02" }
+    - { what: "Visual tokens (color, font size, spacing, animation duration) and design systems", see: "08" }
+    - { what: "Contrast, keyboard operation, screen readers, focus, reduced motion, localized display of dates and numbers", see: "09" }
+    - { what: "Semantics of OpenAPI contracts and client generators, error formats, pagination, event formats", see: "16" }
+    - { what: "Test layering, E2E tools, and visual regression principles", see: "04" }
+    - { what: "Login, sessions, token issuance, CSRF approach, authorization model", see: "19" }
+    - { what: "General rules for CSP, XSS protection, upload security, and dependency vulnerability scanning", see: "25" }
+    - { what: "Parsing untrusted files and server-side conversion", see: "20" }
+    - { what: "Releases, observability platforms, alerting", see: "26" }
+    - { what: "Open source license policy, cross-border data transfer, and privacy regulations", see: "27" }
+    - { what: "Dependency upgrade and review process, how to write ADRs", see: "03" }
+overview: |
+  1. **Decide the project type first, then the framework.** Authenticated apps, admin consoles, content sites, sites that need SSR, embeddable widgets, and component libraries each have a default choice; record the reasons for what you chose and what you rejected in an ADR (Architecture Decision Record).
+  2. **Authenticated apps default to a static SPA.** React + TypeScript + Vite + TanStack Router + TanStack Query, deployed as static files, with the backend serving the API separately. Public content sites default to static generation with Astro. Only adopt Next.js, React Router framework mode, or TanStack Start when personalized SSR is genuinely needed, and count server operations and security updates as part of the cost.
+  3. **Put each kind of data in its place.** State that can be rebuilt from the URL goes in route parameters, server data goes in the request cache library, transient UI state stays inside components; do not copy server entities into a global store.
+  4. **One of each per app.** One router, one base component library, one styling approach, one HTTP client layer.
+  5. **Do not build your own infrastructure.** Use mature libraries for accessible popovers and dropdowns, virtual lists, complex tables, drag and drop, dates and time zones, HTML sanitization, rich text, CRDTs, code editors, and PDF rendering.
+  6. **Security baseline.** Never inject untrusted HTML directly; keep tokens out of localStorage; build output must run under a strict CSP; the server is the authority for permissions and upload validation.
+  7. **Load heavy things on demand.** Editors, charts, PDF, and whiteboards load only in the routes or interactions that use them; set bundle size budgets for the first screen and main routes.
+  8. **Measure performance with real users.** Measure LCP, INP, and CLS at P75; lab scores are no substitute.
+  9. **Private deployment means everything is local.** Fonts, icons, Workers, and styles ship with the app, monitoring data stays inside the customer's network, and acceptance is actually tested in an air-gapped environment.
+rules:
+  # ── Choices and structure ──
+  - id: WEB-001
+    title: Each frontend project records in an ADR its project type (SPA, admin console, content site, SSR site, embeddable widget, component library) and the frameworks chosen and rejected
+    level: soft
+    check: semi
+    how: CI checks that the repository has a frontend technology ADR; review checks that new projects explain the rejected options
+    applies: [platform:web]
+    why: Choices made out of habit often reveal problems only late, for example adding SSR to an admin console that needs no SEO, which brings extra server operations and cache management.
+    see: ["03", "05"]
+  - id: WEB-002
+    title: Apps usable only after login are built as static SPAs by default; publicly indexable content is statically generated by default; use an SSR framework only when personalized server-side rendering is needed
+    level: soft
+    check: manual
+    how: "When reviewing the technology ADR, verify: are the reasons for choosing SSR concrete (personalized pages that need SEO, first-screen data that must be fetched on the server), and were deployment, cache consistency, and security updates evaluated"
+    applies: [platform:web]
+    why: SSR brings operational burden such as a Node service, cache consistency across instances, and security updates for server components; authenticated apps usually do not need SEO.
+    detail: |
+      - When deploying a static SPA, configure history fallback on the static server (unknown paths return index.html).
+      - Sharing a domain between the marketing site and the app does not mean they must share a framework: use Astro for `www` and a Vite SPA for `app`, sharing design tokens and the identity service.
+      - When there are many public pages that need personalization, compare Astro, Next.js, React Router framework mode, and TanStack Start with a realistic sample project instead of comparing build speed alone.
+    sources: [S05, S32, S36]
+  - id: WEB-003
+    title: An app uses only one routing library; do not mix two routers
+    level: soft
+    check: auto
+    how: CI fails when the dependency manifest contains more than one routing library (such as react-router and @tanstack/react-router)
+    applies: [platform:web]
+    why: Two routers differ in navigation, data loading, and URL semantics, so links and back navigation break.
+    sources: [S06]
+  - id: WEB-004
+    title: View state that can be rebuilt from the URL, such as filters, sorting, pagination, and the current tab, goes in the route's query parameters
+    level: soft
+    check: manual
+    how: "In review, check: is the view restored after refreshing the page or opening a shared link"
+    applies: [platform:web]
+    why: View state kept in memory is lost on refresh and cannot be shared or navigated back to.
+    sources: [S06]
+  - id: WEB-005
+    title: Server data is managed by a request cache library or the framework's loaders, not copied into a global store
+    level: soft
+    check: semi
+    how: In review, check whether the global store holds entity lists returned by APIs; where copying is truly needed, document the reason
+    applies: [platform:web]
+    why: Copied data goes stale, and invalidation, retries, and optimistic updates all have to be reimplemented.
+    detail: |
+      State ownership:
+      - View state rebuildable from the URL → route query parameters
+      - Server entities (lists, details, permission snapshots) → request cache library or loader
+      - Purely local transient state (popover open/closed, intermediate form values) → component state
+      - Lightweight client state shared across views (layout preferences, command palette open/closed) → context or a lightweight store
+      - Session and permissions → the server is authoritative; the frontend only holds a copy for display
+    sources: [S07, S37]
+  - id: WEB-006
+    title: All API calls go through a single HTTP client layer; authentication, error conversion, timeouts, and retries are implemented only in that layer
+    level: soft
+    check: auto
+    how: Use a lint import-restriction rule to forbid calling fetch directly or importing HTTP libraries outside the client layer
+    applies: [platform:web]
+    why: When every page writes its own 401 handling and retries, authentication behavior diverges and retry storms follow.
+  - id: WEB-007
+    title: When the backend provides an OpenAPI contract, frontend API types are generated from the contract, and generated files are not edited by hand
+    level: hard
+    check: auto
+    how: CI reruns the generation command and then runs `git diff --exit-code`; any difference fails
+    applies: [platform:web]
+    why: Hand-written API types silently drift from the backend, and errors surface only at runtime.
+    sources: [S35]
+    see: ["16", "10"]
+  - id: WEB-008
+    title: Before adding a dependency, record its purpose, alternatives, license, maintenance status, bundle size impact, and any external resources it needs
+    level: soft
+    check: semi
+    how: The PR template requires this; when CI detects a new direct dependency in the manifest, it checks that the PR description contains the record
+    applies: [platform:web]
+    why: Frontend dependencies grow fast, and after the fact it is hard to say why each package is there and whether it can be removed.
+    see: ["03"]
+  - id: WEB-009
+    title: Packages with commercial licenses, strong copyleft licenses, or archived status must not be added without license review; distinguish clearly between the free and paid features of the same project
+    level: hard
+    check: auto
+    how: CI runs a license scan on the lockfile and fails on any banned or pending-review license; review verifies exact package names
+    applies: [platform:web]
+    why: Packages with similar names can have completely different licenses and maintenance status; using paid features as if they were free carries legal risk.
+    detail: |
+      Common pitfalls:
+      - `react-pdf` (wojtekmaj, MIT) and `react-pdf-viewer` (archived, commercial license) are two different projects.
+      - AG Grid Community is MIT, while Enterprise features require a commercial license; Tiptap core is MIT, while Pro extensions and cloud services have separate terms.
+      - The licenses of tldraw and online Office preview services must be reviewed item by item.
+    sources: [S13, S17, S21, S22]
+    see: ["27"]
+  - id: WEB-010
+    title: Upgrade each dependency's major version in its own PR, stating the scope of impact, migration steps, and rollback method, and run the full E2E suite; do not upgrade several major versions in one batch
+    level: soft
+    check: semi
+    how: When CI detects a dependency major version change, it requires the PR description to include migration and rollback sections
+    applies: [platform:web]
+    why: Major versions of frontend libraries often bring incompatible API changes (for example, a new TanStack Table major version is incompatible with the old one); when upgrades are mixed together, problems cannot be pinpointed.
+    sources: [S14]
+    see: ["03"]
+  # ── Components and interaction ──
+  - id: WEB-011
+    title: Interactive components such as dialogs, menus, popovers, dropdown selects, and comboboxes are built on a mature accessible primitives library; do not hand-write focus management and keyboard interaction
+    level: hard
+    check: semi
+    how: In review, check whether new components hand-write focus traps, `role="dialog"`, arrow-key navigation, and similar logic; if so, require switching to the primitives library
+    applies: [platform:web]
+    why: Focus, keyboard, scroll locking behind overlays, and layering involve many details; a hand-written version almost certainly misses screen reader and keyboard users.
+    sources: [S09, S10, S11]
+    see: ["09"]
+  - id: WEB-012
+    title: An app's shared component layer uses only one primitives library; do not mix several
+    level: soft
+    check: auto
+    how: CI fails when the dependency manifest contains more than one primitives library (such as Base UI, Radix, React Aria, Ark UI); exceptions require an ADR
+    applies: [platform:web]
+    why: Different libraries have inconsistent event models, styling interfaces, and accessibility implementations, so combining them makes behavior unpredictable.
+  - id: WEB-013
+    title: Components copied into the repository as source (such as shadcn/ui) record their upstream source, version at the time of import, and local modifications; business pages reuse shared components instead of copying yet another variant
+    level: soft
+    check: semi
+    how: Maintain a component inventory file; CI checks that every file in the shared component directory is listed in it
+    applies: [platform:web]
+    why: Copying source buys freedom to customize, at the cost of upstream fixes no longer arriving automatically; without a record, upgrading is impossible.
+    sources: [S08]
+    see: ["08"]
+  - id: WEB-014
+    title: Use mature libraries for virtual lists, complex tables, drag-and-drop sorting, date and time zone calculations, rich text, collaborative editing, code editors, PDF rendering, and terminal emulation; do not implement them yourself
+    level: soft
+    check: manual
+    how: In review, identify home-grown implementations of these; where building in-house is truly needed, first write a build-vs-adopt decision record listing candidate libraries, gaps, tests, and an owner
+    applies: [platform:web]
+    why: These areas have an enormous number of edge cases (dynamic row heights, input method editors, time zones and daylight saving, selection and undo); the cost and defects of building them in-house far exceed expectations.
+    detail: |
+      What you can write yourself: specific business flows, page layouts, simple display components, API adapters and data transformation, and interactions tied to business semantics.
+  - id: WEB-015
+    title: An app uses only one primary styling approach; global styles are defined only at the app entry point
+    level: soft
+    check: semi
+    how: In review, check whether multiple utility-class frameworks or CSS-in-JS libraries are introduced at once; lint restricts global styles to being imported only in the entry file
+    applies: [platform:web]
+    why: Stacking several styling approaches causes specificity conflicts and bundle bloat.
+    see: ["08"]
+  - id: WEB-016
+    title: UI text is not hard-coded in components but goes through an i18n library; language packs are bundled with the app, not fetched from a public translation service at runtime
+    level: soft
+    check: semi
+    how: A lint rule finds bare text literals in JSX; scan the build output for URLs
+    applies: [platform:web]
+    why: Hard-coded text cannot be translated later; online translation services are unavailable in intranet and air-gapped environments.
+    see: ["09"]
+  # ── Robustness ──
+  - id: WEB-017
+    title: Every data request handles three states (loading, empty result, error) and cancels unfinished requests when leaving the page; every route has an error boundary
+    level: soft
+    check: semi
+    how: Component tests use API mocks to return empty and error responses; review checks that requests are wired to an abort signal
+    applies: [platform:web]
+    why: A page that handles only the success path shows a blank screen or stale data when the network is slow or the API fails.
+  - id: WEB-018
+    title: "E2E tests for key user flows cover six states: success, empty result, API error, timeout, no permission, offline"
+    level: soft
+    check: auto
+    how: Use the E2E framework's network interception to simulate each state; CI checks that the test cases for key flows are complete
+    applies: [platform:web]
+    why: If only the success path is tested, nobody has ever verified the most common failure scenarios.
+    ref_value: The six states are this standard's unified definition, replacing the various wordings in the original research such as "normal/timeout/no permission".
+    see: ["04"]
+  - id: WEB-019
+    title: "SSE and WebSocket connections are managed centrally in a communication layer: reconnect on disconnect with exponential backoff plus random jitter, re-authenticate when authentication expires, deduplicate by event ID, and resume from a cursor when the server supports it"
+    level: soft
+    check: semi
+    how: Tests simulate disconnects and duplicate and out-of-order events; review checks whether components create connections directly
+    applies: [platform:web]
+    why: Connections opened separately in components easily lead to duplicate subscriptions and memory leaks; reconnects without backoff create a storm when the service recovers.
+    see: ["16"]
+  - id: WEB-020
+    title: Handle dates and times with a date library or Intl; APIs transmit ISO 8601 strings with a time zone offset; do not use `new Date('YYYY-MM-DD')` for business calculations
+    level: soft
+    check: semi
+    how: A lint rule finds direct `new Date()` calls on date strings; tests run in a fixed time zone and on daylight saving transition days
+    applies: [platform:web]
+    why: Date strings without a time zone parse differently across browsers and time zones, often causing off-by-one-day errors.
+    see: ["09", "16"]
+  # ── Security ──
+  - id: WEB-021
+    title: Untrusted HTML and Markdown must not be injected into the DOM without sanitization; Markdown rendering disables raw HTML by default and validates link protocols
+    level: hard
+    check: auto
+    how: Lint bans `dangerouslySetInnerHTML`, `innerHTML`, and `v-html`, with exceptions allowed only at call sites that go through a sanitization function; security tests include XSS payloads
+    applies: [platform:web]
+    why: HTML in user content, comments, and tool output is the main entry point for XSS. Sanitizers themselves can have vulnerabilities, so first avoid rendering HTML, and sanitize only when rendering it is unavoidable.
+    detail: |
+      - Links allow only allowlisted protocols such as http, https, and mailto; reject `javascript:`.
+      - When HTML must be rendered, use an actively maintained sanitization library such as DOMPurify with a strict allowlist.
+      - When diagram code (such as Mermaid) comes from users, enable its security mode.
+    sources: [S28, S26, S25, S20]
+    see: ["25"]
+  - id: WEB-022
+    title: Access tokens and refresh tokens must not be written to localStorage or sessionStorage
+    level: hard
+    check: semi
+    how: Code scanning looks for writes of token-like keys to localStorage/sessionStorage; review the login implementation
+    applies: [platform:web]
+    why: Once the page has an XSS, tokens in script-readable storage can be stolen directly.
+    detail: |
+      Recommended: server-side sessions with HttpOnly, Secure, SameSite cookies, or have a BFF (Backend for Frontend) hold the tokens. With cookie-based authentication, write operations need CSRF protection; CORS is not a substitute for CSRF protection; see 19 for the approach. When the frontend truly must hold a token, keep it only in memory and shorten its lifetime.
+    sources: [S27]
+    see: ["19", "25"]
+  - id: WEB-023
+    title: Frontend build output does not depend on inline scripts or eval and runs correctly under a CSP without unsafe-inline or unsafe-eval
+    level: hard
+    check: auto
+    how: E2E runs in an environment with a strict CSP enabled and checks that the console and CSP reports show no violations
+    applies: [platform:web]
+    why: If the output cannot work without unsafe-inline or unsafe-eval, the CSP is effectively useless. Static sites can use hashes; SSR can use nonces.
+    sources: [S29]
+    see: ["25"]
+  - id: WEB-024
+    title: Server-side checks are authoritative for permissions; hiding buttons and menus in the frontend is only a UX measure, not access control
+    level: hard
+    check: semi
+    how: Every protected API has server-side negative permission tests; review checks for permissions enforced only by frontend logic
+    applies: [platform:web]
+    why: Users can freely modify both frontend code and requests.
+    sources: [S27]
+    see: ["19"]
+  - id: WEB-025
+    title: Server-side checks are authoritative for uploaded file type, size, quota, and permissions; frontend accept attributes and size hints only improve the experience
+    level: hard
+    check: semi
+    how: The server has negative tests that bypass the frontend and upload directly
+    applies: [platform:web]
+    why: Frontend validation can be bypassed.
+    see: ["25", "20"]
+  - id: WEB-026
+    title: Projects using server components (RSC) or an SSR framework subscribe to the framework's security advisories and upgrade for critical vulnerabilities within the security fix deadline
+    level: hard
+    check: auto
+    how: Dependency vulnerability scanning covers the framework packages, and alerts enter the security fix process
+    applies: [platform:web]
+    why: Server-side rendering turns frontend framework vulnerabilities into server vulnerabilities; React has officially announced a critical vulnerability in server components.
+    sources: [S33]
+    see: ["25"]
+  # ── Third-party resources and private deployment ──
+  - id: WEB-027
+    title: List the external scripts, fonts, CDNs, iframes, analytics, and map services that pages load, stating the domain, purpose, data sent out, and offline replacement
+    level: soft
+    check: auto
+    how: CI scans the build output for external URLs, compares them against the list, and fails on any not in the list
+    applies: [platform:web]
+    why: External resources leak user data and also break in intranet and air-gapped environments.
+    see: ["27"]
+  - id: WEB-028
+    title: Frontends for private or air-gapped deployment ship all fonts, icons, styles, and Workers (PDF.js, Monaco, etc.) with the app, request no unapproved external addresses, and pass acceptance in an air-gapped environment
+    level: hard
+    check: auto
+    how: E2E runs the core flows in an environment with external network access blocked, intercepts and records all external requests, and fails if there are any
+    applies: [platform:web, kind:onprem]
+    why: Working online does not mean working offline; fonts, Workers, and icons quietly reaching out to the internet are the most common failure in air-gapped deployments.
+    ref_value: "Reference value: 0 unapproved external requests."
+    sources: [S19, S21, S24]
+    see: ["32"]
+  - id: WEB-029
+    title: Frontend error and performance reports are redacted first; do not report user input, content, tokens, or full URL query parameters; reports containing customer data must not be sent to unapproved public services
+    level: hard
+    check: semi
+    how: The reporting SDK is configured with a shared filter hook that has unit tests; review the egress list
+    applies: [platform:web]
+    why: Error context, session replays, and breadcrumbs often carry user data; sending them to a third party is a data leak.
+    detail: |
+      - Production sourcemaps are uploaded only to the monitoring service, not deployed publicly with static assets.
+      - Session-replay features are off by default; enabling them requires a privacy review.
+    see: ["27", "26"]
+  - id: WEB-030
+    title: Every build carries a unique release ID, attached to all error reports and performance data
+    level: soft
+    check: auto
+    how: CI checks that the release ID is injected into the build output; monitoring can filter by release ID
+    applies: [platform:web]
+    why: Without a release ID, production errors cannot be mapped to a specific version and sourcemap. Frontend error boundaries are also no substitute for server-side observability.
+    see: ["26"]
+  # ── Performance ──
+  - id: WEB-031
+    title: Set bundle size budgets for the first screen and main routes and check them in CI; exceeding a budget must be explained in the PR
+    level: soft
+    check: auto
+    how: Use size-limit or a build analysis tool to compare against the budget in CI
+    applies: [platform:web]
+    why: Without a budget, "just pulling in one big library" gradually slows the first screen.
+    ref_value: "Starting reference (our own draft, no recognized source; calibrate for target devices and networks): authenticated SPA first-screen JS about 170 KB (gzip); content page first-screen JS about 80 KB (gzip), aiming for 0 JS on pure content pages; explain any single on-demand chunk over about 250 KB (gzip)."
+  - id: WEB-032
+    title: Code editors, charts, PDF preview, rich text, whiteboards, and Office preview are lazy-loaded by route or interaction and stay out of the first-screen bundle
+    level: soft
+    check: auto
+    how: Build analysis checks that first-screen chunks do not contain these libraries
+    applies: [platform:web]
+    why: These libraries are large and used by only a few pages, yet they make every user pay the first-screen cost.
+  - id: WEB-033
+    title: Measure LCP, INP, and CLS at P75 with real user data in production, targeting the official "good" thresholds; lab scores do not replace real user data
+    level: soft
+    check: auto
+    how: Collect with web-vitals and report to your own collector; CI additionally runs Lighthouse to prevent regressions
+    applies: [platform:web]
+    why: A perfect score on a development machine says nothing about the experience on low- and mid-range devices and slow networks.
+    ref_value: "Official \"good\" thresholds: LCP ≤ 2.5 seconds, INP ≤ 200 milliseconds, CLS ≤ 0.1, measured at the 75th percentile; look at mobile and desktop separately."
+    sources: [S30]
+  - id: WEB-034
+    title: The first screen's largest-content image is not lazy-loaded and declares its width and height; fonts are self-hosted with font-display set
+    level: soft
+    check: auto
+    how: Lighthouse CI checks for lazy-loaded LCP images and layout shift; a build scan checks font sources
+    applies: [platform:web]
+    why: Lazy-loading the LCP image delays Largest Contentful Paint; omitting dimensions causes layout shift.
+    sources: [S31]
+  # ── Packaging forms ──
+  - id: WEB-035
+    title: Components embedded in third-party pages isolate their styles and global variables; use an iframe when the host is untrusted or strong isolation is needed
+    level: soft
+    check: manual
+    how: Load the component in a test host page with conflicting styles and check that neither side's styles affect the other
+    applies: [platform:web]
+    why: An embedded component that pollutes the host's global CSS and window breaks the customer's page.
+  - id: WEB-036
+    title: Reusable component libraries declare react and react-dom as peerDependencies, do not bundle them into the output, and provide exports and type declarations
+    level: soft
+    check: auto
+    how: CI checks peerDependencies in package.json and scans the output to confirm it contains no React source
+    applies: [platform:web, kind:library]
+    why: A component library that ships its own React gives consumers two React instances, and hooks break.
+choices:
+  - category: Framework and build for authenticated apps
+    pick: React + TypeScript + Vite, built as a static SPA
+    alternatives:
+      - name: Vue + Vite
+        when: The team knows Vue or the customer has existing Vue assets; use Vue Router for routing and Pinia for state
+      - name: Svelte + SvelteKit
+        when: Pilot it when the team knows it and there is a clear benefit
+    avoid:
+      - { name: "Using an SSR framework everywhere regardless of scenario", why: "Authenticated apps usually do not need SEO, and it adds server operations" }
+    license: React and Vite are MIT
+    notes: The new Vite major version has switched to Rolldown as its bundler. React has been handed over to the React Foundation under the Linux Foundation (according to community reports).
+    sources: [S01, S02]
+  - category: Framework when server-side rendering is needed
+    pick: "Existing React team needing incremental SSR: React Router framework mode; already deeply invested in TanStack: TanStack Start"
+    alternatives:
+      - name: Next.js
+        when: Content is deeply integrated with React SSR and the team already knows it; when self-hosting multiple instances, handle cache consistency as officially required
+      - name: Nuxt
+        when: A Vue team needs SSR
+    avoid:
+      - { name: "Adopting server components without evaluating deployment and caching", why: "Server components carry their own security update pressure and cache consistency issues" }
+      - { name: "Mixing several SSR frameworks in one project", why: "Their routing and data loading models conflict" }
+    license: React Router, TanStack Start, and Next.js are MIT
+    notes: A new React Router major version has been released and major versions now follow a yearly cadence; React Router v6 and Remix v2 are no longer maintained. The continuation of the original Remix framework is React Router framework mode, and the new Remix is still in pre-release. TanStack Start has released a stable 1.0.
+    sources: [S03, S04, S05, S32]
+  - category: Marketing sites, blogs, content sites
+    pick: Astro (static-first, with interactive parts loaded on demand as islands)
+    alternatives:
+      - { name: "Starlight (built on Astro) or VitePress", when: "Technical documentation sites" }
+    avoid:
+      - { name: "Building pure content pages as a client-side SPA", why: "Poor SEO and first-screen performance" }
+    license: Astro is MIT
+    sources: [S36]
+  - category: Routing
+    pick: TanStack Router (type-safe)
+    alternatives:
+      - { name: React Router, when: "Existing React Router assets, or using its framework mode" }
+    avoid:
+      - { name: "Writing your own router or mixing two", why: "Inconsistent navigation and URL semantics" }
+    license: MIT
+    sources: [S06]
+  - category: Data fetching and caching
+    pick: TanStack Query + a single typed HTTP client
+    alternatives:
+      - { name: "The framework's built-in loaders", when: "When using an SSR framework, align with the framework's data mechanism" }
+      - { name: SWR, when: "Simple needs, only caching and revalidation" }
+    avoid:
+      - { name: "Building your own global request cache", why: "Invalidation, retries, and deduplication all have to be rewritten" }
+    license: MIT
+    sources: [S07]
+  - category: UI state
+    pick: Component state and context; Zustand for lightweight state shared across views
+    alternatives:
+      - { name: Jotai, when: "Atomic state shared across regions" }
+      - { name: Redux Toolkit, when: "Existing Redux assets, or strict action auditing is needed" }
+    avoid:
+      - { name: "Copying server entities into a global store", why: "Data goes stale and invalidation is hard to manage" }
+    license: MIT
+    sources: [S37]
+  - category: Forms and validation
+    pick: React Hook Form + Zod
+    alternatives:
+      - { name: TanStack Form, when: "Dynamic forms with strong typing requirements" }
+      - { name: "Native form + schema validation", when: "Simple forms" }
+    avoid:
+      - { name: "Hand-writing a generic validation engine", why: "Rules get scattered, and frontend and backend each have their own source of truth" }
+    license: MIT
+  - category: Base components (custom product UI)
+    pick: shadcn/ui + Base UI
+    alternatives:
+      - { name: shadcn/ui + Radix, when: "Existing Radix projects; no need to migrate" }
+      - { name: React Aria Components, when: "Strict accessibility requirements and complex components" }
+      - { name: Mantine, when: "Quickly building internal tools that need no deep customization" }
+    avoid:
+      - { name: "Hand-writing focus traps and accessible popovers", why: "Many behavioral details, hard to get right" }
+      - { name: "Mixing several primitives libraries in one component layer", why: "Inconsistent event and styling models" }
+    license: shadcn/ui, Base UI, Radix, React Aria, and Mantine are MIT
+    notes: shadcn/ui now uses Base UI by default for new projects; Radix is still supported. Base UI has released a stable 1.0 and continues to ship updates.
+    sources: [S08, S09, S10, S11]
+  - category: Admin console component library
+    pick: Ant Design
+    when: Form- and table-heavy B2B admin consoles, or customers with existing Ant Design projects; no need to force a rewrite to shadcn/ui
+    alternatives:
+      - { name: Element Plus, when: "Vue projects" }
+    license: MIT
+    sources: [S38]
+  - category: Styling approach
+    pick: Tailwind CSS + CSS variables (custom products); Ant Design projects use its theming mechanism
+    alternatives:
+      - { name: "CSS Modules or plain CSS", when: "The team does not use utility classes, or the component library has its own styling system" }
+    avoid:
+      - { name: "Mixing several utility-class or CSS-in-JS solutions", why: "Specificity conflicts and bundle bloat" }
+      - { name: "Online font services", why: "Unavailable on intranets and offline, and they leak access logs" }
+    license: MIT
+    notes: Tailwind Labs made large layoffs in early 2026; the framework remains MIT, and who will maintain it going forward is listed under open questions.
+    sources: [S12]
+  - category: Icons
+    pick: lucide-react (import on demand)
+    alternatives:
+      - { name: "@ant-design/icons", when: "Ant Design projects" }
+    avoid:
+      - { name: "Loading from an online icon CDN at runtime", why: "Unavailable offline" }
+    license: ISC
+  - category: Tables
+    pick: TanStack Table (highly customized); Ant Design Table for admin consoles
+    alternatives:
+      - { name: AG Grid Community, when: "Large data grids; Enterprise features require a commercial license" }
+    avoid:
+      - { name: "Writing new-version code by following old major-version tutorials", why: "The new major version's API is incompatible" }
+      - { name: "Building your own sorting, column dragging, and tree rows", why: "Many interaction and performance problems" }
+    license: TanStack Table is MIT; AG Grid Community is MIT, Enterprise is commercial
+    sources: [S13, S14]
+  - category: Virtual lists
+    pick: TanStack Virtual
+    alternatives:
+      - { name: react-window, when: "Simple lists with fixed row heights" }
+    avoid:
+      - { name: "Building your own dynamic-height virtual scrolling", why: "Scroll positioning and keyboard operation are error-prone" }
+    license: MIT
+    sources: [S15]
+  - category: Drag and drop
+    pick: "@dnd-kit/core"
+    alternatives:
+      - { name: "@dnd-kit/react", when: "Can be evaluated for new projects; still at 0.x, so do migration and keyboard regression testing on critical paths first" }
+      - { name: "Native HTML drag and drop", when: "Simple interactions such as dragging files in" }
+    avoid:
+      - { name: react-beautiful-dnd, why: "Legacy approach, no longer maintained" }
+    license: MIT
+    sources: [S16]
+  - category: Dates and times
+    pick: date-fns + Intl (Temporal where target browsers support it)
+    alternatives:
+      - { name: Day.js, when: "Ant Design projects" }
+      - { name: Luxon, when: "Heavy time zone logic" }
+    license: MIT
+  - category: Charts
+    pick: Apache ECharts (complex dashboards); Recharts (simple React reports)
+    alternatives:
+      - { name: "visx or uPlot", when: "Special customization or large-scale time series data" }
+    avoid:
+      - { name: "Hand-writing axes, tooltips, and layout", why: "A lot of work and hard to get right" }
+    license: ECharts is Apache-2.0; Recharts is MIT
+    sources: [S23]
+  - category: Code editing and diff
+    pick: Monaco Editor (IDE-like editing and diff); CodeMirror (lightweight editing)
+    alternatives:
+      - { name: react-diff-view, when: "Read-only diff display" }
+    avoid:
+      - { name: "Loading Monaco in an ordinary comment box", why: "Large bundle size" }
+      - { name: "Building an editor out of a textarea", why: "Lacks selection, completion, and undo" }
+    license: MIT
+    notes: Monaco's Workers must be served locally with the app.
+    sources: [S24]
+  - category: Markdown rendering
+    pick: react-markdown + remark-gfm, with raw HTML disabled
+    alternatives:
+      - { name: markdown-it + DOMPurify, when: "Specific syntax plugins are needed" }
+    avoid:
+      - { name: "Passing rendered output straight to dangerouslySetInnerHTML", why: "XSS" }
+    license: react-markdown is MIT; DOMPurify is dual-licensed Apache-2.0 or MPL-2.0
+    sources: [S25, S26]
+  - category: Rich text
+    pick: Tiptap core (mature extension model)
+    when: Adopt only when rich text is genuinely needed; if Markdown with preview is enough, do not adopt it
+    alternatives:
+      - { name: Lexical, when: "Deep editor customization is needed" }
+      - { name: ProseMirror, when: "Highly specialized editing models" }
+    avoid:
+      - { name: "Building your own selection, undo, and paste handling", why: "Input method and browser differences are endless" }
+    license: Tiptap core, Lexical, and ProseMirror are MIT; Tiptap Pro and cloud services are commercial
+    sources: [S17]
+  - category: Collaborative editing
+    pick: Yjs + editor binding + provider + your own permissions and persistence
+    when: Adopt only after the need for document-level real-time collaboration has been validated
+    alternatives:
+      - { name: Automerge, when: "A different sync model is needed" }
+    avoid:
+      - { name: "Writing your own CRDT or OT", why: "Correctness is hard to guarantee" }
+      - { name: "Treating Yjs documents as business audit records", why: "They lack permissions, versioning, and auditing" }
+    license: MIT
+    sources: [S18]
+  - category: Whiteboards and flowcharts
+    pick: Excalidraw (freeform drawing); React Flow (node editing); Mermaid (read-only diagrams)
+    alternatives:
+      - { name: "ELK.js or Dagre", when: "Automatic layout is needed; ELK.js is EPL-2.0" }
+      - { name: tldraw, when: "Review the license before use" }
+    avoid:
+      - { name: "Using a freeform whiteboard as a workflow engine", why: "It lacks a constraint model for nodes and edges" }
+    license: Excalidraw, React Flow, and Mermaid are MIT
+    notes: Excalidraw's fonts must be self-hosted; enable security mode for user-supplied Mermaid code.
+    sources: [S19, S20]
+  - category: File upload
+    pick: Native File / FormData + react-dropzone
+    alternatives:
+      - { name: Uppy, when: "Chunked large files, resumable uploads, multiple sources" }
+    license: MIT
+  - category: PDF preview
+    pick: react-pdf (wojtekmaj) + a locally served PDF.js Worker
+    alternatives:
+      - { name: "Wrapping pdfjs-dist directly", when: "Fine-grained control is needed" }
+    avoid:
+      - { name: react-pdf-viewer, why: "Archived and commercially licensed" }
+      - { name: "External PDF viewing services", why: "Files leave your environment" }
+    license: react-pdf is MIT; PDF.js is Apache-2.0
+    sources: [S21, S22]
+  - category: Office preview
+    pick: Convert to PDF or images on the server, then preview
+    alternatives:
+      - { name: "Self-hosted Collabora Online or ONLYOFFICE", when: "Interactive editing in the original format is needed; review licenses item by item" }
+    avoid:
+      - { name: "Public online Office preview", why: "Customer files leave your environment" }
+    notes: For server-side conversion, see 20.
+  - category: Real-time communication
+    pick: SSE for one-way server push; WebSocket for two-way; fetch streams for streaming responses
+    alternatives:
+      - { name: Socket.IO, when: "Its protocol ecosystem and fallback capabilities are needed" }
+    avoid:
+      - { name: "Polling for every message", why: "Wasteful and high latency" }
+      - { name: "Each component opening and reconnecting its own connection", why: "Duplicate subscriptions and leaks" }
+    license: Socket.IO is MIT
+  - category: Frontend i18n library
+    pick: i18next + react-i18next
+    alternatives:
+      - { name: "FormatJS (react-intl)", when: "Full ICU message format is needed" }
+      - { name: vue-i18n, when: "Vue projects" }
+    avoid:
+      - { name: "Fetching translations from the public internet at runtime", why: "Unavailable offline" }
+    license: MIT
+    notes: For behavior requirements on localized display, see 09.
+  - category: Animation
+    pick: CSS transitions + View Transitions
+    alternatives:
+      - { name: Motion, when: "Complex animation orchestration is needed" }
+    avoid:
+      - { name: "Pulling in a heavy animation library for simple interactions", why: "Bundle size" }
+    license: MIT
+    notes: For animation durations, see 08; for reduced motion, see 09.
+    sources: [S01]
+  - category: Component documentation
+    pick: Storybook (component libraries, design systems)
+    alternatives:
+      - { name: Ladle, when: "Something lighter is needed" }
+    avoid:
+      - { name: "Installing Storybook in every business single-page app", why: "Maintenance cost exceeds the benefit" }
+    license: MIT
+  - category: Error monitoring
+    pick: Self-hosted Sentry or your own error collection service, together with release IDs and sourcemap management
+    alternatives:
+      - { name: GlitchTip, when: "A lighter self-hosted option is needed" }
+    avoid:
+      - { name: "Uploading exceptions and sourcemaps to a public SaaS by default", why: "Customer data leaks" }
+    notes: For licensing, see open questions.
+  - category: Performance monitoring
+    pick: web-vitals collection + your own collector + Lighthouse CI
+    alternatives:
+      - { name: OpenTelemetry browser SDK, when: "Needs to connect with backend traces; still officially marked experimental" }
+    avoid:
+      - { name: "Looking only at local Lighthouse", why: "Not representative of real users" }
+    license: web-vitals is Apache-2.0; OpenTelemetry is Apache-2.0
+    sources: [S30, S34]
+  - category: OpenAPI client generation
+    pick: See 10 (choice of TypeScript generator); for contract semantics, see 16
+    sources: [S35]
+  - category: TypeScript configuration, lint and formatting, package manager, unit testing library
+    pick: See 10
+  - category: E2E testing tools
+    pick: See 04
+antipatterns:
+  - { bad: "Putting all API data into a global store", instead: "Give server data to the request cache library; the store holds only client UI state" }
+  - { bad: "Each page writing its own fetch, 401 handling, and retries", instead: "A single HTTP client layer plus generated API types" }
+  - { bad: "Casually creating new Modal, Popover, and Select components", instead: "Build on an accessible primitives library" }
+  - { bad: "Writing your own virtual list for a thousand rows", instead: "Use TanStack Virtual" }
+  - { bad: "Loading a several-hundred-KB editor on every page", instead: "Lazy-load by route or interaction" }
+  - { bad: "Injecting Markdown from tool output or comments as HTML", instead: "Use react-markdown with raw HTML disabled and links validated" }
+  - { bad: "Casually opening a WebSocket in useEffect without cleanup", instead: "A central communication layer manages connections, reconnects, and deduplication" }
+  - { bad: "Adding a package because its name looks similar", instead: "Verify the exact package name, license, and archived status" }
+  - { bad: "Treating npm update as a fix", instead: "Pin versions, upgrade one at a time, run full regression, prepare a rollback" }
+  - { bad: "Claiming offline support while fonts and icons disappear when disconnected", instead: "Run a full smoke test with external network access blocked" }
+  - { bad: "Using UI screenshots instead of functional assertions", instead: "E2E asserts the six states; screenshots are only for visual acceptance" }
+  - { bad: "Adding a batch of libraries as a \"platform capability reserve\"", instead: "Add libraries per feature when needed, and record them" }
+sources:
+  - { id: S01, title: React 19.3, url: "https://react.dev/blog/2026/09/09/react-19-3", publisher: React, date: 2026-09-09, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: Announcing Vite 8, url: "https://vite.dev/blog/announcing-vite8", publisher: Vite, date: 2026-03-12, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: TanStack Start 1.0, url: "https://tanstack.com/blog/tanstack-start-1-0", publisher: TanStack, date: 2026-10-13, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: React Router v8, url: "https://remix.run/blog/react-router-v8", publisher: Remix, date: 2026-06-17, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "React Router: Rendering Strategies", url: "https://reactrouter.com/start/framework/rendering", publisher: Remix, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: TanStack Router Overview, url: "https://tanstack.com/router/latest/docs/overview", publisher: TanStack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: TanStack Query Overview, url: "https://tanstack.com/query/latest/docs/framework/react/overview", publisher: TanStack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "shadcn/ui: Base UI is now the default", url: "https://ui.shadcn.com/docs/changelog/2026-07-base-ui-default", publisher: shadcn, date: 2026-07, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: Base UI Releases, url: "https://base-ui.com/react/overview/releases", publisher: Base UI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: Radix Primitives, url: "https://www.radix-ui.com/primitives", publisher: WorkOS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: React Aria Components, url: "https://react-spectrum.adobe.com/react-aria/", publisher: Adobe, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Tailwind Labs lays off 75 percent of engineers, url: "https://www.devclass.com/ai-ml/2026/01/08/tailwind-labs-lays-off-75-percent-of-engineers-thanks-to-brutal-impact-of-ai/4079571", publisher: DevClass, date: 2026-01-08, kind: community, checked: 2026-11-14 }
+  - { id: S13, title: "AG Grid: Community vs Enterprise", url: "https://www.ag-grid.com/react-data-grid/community-vs-enterprise/", publisher: AG Grid, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: Announcing TanStack Table v9, url: "https://tanstack.com/blog/announcing-tanstack-table-v9", publisher: TanStack, date: 2026-08-04, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: TanStack Virtual, url: "https://tanstack.com/virtual/latest", publisher: TanStack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "dnd kit: React quickstart", url: "https://dndkit.com/react/quickstart/", publisher: dnd kit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: Tiptap Editor Overview, url: "https://tiptap.dev/docs/editor/getting-started/overview", publisher: Tiptap, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Yjs: A collaborative editor", url: "https://docs.yjs.dev/getting-started/a-collaborative-editor", publisher: Yjs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "Excalidraw: Installation", url: "https://docs.excalidraw.com/docs/@excalidraw/excalidraw/installation", publisher: Excalidraw, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Mermaid: Usage and security level", url: "https://mermaid.js.org/config/usage.html", publisher: Mermaid, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: wojtekmaj/react-pdf, url: "https://github.com/wojtekmaj/react-pdf", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "react-pdf-viewer (archived)", url: "https://github.com/react-pdf-viewer/react-pdf-viewer", publisher: GitHub, date: 2026-03-25, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Apache ECharts, url: "https://echarts.apache.org/en/index.html", publisher: Apache Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: Monaco Editor, url: "https://github.com/microsoft/monaco-editor", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: react-markdown, url: "https://github.com/remarkjs/react-markdown", publisher: remark, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: DOMPurify, url: "https://github.com/cure53/DOMPurify", publisher: Cure53, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: OWASP Session Management Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S28, title: OWASP Cross Site Scripting Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S29, title: "MDN: Content Security Policy", url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: Defining the Core Web Vitals metrics thresholds, url: "https://web.dev/articles/defining-core-web-vitals-thresholds", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: Optimize Largest Contentful Paint, url: "https://web.dev/articles/optimize-lcp", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S32, title: "Next.js: Self-hosting", url: "https://nextjs.org/docs/app/guides/self-hosting", publisher: Vercel, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: Critical Security Vulnerability in React Server Components, url: "https://react.dev/blog/2025/12/03/critical-security-vulnerability-in-react-server-components", publisher: React, date: 2025-12-03, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: "OpenTelemetry: Browser getting started", url: "https://opentelemetry.io/docs/languages/js/getting-started/browser/", publisher: OpenTelemetry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: openapi-fetch, url: "https://openapi-ts.dev/openapi-fetch/", publisher: openapi-ts, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S36, title: "Astro: On-demand rendering", url: "https://docs.astro.build/en/guides/on-demand-rendering/", publisher: Astro, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S37, title: Zustand, url: "https://zustand.docs.pmnd.rs/", publisher: Poimandres, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S38, title: "Ant Design (npm)", url: "https://www.npmjs.com/package/antd", publisher: Ant Group, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - The current Next.js major version status and self-hosting requirements were not verified online this time (the original report said Next.js 16).
+  - "Radix Primitives' maintenance activity is unclear: third-party comparisons say its releases have slowed, and no official roadmap was found; the default recommendation of Base UI for new projects is partly based on this."
+  - Tailwind Labs was reportedly acquired by Shopify in 2026-09, with the framework remaining open source under MIT; no official announcement was found to verify this.
+  - The handover of React to the React Foundation under the Linux Foundation is supported by only a single community source; the official announcement has not been verified.
+  - The release date of the stable Base UI 1.0 (reportedly 2025-12) has not been verified on the official releases page.
+  - Apart from Tailwind, library licenses were taken from a snapshot in the original report and not individually verified against the LICENSE files in the official repositories; the licenses of self-hosted Sentry, GlitchTip, tldraw, ONLYOFFICE, and Collabora need separate verification.
+  - The new Remix is still in pre-release; its positioning relative to React Router needs to be reviewed after the stable release.
+  - "The 170/80/250 KB bundle size budgets are our own draft; research pending: the basis for frontend bundle size budgets commonly used in the industry."
+  - "Research pending: example dependency lists for admin consoles (Ant Design), Vue, and embeddable widgets."
+  - "Research pending: when to use micro-frontends, and with what."
+  - "Research pending: choice and security boundaries of browser terminals (such as xterm.js)."
+  - "Research pending: practices for frontend compatibility testing on domestic Chinese operating systems and browser engines."

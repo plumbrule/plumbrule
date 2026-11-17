@@ -1,0 +1,659 @@
+id: "26"
+slug: ops
+title: Operations, Deployment, and SRE
+summary: "How to deploy services (single host, Compose, Kubernetes), how to choose and harden runtime images, how to release and roll back, how to observe and alert, how to handle incidents, and how to deliver, upgrade, and recover on-premises and air-gapped installations."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - "Deployment forms: single host, Docker Compose, Kubernetes, managed environments, and when Kubernetes is worth adopting"
+    - Choosing runtime base images and hardening the container runtime
+    - "Health probes, resource configuration, graceful shutdown, autoscaling"
+    - "Release strategy: staged rollouts, rollback, feature flags, upgrade paths and compatibility windows"
+    - "Observability: OpenTelemetry, log collection and retention, metrics, distributed tracing"
+    - "SLOs and alerting, on-call, incident handling (incident severity uses SEV1–SEV4), runbooks and postmortems"
+    - Capacity and the cost of observability data
+    - "On-premises and air-gapped delivery: offline installation bundles, internal image registries, preflight checks, diagnostic bundles, upgrade and rollback"
+    - "Operational execution of backup and restore (policy and drill frequency are referenced from 17)"
+  excludes:
+    - { what: "Log field conventions, error propagation", see: "02" }
+    - { what: "How to write Dockerfiles, pinning base image digests, non-root users, linting Compose/Helm and other configuration files", see: "15" }
+    - { what: "CI gate order, release process, branching and review", see: "03" }
+    - { what: "How to write user-facing changelogs", see: "05" }
+    - { what: "Image vulnerability scanning, SBOMs, signing and provenance attestation, key management", see: "25" }
+    - { what: "Backup policy, recovery objectives, restore drill frequency, database migration principles", see: "17" }
+    - { what: "Compatibility and versioning of APIs and events", see: "16" }
+    - { what: "Product analytics instrumentation and the general cost ledger", see: "22" }
+    - { what: "Open-source license positions (whether AGPL, BUSL, FSL may be distributed with the product), statutory log retention", see: "27" }
+    - { what: "General rules for agent permissions and prompt injection", see: "23" }
+    - { what: "Running coding agents on a local machine", see: "32" }
+overview: |
+  1. **Choose the deployment form by capability, not by fashion.** A single host (Compose or systemd) can be real production, but must not be described as cross-host high availability; adopt Kubernetes only when you need cross-host failover, automatic multi-node scaling, or multi-team isolation, and someone can operate the cluster. Kubernetes does not automatically make your database highly available.
+  2. **Deployments reference immutable image digests.** Do not use `latest`; every release ships an artifact manifest (image digests, Charts, checksums) that is verified before installation.
+  3. **Runtime images should be small and locked down.** Default to images without a shell or package manager, such as distroless or Docker Hardened Images; run containers as non-root, with privilege escalation disabled and all capabilities dropped.
+  4. **Each of the three probes has its own job.** liveness only decides whether the process should be restarted, readiness decides whether it can take traffic, and startup covers slow starts; a transient downstream failure must not trigger mass restarts. On SIGTERM, drain traffic first, then exit.
+  5. **Releases must be reversible.** Roll out in stages with pause and rollback conditions written in advance; break destructive data changes into "expand → migrate → contract" steps. Rolling back the image is not rolling back the database.
+  6. **Use OpenTelemetry as a thin contract for observability.** Structured logs to standard output, low-cardinality metrics, OTel context propagation; choose the backend by scale. First check the stability level of each signal for your target language: traces and metrics are stable in most languages, logs are still not stable in many languages, and Profiles is still alpha.
+  7. **Page on user impact.** Set SLOs for critical user journeys and use multi-window burn-rate alerts; every paging alert has an owner and a runbook; high CPU should not wake anyone up at night.
+  8. **Incidents have a commander, a timeline, and a postmortem.** Severity uses SEV1–SEV4; postmortems are blameless, and action items are tracked to closure.
+  9. **A backup counts only when restore succeeds.** Monitor backup jobs; run restore drills in an isolated environment at the frequency set in 17, run business smoke tests, and record the actual recovery time.
+  10. **Offline operation is an acceptance criterion.** On-premises releases are accepted for install, upgrade, and rollback in an environment with all public internet egress cut off; by default they send no telemetry, do not check for updates, and download no resources that are not in the bundle.
+rules:
+  # ── Deployment forms ──
+  - id: OPS-001
+    title: For each supported deployment form, document the supported operating systems and CPU architectures, minimum resources, dependencies, and high-availability boundaries; single-host deployments (including Compose) must not promise cross-host high availability
+    level: hard
+    check: manual
+    how: Review the deployment documentation or delivery checklist item by item against these fields; check that external materials do not use the words "high availability" or "automatic failover" for single-host forms
+    applies: [kind:service, kind:onprem]
+    why: Compose only orchestrates containers on one host; if the machine fails, the service stops. Promising availability you cannot deliver turns an outage into both an incident and a breach of contract.
+    detail: |
+      - Common forms: single host (Compose, or systemd plus native packages), cluster (Kubernetes), managed (a cloud provider or the customer's existing platform).
+      - For each form, document: who is responsible for the operating system, container runtime, certificates, backups, and cluster control plane; how large the failure domain is; how upgrades and backups are done.
+      - A single-host deployment can be real production, provided the business can accept unavailability during a host failure and maintenance windows.
+    sources: [S01]
+  - id: OPS-002
+    title: Introduce Kubernetes only when you need cross-host failover, automatic multi-node scaling, or multi-team workload isolation, and someone can own cluster upgrades and troubleshooting
+    level: soft
+    check: manual
+    how: "The design review for introducing Kubernetes answers four questions: availability target, failure domains, scaling approach, and who operates the cluster"
+    applies: [kind:service, kind:onprem]
+    why: Kubernetes brings a whole set of operational burdens across networking, storage, admission, and upgrades; without matching needs and staff, the complexity just becomes a new source of failures.
+    detail: |
+      - There is no "adopt Kubernetes once you have N services" threshold; decide based on the real availability target, maintenance frequency, and team capability.
+      - When the customer already runs Kubernetes or the contract requires a cluster deployment, follow the customer's environment.
+      - Kubernetes does not automatically make databases or object storage highly available; stateful components need their own design (see 17).
+      - Upstream Kubernetes maintains only the three most recent minor versions, each with roughly 14 months of patch support, and has no long-term support release; self-managed clusters need a planned upgrade cadence.
+    sources: [S02]
+    see: ["01", "17"]
+  - id: OPS-003
+    title: Declare cloud resources and cluster configuration as infrastructure as code (IaC) and commit it to the repository; manual console changes are not the final state, and drift is detected regularly
+    level: soft
+    check: semi
+    how: Run `tofu plan` / `terraform plan` or the GitOps controller's diff check on a schedule, and open a ticket when there is a difference
+    applies: [kind:service]
+    why: If changes are made only by hand in the console, the environment cannot be rebuilt, and after an incident nobody can say what was changed.
+    see: ["15"]
+  # ── Images and artifacts ──
+  - id: OPS-004
+    title: Production deployments reference images by immutable digest (`@sha256:…`), not `latest` or any movable tag
+    level: hard
+    check: auto
+    how: CI scans Helm values, rendered manifests, and Compose files, and fails if an image reference has no digest; an admission policy can additionally block it in the cluster
+    applies: [kind:service, kind:onprem]
+    why: A tag can be moved to a different image; a digest cannot. Only with digests can you know exactly which version is running and roll back precisely.
+    detail: For how to pin FROM in a Dockerfile, see 15 (CFG-028).
+    sources: [S03]
+    see: ["15"]
+  - id: OPS-005
+    title: Each release ships an artifact manifest (image digests per architecture, Chart packages, dependencies, and checksums), verified before installation and upgrade
+    level: hard
+    check: auto
+    how: The first step of the install script verifies every file's SHA-256 and every image digest against the manifest, and stops on any mismatch
+    applies: [kind:service, kind:onprem]
+    why: Offline copying and multiple hand-offs easily lead to missing or replaced files; without verification you cannot guarantee that what is installed is the version that was released.
+    detail: For signing, SBOMs, and provenance attestation, see 25.
+    sources: [S18]
+    see: ["25"]
+  - id: OPS-006
+    title: For the same CPU architecture, cloud and on-premises use the same image digest; multiple architectures publish the same version through a multi-arch manifest list, with configuration and external dependencies injected by the environment
+    level: soft
+    check: semi
+    how: Compare the image digests in the deployment records of each environment
+    applies: [kind:service, kind:onprem]
+    why: If you build a separate image for on-premises, what you tested and what you delivered are not the same thing.
+    detail: The same image does not mean stateful components have the same availability in both environments; write availability commitments separately for each (see OPS-001).
+  - id: OPS-007
+    title: For the runtime stage, prefer minimal base images without a shell or package manager (such as distroless or Docker Hardened Images); troubleshoot with debug variants or ephemeral debug containers, and do not bake debugging tools into production images
+    level: soft
+    check: semi
+    how: Check the final-stage FROM during review; compare package and vulnerability counts using image scan results
+    applies: [kind:service, kind:onprem]
+    why: The less there is in an image, the fewer vulnerabilities and exploitable tools, and the easier scan results are to handle.
+    detail: |
+      - Static binaries such as Go and Rust use the distroless static image; Java, Python, and Node use the corresponding language distroless or hardened image.
+      - distroless tags carry a Debian major-version suffix (such as `-debian13`); pin the suffix rather than relying on what the unsuffixed default points to.
+      - If system packages must be installed at runtime, use the official slim image and keep build tools in earlier stages of a multi-stage build (see 15 CFG-032).
+    sources: [S04, S05]
+    see: ["15", "25"]
+  - id: OPS-008
+    title: Containers run as non-root, with privilege escalation disabled, all Linux capabilities dropped, and seccomp set to the runtime default; do not use privileged, hostNetwork, or hostPath, and when truly needed, document the reason and compensating restrictions
+    level: hard
+    check: auto
+    how: Enable the restricted level of Pod Security Admission on Kubernetes namespaces; for Compose files, use a CI script to check `user`, `cap_drop`, `security_opt`, and `privileged`
+    applies: [kind:service, kind:onprem]
+    why: Container escape and lateral movement mostly rely on root, excess capabilities, and host mounts; these are requirements of the official Kubernetes restricted baseline.
+    detail: |
+      - The Kubernetes restricted baseline requires: `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]` (only `NET_BIND_SERVICE` may be added back), and seccomp set to `RuntimeDefault` or `Localhost`.
+      - A read-only root filesystem (`readOnlyRootFilesystem: true`) is not in the official baseline, but enabling it by default is recommended; mount emptyDir or volumes for directories that need writes.
+      - For how to set a non-root user in the image, see 15 (CFG-029).
+    sources: [S06]
+    see: ["15", "25"]
+  # ── Runtime ──
+  - id: OPS-009
+    title: "Distinguish liveness, readiness, and startup probes: liveness only checks whether the process itself is stuck, not downstreams such as the database; readiness reflects whether it can take traffic; slow-starting services get a startup probe"
+    level: hard
+    check: semi
+    how: Review the probe implementation; in integration tests, stop downstream dependencies and confirm the service becomes not-ready rather than being restarted repeatedly
+    applies: [kind:service]
+    why: When liveness depends on downstreams, a brief database hiccup restarts every instance at once, turning a small fault into a total outage.
+    sources: [S07]
+  - id: OPS-010
+    title: In Compose, when a service depends on another being ready, give the dependency a healthcheck and use `depends_on` with `condition service_healthy`; the application itself must still be able to retry connections
+    level: soft
+    check: auto
+    how: CI parses Compose files and checks that depends_on uses the long syntax with a health condition
+    applies: [kind:service, kind:onprem]
+    why: The short form of depends_on only guarantees start order, not that the other service is actually usable.
+    sources: [S01]
+  - id: OPS-011
+    title: On SIGTERM, first mark the service not-ready and stop accepting new requests and tasks, finish or hand back in-flight work within a set deadline, then exit; the shutdown deadline must not exceed the platform's forced-termination time
+    level: hard
+    check: semi
+    how: Integration tests send SIGTERM during long requests, streaming connections, and queued tasks, and check that no request is cut off and that tasks are redelivered
+    applies: [kind:service]
+    why: Releases, scale-downs, and node maintenance all send SIGTERM; handle it badly and every release drops requests or leaves tasks half done.
+    detail: |
+      - After SIGTERM, Kubernetes by default waits `terminationGracePeriodSeconds` before forcing termination; Compose uses `stop_grace_period`.
+      - Unfinished tasks are taken over through idempotency and retries; for consistency requirements see 16 and 17.
+    sources: [S08]
+    see: ["16", "17", "18"]
+  - id: OPS-012
+    title: Every container explicitly configures CPU and memory requests and limits (or Compose resource limits), with values derived from load tests or production observation, not copied from examples
+    level: hard
+    check: auto
+    how: CI uses kube-linter or a policy engine to check that every container in the manifests has requests and limits; review checks the basis for the values
+    applies: [kind:service, kind:onprem]
+    why: Without limits, workloads fight over resources and trigger OOM; without requests, CPU-utilization-based autoscaling has no baseline.
+    sources: [S09]
+  # ── Release and rollback ──
+  - id: OPS-013
+    title: Release notes state which versions can upgrade directly, whether an intermediate version is required, irreversible changes, and rollback limitations
+    level: hard
+    check: manual
+    how: During release review, check that all four items are present in the release notes
+    applies: [kind:service, kind:onprem]
+    why: On-premises customers run a wide spread of versions; without documented upgrade paths and irreversible points, customers hit problems when upgrading and cannot go back when something breaks.
+    detail: For how to write user-facing changelogs, see 05; for the release process, see 03.
+    sources: [S10]
+    see: ["03", "05"]
+  - id: OPS-014
+    title: Release destructive data-structure or protocol changes in "expand → migrate → contract" steps, with the contract step in a later version; do not treat rolling back the image as rolling back the data
+    level: hard
+    check: semi
+    how: When reviewing migration plans, check the steps; CI runs compatibility tests with old and new versions running side by side
+    applies: [kind:service, kind:onprem]
+    why: During a rolling release, old and new versions run at the same time; a one-shot destructive change breaks old instances, and once data is changed there is no going back.
+    detail: For database migration principles see 17; for API compatibility see 16. Once data has been irreversibly transformed, the only options are restoring from backup or fixing forward.
+    sources: [S10]
+    see: ["16", "17"]
+  - id: OPS-015
+    title: Production releases roll out in stages; record a baseline of key metrics before switching, write pause and rollback conditions in advance, and confirm the rollback steps work
+    level: soft
+    check: manual
+    how: The release record contains the baseline, staging plan, and pause and rollback conditions; spot-check whether rollback has been rehearsed
+    applies: [kind:service]
+    why: Pushing to all instances at once means a problem immediately affects every user; without conditions set in advance, people hesitate and argue when something goes wrong.
+    detail: |
+      - The staging unit can be instances, traffic percentage, tenants, or feature flags.
+      - Decision criteria use user-facing metrics (error rate, latency, critical business failure counts, error budget consumption), not just "deployment succeeded".
+    see: ["03"]
+  - id: OPS-016
+    title: Feature flags are read through a standard interface such as OpenFeature; when the flag service is unreachable, return the default value from code and keep running, without blocking startup or requests
+    level: hard
+    check: semi
+    how: In integration tests, stop the flag service and confirm the application starts normally and runs with default values
+    applies: [kind:service, kind:onprem]
+    why: The OpenFeature specification requires that evaluation does not throw and returns the default value on error; a remote flag service going down, or an on-premises network being cut off, must not take down the business.
+    sources: [S11]
+  - id: OPS-017
+    title: Register an owner, purpose, default value, and planned removal date or version for every feature flag, and clean it up when due
+    level: soft
+    check: semi
+    how: The flag inventory is committed to the repository, and CI lists flags that are past due and not yet removed
+    applies: [kind:service]
+    why: Flags that are never cleaned up pile up, their combinations get ever harder to test, and old branch code lingers.
+  - id: OPS-018
+    title: Document which versions are maintained concurrently and whether version-skipping upgrades are allowed; do not stay compatible with historical versions indefinitely
+    level: soft
+    check: manual
+    how: The support matrix is committed to the repository and updated during release review
+    applies: [kind:onprem]
+    why: Without a boundary, compatibility code and the test matrix keep growing.
+    ref_value: "Reference starting point: maintain the current and previous minor versions (N and N-1); there is no universal standard, so adjust to customer contracts and release frequency."
+  # ── Observability ──
+  - id: OPS-019
+    title: Application logs go to standard output or standard error and are collected by the platform; do not keep logs only in files inside the container
+    level: hard
+    check: auto
+    how: Deployment configuration checks find no configuration that writes logs only to paths inside the container; after startup, confirm the collector receives logs
+    applies: [kind:service]
+    why: When a container is recreated, files inside it are gone, and so are the logs; writing to standard output is the prerequisite for uniform collection on container platforms.
+    detail: For log format and required fields (time, level, service, trace ID, etc.) see 02 (COD-016, COD-017); operations adds two more resource attributes, version and environment.
+    sources: [S12]
+    see: ["02"]
+  - id: OPS-020
+    title: Report traces and metrics with the OpenTelemetry API and the OTLP protocol, forwarded through a Collector; business code does not call any single backend's proprietary SDK directly
+    level: soft
+    check: semi
+    how: Dependency scanning looks for vendor-proprietary telemetry SDKs in business modules
+    applies: [kind:service]
+    why: Binding to one vendor's SDK means changing backends requires changing business code; with the standard interface and a Collector, the backend can be swapped according to deployment scale.
+    detail: |
+      - All three signal types use the same set of resource attributes (at least `service.name`, `service.version`, `deployment.environment`) so they can be correlated.
+      - Cross-service calls propagate W3C Trace Context.
+    sources: [S13, S14]
+  - id: OPS-021
+    title: Before adopting OpenTelemetry, check the stability level of each signal for the target language; where logs are not yet stable in that language, emit structured logs with the language's mature native logging library, collected by the Collector with the trace ID attached
+    level: soft
+    check: manual
+    how: Attach the conclusion from the OpenTelemetry status page to the design review
+    applies: [kind:service]
+    why: SDK maturity differs by language; if you use a signal that is not yet stable, its API may change when you upgrade.
+    detail: |
+      - Status at the time of verification (2026-11): tracing is stable in most languages; metrics are stable in Go, Java, JavaScript, Python, .NET, and others; logs are stable only in a few languages (such as Java, .NET, C++), are a release candidate in Go, and are still in development in JavaScript and Python.
+      - Profiles is still alpha; do not use it on critical paths.
+      - Collector components have varying stability levels; each component's README is authoritative.
+    sources: [S13, S15]
+  - id: OPS-022
+    title: Failures or slowdowns of observability components (Collector, log collection, backends) must not block business requests; configure the Collector with memory limits and batching, preferring to drop telemetry over taking down the business
+    level: hard
+    check: semi
+    how: During testing, stop or throttle the observability backend and confirm business request latency and success rate are unaffected
+    applies: [kind:service, kind:onprem]
+    why: Slowing or stopping the system in order to see it more clearly gets priorities backwards; small on-premises environments are especially easy to overwhelm with telemetry.
+    detail: Configure the Collector's memory_limiter, batch, sampling, and buffering according to deployment scale, not by copying examples.
+    sources: [S14]
+  - id: OPS-023
+    title: Unbounded fields such as user IDs, request IDs, trace IDs, and order numbers are not used as metric labels or as log index labels
+    level: hard
+    check: semi
+    how: Periodically use `promtool tsdb analyze` or the backend's built-in cardinality statistics to find the labels with the most series; check labels when reviewing new metrics
+    applies: [kind:service]
+    why: Every distinct label value creates a new time series or log stream; with unbounded values, storage and queries spiral out of control.
+    detail: Put such fields in the log content or structured metadata, and search by content when needed.
+    sources: [S16, S17]
+  - id: OPS-024
+    title: Collect logs centrally; document retention periods and storage budgets separately by purpose (troubleshooting, audit, compliance), and review them regularly against actual usage
+    level: soft
+    check: manual
+    how: Write the retention policy into the deployment documentation; review storage growth and cost monthly or quarterly
+    applies: [kind:service, kind:onprem]
+    why: Without retention periods, small on-premises environments fill their disks with logs first; without separating by purpose, audit logs may get deleted along with troubleshooting logs.
+    detail: For statutory retention periods see 27; distributed traces are sampled by default rather than stored in full. The cost of observability data goes into the cost ledger in 22.
+    see: ["22", "27"]
+  - id: OPS-025
+    title: "Distinguish local operational telemetry from telemetry sent to the vendor: vendor-bound telemetry is off by default and must be explicitly enabled by the customer; disabling outbound telemetry does not affect local health checks, metrics, or auditing"
+    level: hard
+    check: auto
+    how: Run in an air-gapped or deny-all-egress environment and record outbound connections; check that the outbound switch is off in the default configuration
+    applies: [kind:onprem]
+    why: On-premises customers commonly prohibit data egress, and sending data by default violates contracts and regulations; tying local operational capabilities to the outbound switch would, in turn, leave customers unable to troubleshoot themselves.
+    sources: [S18]
+    see: ["22", "27"]
+  # ── SLOs and alerting ──
+  - id: OPS-026
+    title: Critical services define SLIs (such as order success rate, latency of key endpoints) and SLOs per user journey, documenting the measurement window, exclusions, and owner
+    level: soft
+    check: semi
+    how: SLO definition files are committed to the repository, CI validates required fields, and they are reviewed quarterly against actual data
+    applies: [kind:service]
+    why: CPU and memory alone cannot tell you whether users are affected; only user-facing targets can decide when to pause new features and fix stability first.
+    detail: An SLO is an internal target and is not the same as an SLA in an external contract; for very low-traffic services, do not page on small-sample percentages.
+    ref_value: "A common example is a 30-day rolling window with a 99.9% success rate; this is only an example, and the target is set by business impact."
+    sources: [S19]
+  - id: OPS-027
+    title: Paging alerts are based on user impact (such as multi-window error-budget burn rates), not on per-host CPU or memory thresholds; resource alerts create tickets or notifications
+    level: soft
+    check: semi
+    how: Review alert rules, listing the rules at the paging level and examining each one's trigger condition
+    applies: [kind:service]
+    why: High resource metrics do not necessarily mean users are affected; paging on them produces a flood of useless alerts and numbs the people on call.
+    detail: |
+      Starting thresholds from the Google SRE Workbook for a 99.9% target: page when the burn rate exceeds 14.4× over both the 1-hour and 5-minute windows, or exceeds 6× over both the 6-hour and 30-minute windows; slower consumption creates a ticket. Adjust to your own target and traffic.
+    sources: [S19]
+  - id: OPS-028
+    title: Every paging alert carries an owner, an incident severity, and a runbook link; alerts without a runbook must not be set to page
+    level: hard
+    check: auto
+    how: CI checks that alert rule labels and annotations include owner, severity, and runbook_url, and that the link is reachable
+    applies: [kind:service]
+    why: If you are woken in the middle of the night without knowing what to do or whom to contact, the alert is just noise.
+    sources: [S19, S20]
+  - id: OPS-029
+    title: Alert routing uses grouping, inhibition, and silencing; on-call has a primary, a secondary, and an escalation chain; each month, count alerts, the actionable proportion, and duplicate alerts, and delete or revise alerts that lead to no action
+    level: soft
+    check: manual
+    how: Review the alert routing configuration and the monthly alert review records
+    applies: [kind:service]
+    why: Dozens of alerts triggered by the same failure bury the real clues; without regular cleanup, alerts only keep multiplying.
+    sources: [S20]
+  # ── Incidents and postmortems ──
+  - id: OPS-030
+    title: Incidents are classified SEV1–SEV4; SEV1 and SEV2 have a designated incident commander, separate people for mitigation and external communication, and a live incident record (timeline, impact, decisions)
+    level: soft
+    check: manual
+    how: Spot-check SEV1 and SEV2 incident records for a commander, timeline, scope of impact, and key decisions
+    applies: [kind:service]
+    why: Without coordination, several people change the system at once and nobody keeps stakeholders informed, so the outage drags on or even grows.
+    detail: |
+      - Severity meanings follow the shared glossary: SEV1, core functionality unavailable or data damaged, affecting most users; SEV2, important functionality degraded or unavailable for some users; SEV3, minor functionality degraded with a workaround; SEV4, minor with no noticeable user impact. When a customer has its own levels, write a mapping table.
+      - During an incident, only the people handling it change the system; the record must support simultaneous editing by multiple people and is used for the postmortem afterwards.
+    sources: [S21]
+  - id: OPS-031
+    title: "After SEV1 and SEV2 incidents, hold a postmortem: blameless, documenting the trigger, the systemic causes, and why it was not detected earlier; action items have an owner, a deadline, and a verification method, and are tracked to closure"
+    level: soft
+    check: semi
+    how: The postmortem template fixes these sections; action items are linked to tickets, and overdue open ones are listed regularly
+    applies: [kind:service]
+    why: Blaming individuals only makes people hide information; if action items are not assigned to people with deadlines, the same incident will happen again.
+    detail: For how to write postmortem documents, see 05.
+    sources: [S22]
+    see: ["05"]
+  - id: OPS-032
+    title: Runbooks are committed to the repository and versioned, documenting the applicable alerts, pre-checks, procedure, result verification, stop conditions, and rollback; update them after every incident or drill
+    level: soft
+    check: semi
+    how: CI checks that runbooks contain these sections and that each alert's runbook_url points to an existing file
+    applies: [kind:service, kind:onprem]
+    why: During an incident nobody has the capacity to work out steps on the spot; without stop conditions, an operator may go further and further in the wrong direction.
+    see: ["05"]
+  # ── Operational execution of backup and restore ──
+  - id: OPS-033
+    title: Backup jobs are monitored and alert on failure or timeout; restore drills run in an isolated environment at the frequency set in 17, run business smoke tests after restore, and record the actual recovery time and data loss
+    level: hard
+    check: manual
+    how: Check that backup alert rules exist; review the date, steps, smoke-test results, and measured RPO/RTO of the most recent drill record
+    applies: [kind:service, kind:onprem]
+    why: Backup failures nobody notices and backups nobody has verified only come to light when you actually need to restore.
+    detail: |
+      - Backup policy, recovery objectives, and drill frequency are defined only in 17 (DB-033, DB-036); no separate frequency is set here.
+      - System-level recovery covers not only databases but also configuration, certificates, object storage, and key recovery material, restored in dependency order.
+      - Drills for cluster deployments also cover loss of an entire machine and loss of persistent volumes.
+    sources: [S23]
+    see: ["17"]
+  # ── Capacity and cost ──
+  - id: OPS-034
+    title: Before major releases or expected traffic growth, run capacity tests documenting the load model, p95/p99 latency, where the bottleneck is, and the remaining headroom; where autoscaling is used, verify scaling results with load experiments rather than only checking that the configuration exists
+    level: soft
+    check: manual
+    how: Keep load test reports (including replica counts and latency for autoscaling in steady state, surge, and ramp-down phases), and cite them in release review
+    applies: [kind:service]
+    why: Without load testing, resources are sized by gut feeling, either wasted or overwhelmed at peak; scaling depends on metrics collection and resource requests, and misconfiguration is invisible in normal times.
+    sources: [S09]
+    see: ["04"]
+  # ── On-premises and air-gapped delivery ──
+  - id: OPS-035
+    title: The offline on-premises edition must be accepted for install, upgrade, rollback, and business smoke tests in an environment with all public internet egress cut off, confirming there are no outbound connections
+    level: hard
+    check: auto
+    how: Run the install and upgrade pipelines on a deny-all-egress network, record DNS queries and outbound connections, and fail if there are any
+    applies: [kind:onprem]
+    why: Many outbound call points are hidden in default configuration (update checks, usage statistics, time synchronization, plugin downloads), and testing only in a connected environment will not find them.
+    detail: GitLab's official offline installation guide lists, item by item, the default outbound call points that need handling, and can serve as a reference for the checklist.
+    sources: [S18]
+  - id: OPS-036
+    title: "The offline installation bundle contains everything needed: images for each architecture (OCI archives or internal-registry sync bundles), Charts and dependencies, migration scripts, checksums, install/upgrade/rollback/recovery manuals, and preflight and smoke-test scripts; installation and runtime do not download resources outside the bundle"
+    level: hard
+    check: auto
+    how: Scan install scripts and configuration for external URLs; air-gapped acceptance (see OPS-035)
+    applies: [kind:onprem]
+    why: Missing a single image or plugin means it cannot be installed on site, and in an air-gapped environment a re-delivery often takes days.
+    detail: After images are pushed to the customer's internal image registry, deployment configuration pulls only from the internal registry. License and NOTICE files are delivered with the bundle (see 27).
+    sources: [S18]
+    see: ["27"]
+  - id: OPS-037
+    title: Run preflight checks before on-premises installation, checking CPU, memory, disk, ports, DNS, time synchronization, certificate chains, CPU architecture, and container runtime, and stop with a clear reason if any is not met; support importing the customer's private CA and replacing certificates, and alert before certificates expire
+    level: soft
+    check: auto
+    how: The preflight script outputs a structured report, and the install process exits when preflight fails
+    applies: [kind:onprem]
+    why: Most on-premises installation tickets come from unmet environment requirements, and catching them up front is easier than failing halfway through; enterprise intranets commonly use their own CA, and certificate expiry is a common and entirely preventable cause of outages.
+  - id: OPS-038
+    title: Diagnostic bundles for customers are redacted by default (no keys, tokens, private keys, or business data), list the collection scope, and can be previewed, pruned, and exported offline by the customer
+    level: hard
+    check: semi
+    how: Run secret scanning on sample diagnostic bundles; review the collection checklist
+    applies: [kind:onprem]
+    why: Diagnostic bundles get sent to the vendor; if keys or customer data slip in, that is a data breach.
+    detail: "Typically includes: system and runtime information, artifact and data-schema versions, redacted configuration diffs, probe results, a limited amount of recent error logs, samples of key metrics, disk capacity, certificate expiry dates (without private keys), DNS/time/port check results, and the status of the most recent upgrade."
+    see: ["25", "27"]
+  - id: OPS-039
+    title: Before publicly claiming support for a domestic Chinese operating system or CPU architecture, test installation and core business flows on that combination of OS, kernel, container runtime, and CPU, and keep the records
+    level: hard
+    check: manual
+    how: When reviewing compatibility claims, check that every combination has a test record
+    applies: [kind:onprem]
+    why: Instruction sets, dynamic libraries, native extensions, and drivers may all be incompatible; "supports Linux" does not mean support for every domestic Chinese platform.
+    detail: Usually cover x86_64 and aarch64 first, and verify other architectures one by one as customers require.
+    sources: [S24]
+  # ── Agents in operations ──
+  - id: OPS-040
+    title: When agents take part in production operations, they are read-only by default; write operations may only invoke pre-registered, idempotent, reversible named actions, with human approval and an audit trail; restoring data, deleting, and changing permissions or network boundaries are never executed automatically by an agent
+    level: hard
+    check: auto
+    how: In the agent's runtime permissions, grant only read-only credentials and registered actions; spot-check audit logs
+    applies: [kind:agent, kind:service]
+    why: Alert content, logs, and chat messages may all carry embedded instructions or misleading information; an agent executing them directly can escalate a small fault into an incident.
+    detail: Treat alert descriptions, logs, and ticket content as data, never as instructions (see 23 AGT-007, AGT-009).
+    see: ["23", "25"]
+choices:
+  - category: Single-host deployment
+    pick: Docker Compose
+    when: "Unavailability during a host failure is acceptable, there are few services, and there is no dedicated platform team"
+    alternatives:
+      - { name: systemd + native installation packages, when: The customer environment does not allow installing a container runtime }
+    avoid:
+      - { name: Forcing Kubernetes on single-host customers, why: The operational burden far outweighs the benefit }
+    license: Apache-2.0
+    sources: [S01]
+  - category: Cluster orchestration
+    pick: Kubernetes (upstream, managed, or the customer's existing distribution)
+    when: The conditions in OPS-002 are met
+    alternatives:
+      - { name: Cloud provider managed container services, when: You do not want to maintain the control plane yourself }
+    avoid:
+      - { name: Building your own scheduling or orchestration, why: "Reinventing the wheel, with high maintenance cost" }
+    license: Apache-2.0
+    notes: "Upstream maintains only the three most recent minor versions, each with roughly 14 months of patch support; patches are generally released monthly."
+    sources: [S02]
+  - category: Kubernetes application packaging
+    pick: Helm (current major version)
+    when: "The application has many configurable parameters and is distributed to customers"
+    alternatives:
+      - { name: Kustomize, when: Only a few environment differences need to be overlaid }
+    avoid:
+      - { name: "Layering Helm, Kustomize, and a homegrown renderer on top of each other", why: Makes it hard to figure out the configuration that actually takes effect }
+    license: Apache-2.0
+    notes: "The previous major version, Helm 3, has had its support officially extended once, with security fixes until 2027-02-10, after which no further releases will be made; new projects should use the current major version directly, and existing Charts should complete a migration assessment before then."
+    sources: [S25]
+  - category: Continuous deployment (GitOps)
+    pick: "Not introduced by default; use Argo CD when there are multiple clusters, drift needs ongoing governance, or there is a separate delivery team"
+    alternatives:
+      - { name: Flux, when: "You prefer a CLI-centric, Git-native approach composed from components" }
+    avoid:
+      - { name: Installing a GitOps controller even for single-host deployments, why: One more control plane to maintain }
+    license: Apache-2.0
+    notes: In on-premises scenarios, Git repositories and OCI artifacts must be mirrored to the internal network.
+  - category: Infrastructure as code
+    pick: OpenTofu
+    alternatives:
+      - { name: Terraform, when: "You already have a Terraform ecosystem and team experience; note that the license is BUSL-1.1, which is not an OSI open-source license" }
+      - { name: Pulumi, when: "You need to describe infrastructure in a general-purpose programming language; you bear the operations of a self-managed state backend yourself" }
+    avoid:
+      - { name: Manual console operations as the only source of truth, why: "Cannot be rebuilt, cannot be reviewed" }
+    license: "OpenTofu is MPL-2.0; Terraform is BUSL-1.1; Pulumi core is Apache-2.0"
+    notes: "In air-gapped environments, Providers, Modules, and the state backend must all be available on the internal network."
+    sources: [S26, S27]
+  - category: Runtime base images
+    pick: "distroless (static for static binaries, the corresponding language image otherwise; pin the Debian suffix and reference by digest)"
+    alternatives:
+      - { name: Docker Hardened Images, when: "You need a broader catalog of hardened images, signed SBOMs shipped with images, VEX, and SLSA Build Level 3 provenance; the community tier is free and Apache-2.0" }
+      - { name: Chainguard paid images, when: "You need pinning to specific versions and a vendor commitment on vulnerability fix timelines" }
+      - { name: Official slim images, when: The runtime must install system dependencies with a package manager }
+      - { name: "Base images for domestic Chinese operating systems such as openEuler", when: The customer requires Xinchuang (domestic IT innovation) base images }
+    avoid:
+      - { name: "Using full distribution images (such as the default ubuntu or debian tags) directly as runtime images", why: "Many packages, many vulnerabilities, and they ship a shell and package manager" }
+      - { name: Depending on Chainguard's free tier in production, why: "The free tier offers only a few images with only the latest tag, cannot pin versions, and has no fix-timeline commitment" }
+    license: "Docker Hardened Images community tier is Apache-2.0; for distroless, its repository LICENSE is authoritative (not verified)"
+    notes: For vulnerability scanning and SBOMs, see 25.
+    sources: [S04, S05, S28]
+  - category: Telemetry interface and forwarding
+    pick: OpenTelemetry API/SDK + OTLP + OpenTelemetry Collector
+    alternatives:
+      - { name: Exposing metrics directly with Prometheus client libraries, when: "Metrics only, a single service, no tracing needed" }
+    avoid:
+      - { name: Business code directly using one backend's proprietary SDK, why: Changing backends requires changing business code }
+    license: Apache-2.0
+    notes: First check the stability level of each signal for the target language (see OPS-021).
+    sources: [S13, S14]
+  - category: Metrics storage and alert rules
+    pick: Prometheus + Alertmanager
+    alternatives:
+      - { name: VictoriaMetrics, when: "You need longer retention or higher cardinality and have done a capacity evaluation; enterprise edition features are separate" }
+      - { name: Grafana Alerting, when: Alerts are already managed uniformly in Grafana }
+    avoid:
+      - { name: Adopting distributed metrics storage without a capacity evaluation, why: "High operational cost, unnecessary at small scale" }
+    license: Apache-2.0
+    sources: [S20]
+  - category: Dashboards
+    pick: Grafana
+    alternatives:
+      - { name: "The built-in UI of an all-in-one platform (SigNoz, OpenObserve)", when: An all-in-one solution has already been chosen }
+    avoid:
+      - { name: Building your own dashboard or alerting system for a few charts, why: Reinventing the wheel }
+    license: "AGPL-3.0-only (some directories have exceptions; the repository's LICENSING.md is authoritative)"
+    notes: "Internal use is generally fine; modifying it and offering it as a network service, or distributing it to customers with the product, carries additional obligations; for the position, see 27."
+    sources: [S29, S30]
+  - category: Log storage
+    pick: "Local rotation + central collection at small scale; Loki once scale grows"
+    alternatives:
+      - { name: OpenObserve, when: "You want logs, metrics, and traces in one system and accept AGPL" }
+    avoid:
+      - { name: Keeping logs permanently on container or local disks, why: "Lost when the container is recreated, and the disk fills up" }
+      - { name: Using high-cardinality fields as index labels, why: "The number of log streams spirals out of control (see OPS-023)" }
+    license: "Loki is AGPL-3.0-only; some directories, such as clients, are Apache-2.0"
+    notes: "Log collectors (OpenTelemetry Collector, Fluent Bit, Vector, etc.) have not been compared; see open questions."
+    sources: [S16, S31]
+  - category: Tracing backend
+    pick: Tempo, when Grafana is already in use
+    when: "There is a real need for cross-service troubleshooting; small deployments without cross-service calls can skip it"
+    alternatives:
+      - { name: SigNoz or OpenObserve, when: An all-in-one solution has been chosen }
+    avoid:
+      - { name: Always installing a tracing cluster even without cross-service needs, why: Wasted resources and operational burden }
+    license: AGPL-3.0-only
+    sources: [S30]
+  - category: All-in-one observability platform
+    pick: SigNoz
+    when: "You want one system for logs, metrics, and traces, and have already evaluated it against your own data volume"
+    alternatives:
+      - { name: OpenObserve, when: "Storage cost matters more; the community edition is AGPL" }
+    avoid:
+      - { name: Committing to large-scale production based only on a demo, why: Capacity and offline dependencies need real testing }
+    license: "SigNoz core is MIT, with separate commercial terms for the ee/ directory; OpenObserve community edition is AGPL-3.0"
+    sources: [S32]
+  - category: Error tracking
+    pick: GlitchTip
+    when: "You need lightweight exception collection and value a permissive license"
+    alternatives:
+      - { name: Sentry self-hosted, when: "You need more complete features and can bear more dependent services" }
+    avoid:
+      - { name: Deploying the full Sentry stack just to collect exceptions, why: Resource and operational costs are noticeably higher }
+    license: "GlitchTip is MIT; Sentry server is FSL-1.1-Apache-2.0, and SDK licenses differ"
+    sources: [S33, S34]
+  - category: Feature flags
+    pick: "OpenFeature SDK + flagd (reading flags from local files or internal HTTP/gRPC)"
+    alternatives:
+      - { name: An existing flag platform, when: "The organization has already purchased or built one; connect it through an OpenFeature provider" }
+    avoid:
+      - { name: On-premises environments depending on a remote SaaS flag service, why: "Unavailable when the network is cut off, becoming a single point of dependency for startup" }
+      - { name: Homegrown if-switches scattered throughout the code, why: "Cannot be centrally registered, audited, or cleaned up" }
+    license: Apache-2.0
+    notes: "OpenFeature is a CNCF incubating project (entered incubation in December 2023)."
+    sources: [S11, S35, S36]
+  - category: Staged rollouts
+    pick: Staging at the ingress by traffic or instance + feature flags
+    alternatives:
+      - { name: Argo Rollouts, when: You need metric-driven automatic promotion or rollback on Kubernetes }
+      - { name: Service mesh traffic splitting, when: A service mesh is already in use }
+    avoid:
+      - { name: Forcing in a service mesh just for staged rollouts, why: The complexity far exceeds the need }
+  - category: Incidents and on-call
+    pick: "An incident record template + a searchable incident database + an on-call rotation, with alerts routed through Alertmanager to the organization's existing notification channels"
+    alternatives:
+      - { name: The enterprise's existing incident management platform, when: The organization already uses one }
+    avoid:
+      - { name: "Just shouting in a group chat, with no commander and no record", why: "No one coordinates, and no postmortem is possible afterwards" }
+      - { name: Building your own scheduling and alert silencing engine, why: Reinventing the wheel }
+    notes: "Specific on-call and incident tools have not been compared; see open questions."
+    sources: [S20, S21]
+antipatterns:
+  - { bad: "Believing \"production must run on Kubernetes\"", instead: "Choose the deployment form by availability target, failure domains, and staffing (OPS-002)" }
+  - { bad: "Believing \"Compose cannot be used for any production\"", instead: "Promise only the availability a single host can deliver, and document the boundaries" }
+  - { bad: "`image: latest`, pulled from the public internet at install time", instead: "Reference by digest; the offline bundle includes all images and verifies them" }
+  - { bad: Testing on-premises installation bundles only in connected cloud environments, instead: "Accept in a deny-all-egress environment and count outbound connections" }
+  - { bad: Liveness probes checking database connectivity, instead: "Liveness only looks at the process itself; downstream problems make readiness fail" }
+  - { bad: "Making user IDs or trace IDs metric or log index labels", instead: "Keep labels low-cardinality and put such fields in log content" }
+  - { bad: Paging whenever CPU exceeds 80%, instead: "Page on user SLI burn rates; resource alerts create tickets" }
+  - { bad: "Treating `docker compose down && up` of the old version as a data rollback", instead: "Document rollback limitations, and make data changes in expand, migrate, contract steps" }
+  - { bad: Dropping old fields as soon as the new version goes live, instead: "Put the contract step in a later version, after confirming no old instances or old clients still use them" }
+  - { bad: "Backup files on the same disk as the data, never restored", instead: "Store backups in a different failure domain and run restore drills at the frequency set in 17" }
+  - { bad: Rolling out several full-stack observability platforms at once for a small deployment, instead: "Standardize on OpenTelemetry and choose one backend by scale" }
+  - { bad: Agents directly executing commands suggested in alerts, instead: "Investigate read-only; write operations go through registered actions and human approval" }
+  - { bad: "\"Supports domestic platforms\" only means Docker was verified to start", instead: "Run core business flows on every OS, kernel, and CPU combination" }
+sources:
+  - { id: S01, title: "Docker Compose: Control startup and shutdown order", url: "https://docs.docker.com/compose/how-tos/startup-order", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S02, title: "Kubernetes: Patch Releases", url: "https://kubernetes.io/releases/patch-releases/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Kubernetes: Images", url: "https://kubernetes.io/docs/concepts/containers/images/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: distroless, url: "https://github.com/GoogleContainerTools/distroless", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: Docker Hardened Images, url: "https://docs.docker.com/dhi/", publisher: Docker, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "Kubernetes: Pod Security Standards", url: "https://kubernetes.io/docs/concepts/security/pod-security-standards/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Kubernetes: Liveness, Readiness, and Startup Probes", url: "https://kubernetes.io/docs/concepts/workloads/pods/probes/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Kubernetes: Pod Lifecycle — Termination of Pods", url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "Kubernetes: Horizontal Pod Autoscaling", url: "https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/", publisher: Kubernetes, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "GitLab: Multi-version compatibility", url: "https://docs.gitlab.com/development/multi_version_compatibility/", publisher: GitLab, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S11, title: "OpenFeature Specification: Flag Evaluation API", url: "https://openfeature.dev/specification/sections/flag-evaluation", publisher: OpenFeature, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S12, title: "The Twelve-Factor App: Logs", url: "https://12factor.net/logs", publisher: Twelve-Factor, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S13, title: "OpenTelemetry: Status", url: "https://opentelemetry.io/status/", publisher: OpenTelemetry, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "OpenTelemetry Collector: Agent-to-gateway deployment", url: "https://opentelemetry.io/docs/collector/deploy/other/agent-to-gateway/", publisher: OpenTelemetry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: OpenTelemetry Profiles Enters Public Alpha, url: "https://opentelemetry.io/blog/2026/profiles-alpha", publisher: OpenTelemetry, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Loki: Cardinality", url: "https://grafana.com/docs/loki/latest/get-started/labels/cardinality/", publisher: Grafana Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Prometheus: Metric and label naming", url: "https://prometheus.io/docs/practices/naming/", publisher: Prometheus, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: "GitLab: Getting started with an offline GitLab installation", url: "https://docs.gitlab.com/topics/offline/quick_start_guide/", publisher: GitLab, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S19, title: "Google SRE Workbook: Alerting on SLOs", url: "https://sre.google/workbook/alerting-on-slos/", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S20, title: Prometheus Alertmanager, url: "https://prometheus.io/docs/alerting/latest/alertmanager/", publisher: Prometheus, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "Google SRE Book: Managing Incidents", url: "https://sre.google/sre-book/managing-incidents/", publisher: Google, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S22, title: "Google SRE Book: Postmortem Culture", url: "https://sre.google/sre-book/postmortem-culture/", publisher: Google, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S23, title: "AWS Well-Architected REL09-BP04: Perform periodic recovery of the data", url: "https://docs.aws.amazon.com/wellarchitected/latest/framework/rel_backing_up_data_periodic_recovery_testing_data.html", publisher: AWS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: openEuler Downloads, url: "https://www.openeuler.org/zh/download/", publisher: openEuler, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Helm 3 End of Life, url: "https://helm.sh/blog/helm-v3-end-of-life", publisher: Helm, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: OpenTofu, url: "https://github.com/opentofu/opentofu", publisher: OpenTofu, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: Terraform LICENSE, url: "https://github.com/hashicorp/terraform/blob/main/LICENSE", publisher: HashiCorp, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: Chainguard Pricing, url: "https://www.chainguard.dev/pricing", publisher: Chainguard, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: Grafana LICENSING, url: "https://github.com/grafana/grafana/blob/main/LICENSING.md", publisher: Grafana Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "Grafana, Loki, and Tempo will be relicensed to AGPLv3", url: "https://grafana.com/blog/2021/04/20/grafana-loki-tempo-relicensing-to-agplv3/", publisher: Grafana Labs, date: "2021-04-20", kind: official, checked: 2026-11-14 }
+  - { id: S31, title: Loki LICENSING, url: "https://github.com/grafana/loki/blob/main/LICENSING.md", publisher: Grafana Labs, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: SigNoz LICENSE, url: "https://github.com/SigNoz/signoz/blob/main/LICENSE", publisher: SigNoz, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: GlitchTip Installation Documentation, url: "https://glitchtip.com/documentation/install/", publisher: GlitchTip, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: Sentry Licensing, url: "https://open.sentry.io/licensing/", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: OpenFeature becomes a CNCF incubating project, url: "https://www.cncf.io/blog/2023/12/19/openfeature-becomes-a-cncf-incubating-project/", publisher: CNCF, date: "2023-12-19", kind: official, checked: 2026-11-14 }
+  - { id: S36, title: flagd, url: "https://github.com/open-feature/flagd", publisher: OpenFeature, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - "Current versions of each tool are not written into the rules; a separate version ledger pulling from official sources is needed. The version numbers in the original report (as of 2026-11-13) have not been individually verified."
+  - "The main changes in Prometheus 3 relative to 2.x (such as default behavior, UTF-8 metric names, native histograms) have not been verified; upgrade guidance is pending."
+  - "The current form of Docker Compose (plugin mode, the Compose Specification) and the official position on single-host production have not been verified; the original report's claim that \"Mattermost uses Compose only for evaluation and testing\" could not be verified and cited the wrong source number, so it has been removed."
+  - "Accounts of the scope of Chainguard's free tier differ (the official pricing page says 5 images, third parties say about 50); the official page is authoritative, so confirm again before adopting."
+  - "The licenses of distroless, Jaeger, Harbor, Fluent Bit, and Vector have not been verified from their repository LICENSE files; Mimir's license is known only from third-party claims (AGPL-3.0) and has not been directly verified."
+  - "OpenTelemetry Profiles was once said to reach \"GA in Q3 2026\"; at verification time the status page still showed no language as stable, so it is treated as alpha; check again at the next review."
+  - "The claim that the new GlitchTip major version \"requires PostgreSQL 15 or later and has breaking changes to environment variables\" comes from a single release note and has not been verified."
+  - "Whether local operational telemetry and product analytics instrumentation share an OTel pipeline, and where the boundary lies, needs to be aligned with 22."
+  - "Research pending: selection of load testing tools (such as k6, Locust)."
+  - "Research pending: Kubernetes backup orchestration (such as Velero) and system-level backup tools."
+  - "Research pending: on-call and incident management tools (self-hosted and options available in China)."
+  - "Research pending: comparison of log collectors (OpenTelemetry Collector, Fluent Bit, Vector, etc.)."
+  - "Research pending: internal image registries (such as Harbor) and offline image sync tools; the current state of public mirror registries in China."
+  - "Research pending: off-the-shelf tools for on-premises preflight checks and diagnostic bundles (such as Replicated troubleshoot, sosreport), to avoid building our own."
+  - "Research pending: choice of container runtime (containerd, Docker, Podman) in on-premises and Xinchuang environments."
+  - "SLO definitions, recovery plans, and flag inventories have no universal standard format; whether to specify a minimal set of fields is undecided."

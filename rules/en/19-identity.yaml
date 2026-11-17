@@ -1,0 +1,616 @@
+id: "19"
+slug: identity
+title: Authentication and Authorization
+summary: How users sign in (passwords, passkeys, single sign-on), how sessions and tokens are managed, who can do what to which resource (the authorization model), how tenants are isolated, how services and agents are identified, and how to choose an identity provider.
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - "Sign-in methods: passwords, passkeys, OIDC and SAML single sign-on, command-line login"
+    - Password storage algorithms and password policy
+    - Session and cookie attributes, CSRF protection
+    - Lifecycle, rotation and revocation of access tokens and refresh tokens; API keys and personal access tokens
+    - Authorization models (RBAC, ABAC, ReBAC) and choosing an authorization engine
+    - The identity and authorization side of multi-tenant isolation, and how database row-level security should be used
+    - Service-to-service identity, and identity and delegation checks when an agent acts on behalf of a user
+    - Choosing an identity provider
+  excludes:
+    - { what: "Ban on storing tokens in the frontend (no localStorage/sessionStorage)", see: "07" }
+    - { what: "Row-level security implementation details, modeling and migrating tenant columns", see: "17" }
+    - { what: "Architectural trade-offs between tenant isolation models (shared tables, database per tenant, deployment per customer)", see: "01" }
+    - { what: Implementing the authorization protocol for MCP servers, see: "16" }
+    - { what: "OAuth clients for connecting third-party accounts, receiving third-party callbacks", see: "21" }
+    - { what: "Key management, signing key custody, secret scanning", see: "25" }
+    - { what: Implementing rate limiting for login endpoints, see: "18" }
+    - { what: Agent action approval workflows and tool permissions, see: "23" }
+    - { what: Retention and compliance of personal data in audit logs, see: "27" }
+overview: |
+  1. **Don't build your own authentication.** Use a mature identity provider (IdP) or library for password verification, OAuth/OIDC token issuance, SAML parsing and WebAuthn verification. What the application writes itself is the session layer and the business authorization layer.
+  2. **Sign in with OIDC authorization code + PKCE.** OIDC is the login protocol built on OAuth; PKCE is the check that stops an intercepted authorization code from being used. Do not use the implicit grant or the password grant. Use SAML only to connect to existing enterprise single sign-on. Command-line tools use a system-browser callback, fall back to the device code flow when there is no browser, and never collect passwords on the command line. As of 2026-11-14 OAuth 2.1 is still a draft; current requirements follow RFC 9700 (OAuth 2.0 Security Best Current Practice).
+  3. **Link external accounts by `(issuer, sub)`.** Internal user IDs are immutable; email addresses and phone numbers are neither primary keys nor grounds for automatically merging accounts.
+  4. **Password rules follow NIST SP 800-63B-4.** Passwords used on their own are at least 15 characters, with no forced character-composition rules and no forced periodic changes, and are checked against a breached-password blocklist. Store them with Argon2id (OWASP minimum parameters: 19 MiB memory, 2 iterations, parallelism 1). Adopt passkeys wherever possible.
+  5. **Web apps with a backend use server-side sessions.** Cookies set `Secure`, `HttpOnly` and `SameSite`, preferably with the `__Host-` prefix; cookie-based authentication requires CSRF protection.
+  6. **Tokens are short-lived, audience-restricted and revocable.** An API accepts only access tokens issued to it, never ID Tokens; every JWT claim is validated; refresh tokens for public clients must be rotated or sender-constrained. After permissions are revoked, sensitive operations must re-check them in real time.
+  7. **Deny by default and check every object.** Lists, search, export, batch operations and async jobs — none may be skipped; holding a token or being in the same tenant does not mean you may access this object. When the authorization engine errors, deny.
+  8. **Tenant comes from trusted context.** Take the tenant identifier from the authentication result and membership, not from request parameters; row-level security is only a second line of defense.
+  9. **Services and agents have their own identities.** Services use their own client credentials or workload certificates; when an agent acts on a user's behalf, its effective permissions are the intersection of the delegator's current permissions, the agent's own capabilities and the scope of the delegation.
+  10. **Upgrade the authorization engine only when needed.** Start with "scoped RBAC + object checks"; adopt OpenFGA once relationship-based sharing gets complex, and Cerbos or OPA once conditional policies multiply. Don't install all of them on day one.
+  11. **Open source does not mean permissive license.** Keycloak is Apache-2.0; ZITADEL switched to AGPL-3.0-only starting with v3, so evaluate it under 27 before integrating and distributing it.
+rules:
+  # ── Sign-in and identity sources ──
+  - id: IAM-001
+    title: Do not implement password verification, OAuth/OIDC token issuance, SAML assertion parsing or WebAuthn verification yourself; use a mature identity provider or library, and document any exception in an ADR that has passed security review
+    level: hard
+    check: manual
+    how: In review, look for hand-written token issuance, XML signature verification or WebAuthn signature verification code; the dependency list contains a mature implementation for each, or there is a security-reviewed ADR
+    applies: [all]
+    why: These protocols are full of details and have a large attack surface; vulnerabilities in hand-rolled implementations tend to be whole classes (signature bypass, algorithm confusion), whereas off-the-shelf implementations have been heavily reviewed and patched.
+    detail: |
+      - The application still writes its own: session layer (session management after login), internal user mapping, business authorization.
+      - "Issuing a JWT yourself after the login form validates" is not implementing OIDC: it lacks a discovery document, key rotation, logout, federation and MFA.
+  - id: IAM-002
+    title: Interactive sign-in uses the OIDC authorization code flow with PKCE; public clients must use PKCE; do not use the implicit grant or the password grant
+    level: hard
+    check: auto
+    how: Scan the IdP client configuration to confirm the implicit and password grant types are not enabled; integration tests capture the authorization request and confirm it carries `code_challenge`
+    applies: [kind:service, platform:web, platform:mobile, platform:desktop]
+    why: RFC 9700 says public clients must use PKCE, the password grant must not be used and the implicit grant should not be used; they leak tokens or expose user passwords to the application.
+    detail: |
+      - Confidential clients (those with a backend that can keep a secret) are also recommended to use PKCE.
+      - OAuth itself is an authorization framework; "sign in with OAuth" only gets standard identity assertions when it is built on OIDC.
+      - OAuth 2.1 is still a draft (verified on 2026-11-14 as draft 17); you may design to it, but do not describe it as "already a published RFC".
+    sources: [S01, S02, S03]
+  - id: IAM-003
+    title: The authorization server matches redirect URIs exactly against registered values, with no wildcard or prefix matching; only loopback addresses may vary the port
+    level: hard
+    check: auto
+    how: "Protocol negative tests: authorization requests using the registered URI with an extra path, a different subdomain, or a different port (non-loopback) must all be rejected"
+    applies: [kind:service]
+    why: RFC 9700 requires exact comparison; fuzzy matching lets attackers redirect authorization codes or tokens to addresses they control.
+    sources: [S01]
+  - id: IAM-004
+    title: OIDC sign-in must validate the ID Token signature, iss, aud, exp and nonce, and the state of the authorization response; reject on any failure
+    level: hard
+    check: auto
+    how: "Negative tests: tampered signature, different issuer, different audience, expired token, replayed nonce and wrong state must all fail to sign in"
+    applies: [kind:service, platform:web, platform:mobile, platform:desktop]
+    why: These are the validations required by OIDC Core; missing any one of them can mean accepting a forged, expired, or other-application identity assertion.
+    detail: When the authorization server returns `iss` in the authorization response, the client must check it matches the expected issuer, to prevent mix-up attacks between multiple authorization servers.
+    sources: [S03, S01]
+  - id: IAM-005
+    title: Use SAML only to connect to existing enterprise single sign-on; use a mature library to validate the signature, audience, Recipient/Destination, InResponseTo and validity period
+    level: soft
+    check: semi
+    how: "Negative tests: unsigned, wrong-audience, expired and replayed assertions are all rejected; review that dependencies include a mature SAML library"
+    applies: [kind:service]
+    why: SAML is based on XML signatures, and hand-written parsing is extremely prone to signature-wrapping vulnerabilities; OIDC is simpler for new projects.
+    detail: IdP metadata and signing certificates must be rotatable, with old and new certificates both valid during the rotation window.
+  - id: IAM-006
+    title: Command-line tools sign in via the system browser with a loopback callback and PKCE; use the device code flow when there is no browser; never collect user passwords on the command line
+    level: hard
+    check: semi
+    how: Review the command-line login implementation to confirm it never reads a user password from input; integration tests go through the browser or device code flow
+    applies: [kind:cli]
+    why: Having the command line collect passwords is the password grant, which RFC 9700 explicitly prohibits; the device code flow (RFC 8628) is designed specifically for devices without a browser.
+    sources: [S01, S04]
+  - id: IAM-007
+    title: Link each external identity uniquely to an immutable internal user ID by `(issuer, sub)`; email, name and phone number are not primary keys and are not grounds for automatic account merging
+    level: hard
+    check: auto
+    how: The database has a unique constraint on `(issuer, subject)`; check that the user table's primary key is not email or phone number; test that two accounts with the same email but different issuers are not merged automatically
+    applies: [kind:service]
+    why: OIDC only guarantees that `sub` is unique and stable within one issuer; email addresses change, get recycled, and can collide across IdPs, so merging by email leads to account takeover.
+    detail: When two external identities genuinely need to be linked, have the user complete sign-in on both sides, or have an administrator verify and link them, and record it in the audit log.
+    sources: [S03]
+  - id: IAM-008
+    title: When employees leave, change roles or are deactivated, promptly deactivate their accounts and remove memberships via SCIM or directory sync; existing sessions and tokens become invalid after deactivation
+    level: soft
+    check: semi
+    how: "Drill: after deactivating a test account in the IdP, check that in-app sessions, refresh tokens and API keys become invalid within the agreed time"
+    applies: [kind:service]
+    why: If the account is only deactivated in the IdP and the application doesn't know, people who have left may keep accessing through old sessions or long-lived tokens.
+    detail: Alert when directory sync fails; never silently keep stale memberships.
+    sources: [S05]
+  # ── Passwords and multi-factor ──
+  - id: IAM-009
+    title: When you must manage passwords yourself, passwords used alone are at least 15 characters and at least 8 when used as one of multiple factors, with a maximum of at least 64 allowed; no forced character-composition rules, no forced periodic changes, and new passwords are checked against breached and common-password blocklists
+    level: hard
+    check: auto
+    how: "Form and API tests: a 14-character password is rejected, a 64-character password works, there are no composition requirements; check there is no periodic expiry policy; registering with a known breached password is rejected"
+    applies: [kind:service]
+    why: NIST SP 800-63B-4 uses SHALL/SHOULD for these; forced composition and periodic changes just push users to choose weaker, more guessable passwords.
+    detail: |
+      - Allow pasting and password-manager autofill; verify the whole password without truncation.
+      - Do not store password hints visible to unauthenticated users, and do not use security questions (knowledge-based authentication).
+      - Require a change when a password is found to be breached.
+      - Accessibility requirements for login input fields are in 09.
+    sources: [S06]
+    see: ["09"]
+  - id: IAM-010
+    title: Store passwords hashed with Argon2id, with parameters no lower than 19 MiB memory, 2 iterations and parallelism 1; use scrypt when it is unavailable; use PBKDF2-HMAC-SHA256 when FIPS is required; bcrypt only for legacy systems
+    level: hard
+    check: auto
+    how: Code scanning looks for passwords hashed directly with MD5, SHA-1 or SHA-256; unit tests read the algorithm and parameters from the hash string and assert they meet the minimum
+    applies: [kind:service]
+    why: Fast hashes can be brute-forced at scale on GPUs; the OWASP Password Storage Cheat Sheet gives the minimum parameters for each algorithm.
+    ref_value: "OWASP minimum parameters: Argon2id m=19 MiB, t=2, p=1 (or another combination of equivalent strength); scrypt N=2^17, r=8, p=1; PBKDF2-HMAC-SHA256 600,000 iterations; bcrypt work factor at least 10, and input longer than 72 bytes is truncated. Parameters should be raised periodically as hardware improves."
+    detail: |
+      - Use the mature library from your language ecosystem (libraries per language are in 10–14); do not assemble salts and iterations yourself.
+      - You may add a pepper (a separately stored global secret) for defense in depth, but it cannot replace a slow hash; pepper custody is covered in 25.
+      - Re-hash with the new parameters at the user's next sign-in to upgrade old hashes gradually.
+    sources: [S07]
+    see: ["25"]
+  - id: IAM-011
+    title: Login, password recovery and MFA verification endpoints must limit consecutive failures; password recovery does not reveal whether an account exists, and reset links are single-use and short-lived
+    level: hard
+    check: auto
+    how: Test that consecutive wrong attempts are throttled or require extra verification; existing and non-existing accounts get the same message during password recovery; a reset link stops working after one use or after expiry
+    applies: [kind:service]
+    why: Without failure limits, online password guessing and credential stuffing cost nothing; different messages hand attackers a list of valid accounts.
+    detail: How rate limiting is implemented is in 18. Account lockout must not let someone maliciously lock out other users; prefer progressively longer delays or extra verification.
+    sources: [S06]
+    see: ["18"]
+  - id: IAM-012
+    title: Multi-factor authentication prefers passkeys (passkey/WebAuthn), with TOTP or hardware keys as fallback; SMS codes are never the only strong factor; provide a recovery flow with identity verification
+    level: soft
+    check: manual
+    how: Review the IdP's authenticator configuration and recovery flow
+    applies: [kind:service]
+    why: Passkeys are bound to the domain and resist phishing; SMS can be hijacked through SIM swapping or intercepted. The recovery flow is the most commonly bypassed step.
+    detail: |
+      - Syncable passkeys (private keys synced across devices) cannot be used for the highest assurance level AAL3 under NIST 800-63B-4, but are fine for general business use.
+      - For on-premises deployments, test first: RP ID (relying party domain) versus intranet domains, support on employee endpoints and browsers, and recovery options. Cross-device sync of syncable passkeys depends on vendor cloud services; credentials already on a device do not.
+    sources: [S06]
+  - id: IAM-013
+    title: Require recent authentication or step-up authentication before changing password or email, adding or removing authenticators, granting permissions, creating API keys and delegating
+    level: hard
+    check: auto
+    how: "End-to-end test: once the session's authentication time exceeds the configured window, performing these operations must first require re-authentication"
+    applies: [kind:service]
+    why: When a session is stolen or a device is borrowed, these operations turn temporary control into permanent control.
+    ref_value: There is no common standard for the recent-authentication window; a reference value is 5–15 minutes, set according to business risk.
+  # ── Sessions and cookies ──
+  - id: IAM-014
+    title: Session cookies must set Secure, HttpOnly and SameSite (Lax or Strict); prefer the `__Host-` prefix, with no Domain and Path set to /
+    level: hard
+    check: auto
+    how: End-to-end tests or response header checks assert that the session cookie set after sign-in carries these attributes
+    applies: [platform:web, kind:service]
+    why: Without HttpOnly, an XSS on the page can read the session directly; without Secure, the session may leak over a plaintext connection; with Domain set, subdomains can read and write it.
+    sources: [S08]
+  - id: IAM-015
+    title: Web apps with a backend use server-side sessions, or a backend for frontend (BFF) holds the tokens; the browser only gets a session cookie
+    level: soft
+    check: manual
+    how: Review the login architecture and check whether the browser holds access tokens or refresh tokens
+    applies: [platform:web]
+    why: Once XSS gets hold of a token in the browser, it can be used elsewhere; a session cookie with HttpOnly cannot be read by scripts.
+    detail: The ban on frontend token storage is in WEB-022. When a frontend-only app really must hold tokens, keep them in memory only and shorten their lifetime.
+    sources: [S08]
+    see: ["WEB-022"]
+  - id: IAM-016
+    title: Rotate the session ID after successful sign-in and after privilege elevation, and destroy the session on the server at logout
+    level: hard
+    check: auto
+    how: Test that the session ID differs before and after sign-in; after logout, requests with the old session ID return unauthenticated
+    applies: [kind:service]
+    why: Not rotating the session ID enables session fixation attacks; deleting the cookie only on the client leaves the old session valid on the server.
+    sources: [S08]
+  - id: IAM-017
+    title: Services using cookie authentication must have CSRF protection on every state-changing request; GET requests do not change state
+    level: hard
+    check: auto
+    how: Test that write requests from cross-site origins, without a CSRF token, or with a mismatched Origin are all rejected
+    applies: [platform:web, kind:service]
+    why: Browsers attach cookies automatically, so without CSRF protection other websites can perform actions as the user.
+    detail: |
+      - SameSite is one layer of protection; don't rely on it alone: same-site subdomains can still send requests, and in some cases (such as top-level GET navigation) cookies are still sent.
+      - Recommended approach: synchronizer tokens or double-submit tokens, plus checking the `Origin` header or Fetch Metadata (`Sec-Fetch-Site`).
+      - CORS configuration is not a substitute for CSRF protection.
+    see: ["WEB-022"]
+  - id: IAM-018
+    title: Sessions must have both an idle timeout and an absolute timeout, enforced by the server
+    level: hard
+    check: auto
+    how: Test that sessions require re-authentication after both the idle timeout and the absolute timeout; timeouts are decided by the server, not by client-side timers
+    applies: [kind:service]
+    why: A session without timeouts stays valid forever once stolen; client-side timers alone can be bypassed.
+    ref_value: NIST SP 800-63B-4 recommends for AAL2 (the multi-factor level) an idle timeout of no more than 1 hour and a total duration of no more than 24 hours; set actual values by business risk, and sensitive admin consoles may be shorter.
+    sources: [S06, S08]
+  - id: IAM-019
+    title: After logout, forced sign-out, password change or account deactivation, the server-side sessions and that user's refresh tokens must become invalid
+    level: hard
+    check: auto
+    how: "End-to-end test: after these operations, requests with the old session and old refresh token both fail"
+    applies: [kind:service]
+    why: Users often change their password because they suspect compromise; if old credentials still work, the change achieved nothing.
+    detail: When integrated with an enterprise IdP, evaluate supporting OIDC back-channel logout so that logout at the IdP propagates to the application.
+    sources: [S01]
+  # ── Tokens ──
+  - id: IAM-020
+    title: Business APIs accept only access tokens whose audience (aud) is themselves; never use an ID Token as an API credential
+    level: hard
+    check: auto
+    how: "Negative tests: calling the API with an access token issued for another service, or with an ID Token, must return 401"
+    applies: [kind:service]
+    why: An ID Token's audience is the client application, and it only proves "who signed in"; a token without an audience restriction, once obtained by one service, can be used to call another.
+    sources: [S01, S03, S09]
+  - id: IAM-021
+    title: When validating a JWT, use a fixed algorithm allowlist (rejecting none), verify the signature with trusted keys, and validate iss, aud, exp, nbf and the required scope; reject if any check fails
+    level: hard
+    check: auto
+    how: "Unit and negative tests: alg=none, switched algorithm, tampered signature, wrong issuer, wrong audience, expired token and missing scope are all rejected"
+    applies: [kind:service]
+    why: Unvalidated JWT contents are just JSON the user can write however they like; algorithm confusion is the most common way to forge JWTs.
+    detail: |
+      - Use a mature JWT library; don't hand-write parsing.
+      - Fetch public keys from the authorization server's JWKS; during signing key rotation both old and new keys are usable; on an unknown `kid`, refresh the cache in a rate-limited way; if the key cannot be obtained, deny rather than allow.
+      - Validate opaque tokens with token introspection; deny when the introspection service is unavailable.
+    sources: [S09]
+  - id: IAM-022
+    title: Give access tokens a short lifetime; refresh tokens for public clients must be rotated on every use or sender-constrained, and when reuse of an old refresh token is detected, revoke the whole token chain
+    level: hard
+    check: auto
+    how: Test that the old refresh token is invalid after a refresh; when an already-used refresh token is used again, both old and new tokens are revoked
+    applies: [kind:service]
+    why: RFC 9700 requires refresh tokens for public clients to be rotated or sender-constrained; a refresh token that is never rotated stays usable for a long time once leaked.
+    ref_value: There is no common standard for access token lifetime; typical values are 5–15 minutes. The longer it is, the slower revocation takes effect.
+    detail: Sender-constraining mechanisms include DPoP (RFC 9449) and mutual TLS; RFC 9700 recommends sender-constraining access tokens as well where possible.
+    sources: [S01, S10]
+  - id: IAM-023
+    title: Do not put tokens, session IDs or API keys in URLs, and do not write them into logs, traces, error messages or LLM prompts
+    level: hard
+    check: semi
+    how: Code scanning looks for tokens placed in query parameters; run secret scanning over log samples
+    applies: [all]
+    why: URLs end up in browser history, proxy logs and the Referer header; a token in the logs can be used by anyone who can read the logs.
+    detail: General rules for log redaction and secret scanning are in 25; prompts and agent logs are covered in AGT-008.
+    sources: [S01]
+    see: ["25", "AGT-008"]
+  - id: IAM-024
+    title: After permissions are revoked, sensitive operations must re-check permissions in real time rather than relying on roles in an old JWT or a stale authorization cache; document the maximum time for revocation to take effect
+    level: hard
+    check: auto
+    how: "Timing test: immediately after removing a member or revoking a share, a sensitive write must be rejected; read-only operations take effect within the documented time limit"
+    applies: [kind:service]
+    why: A JWT keeps passing offline signature verification until it expires; passing offline verification does not mean it hasn't been revoked. The same goes for authorization caches.
+    detail: |
+      - Approach: tokens carry only identity, not full permissions; sensitive operations ask the authorization service for a real-time decision; use permission version numbers or cache invalidation notifications.
+      - With a ReBAC engine, choose the consistency level by operation sensitivity (for example, SpiceDB's ZedToken can guarantee reading results no older than a given write), to avoid the "new enemy problem" between revocation and resource changes.
+    sources: [S11]
+  - id: IAM-025
+    title: Generate API keys and personal access tokens with a cryptographically secure random generator, show them only once at creation, and store only a hash; each carries an owner, scopes, expiry, status and last-used time, and can be revoked and rotated
+    level: hard
+    check: auto
+    how: Check that the credentials table has no recoverable plaintext column; test that keys stop working immediately after revocation and after expiry; query endpoints no longer return the full value after creation
+    applies: [kind:service]
+    why: Keys stored in plaintext are all compromised when the database leaks; a key with no scopes and no expiry is a permanent all-powerful credential.
+    detail: |
+      - A `prefix.secret` format is recommended: the prefix can be public and is used for identification and lookup, and it also helps secret scanning tools recognize leaked keys.
+      - Scopes are only coarse-grained capabilities and cannot replace object-level authorization (IAM-028).
+      - Refresh tokens needed to call third parties cannot be stored only as hashes; store them encrypted, see 21 and 25.
+    see: ["21", "25"]
+  # ── Authorization ──
+  - id: IAM-026
+    title: "Authorization denies by default: endpoints and operations without an explicit policy are denied; also deny when the authorization engine times out, errors, the policy is missing, or the tenant context is missing"
+    level: hard
+    check: auto
+    how: Tests enumerate all routes and confirm each protected route has a corresponding policy; fault injection makes the authorization service time out, and protected operations must fail
+    applies: [kind:service]
+    why: With default allow, a new endpoint whose permissions were forgotten is public; if errors fail open, attackers only need to make the engine error to bypass it.
+    sources: [S12]
+  - id: IAM-027
+    title: Authorization is enforced on the server; authorization logic is centralized in one module or authorization service that every endpoint calls, rather than each controller writing its own conditions
+    level: soft
+    check: semi
+    how: Search the code for role checks scattered across controllers; in review, check whether new endpoints call the unified authorization entry point
+    applies: [kind:service]
+    why: With conditions scattered everywhere, changing one rule means changing many places, and one always gets missed.
+    detail: Hiding buttons in the frontend is not access control, see WEB-024. "Making the decision" is centralized, while "enforcing the check" still happens on every write path, see 01.
+    sources: [S12]
+    see: ["WEB-024", "01"]
+  - id: IAM-028
+    title: Perform object-level authorization on every read, update, delete, list, search, download, export, batch operation and async job; holding a token, a matching scope, or being in the same tenant does not mean you may access that object
+    level: hard
+    check: auto
+    how: "Access-control matrix test: user A, using their own identity, accesses user B's private objects; every endpoint and every action must be denied"
+    applies: [kind:service]
+    why: Broken object level authorization (BOLA) is number one in the OWASP API Security Top 10; unguessable IDs leak and are not authorization.
+    detail: |
+      - If a batch operation contains even one object the caller has no permission for, reject the whole request or filter item by item as the API contract specifies; it must never silently succeed.
+      - Async jobs re-check both before execution and when results are downloaded, since permissions may have been revoked after the job was created.
+      - Pre-signed download links and WebSocket/SSE subscriptions are also checked when issued and when established.
+    sources: [S13, S14]
+  - id: IAM-029
+    title: Lists, search, counts, aggregations and exports must determine the visible scope from permissions before querying, not fetch everything and filter in memory; returned totals and summaries also count only visible objects
+    level: hard
+    check: auto
+    how: "Differential test: two users with different permissions query the same list; the returned rows, totals and summaries contain only the objects each can see"
+    applies: [kind:service]
+    why: Query-then-filter leaks the existence and contents of unauthorized data through totals, pagination, search snippets and error messages.
+    sources: [S12, S14]
+  - id: IAM-030
+    title: Generic update endpoints may not modify protected fields such as owner, tenant, role or approval status; accepted fields are defined by an allowlist
+    level: hard
+    check: auto
+    how: "Property fuzz testing: add fields such as owner_id, tenant_id and role to update requests, and confirm they are ignored or rejected and the data is unchanged"
+    applies: [kind:service]
+    why: Broken object property level authorization (mass assignment) is in the OWASP API Security Top 10 and most often appears when request bodies are bound automatically.
+    detail: Transferring ownership and changing roles go through dedicated endpoints with their own authorization checks.
+    sources: [S13]
+  - id: IAM-031
+    title: Role grants must be bound to a specific scope (tenant, organization, project, etc.), and there are no unscoped global business roles; hierarchical inheritance rules must state whether roles inherit, whether explicit deny exists, and how conflicts are resolved
+    level: hard
+    check: semi
+    how: The scope column of the role-binding table in the data model is non-null; policy unit tests cover being an admin in org-1 and not keeping admin rights after switching to org-2
+    applies: [kind:service]
+    why: Unscoped roles spill over across projects and organizations; if inheritance rules aren't written down, every developer interprets them differently.
+    detail: The super administrator used for platform operations is a separate identity, managed separately from business roles and audited separately.
+  - id: IAM-032
+    title: Start the authorization model with "scoped RBAC + resource ownership checks"; introduce a ReBAC engine once instance-level sharing, nested teams, cross-organization collaboration or heavy "list what I can see" queries appear; introduce a policy engine once conditional rules multiply
+    level: soft
+    check: manual
+    how: Before introducing an authorization engine, write an ADR describing the concrete scenarios the current model cannot handle
+    applies: [kind:service]
+    why: Authorization engines carry costs in deployment, data synchronization and consistency; introducing one before the problem warrants it only adds failure points.
+    detail: |
+      - RBAC authorizes by role; ABAC decides based on attributes of the subject, resource and environment; ReBAC decides based on "who has what relationship to what", suited to document sharing and hierarchical inheritance.
+      - Relationship graphs and conditional policies can complement each other, but running two engines at once needs a clear need.
+      - When you need to swap between engines or unify the interface across languages, consider the OpenID AuthZEN Authorization API 1.0.
+    sources: [S15]
+  - id: IAM-033
+    title: Authorization policies and role definitions are versioned as code alongside the business code, with positive and negative tests run in CI
+    level: hard
+    check: auto
+    how: CI runs policy tests (such as `opa test`, `cerbosctl` policy tests, OpenFGA assertion tests, or the project's own authorization unit tests); policy changes without tests cannot be merged
+    applies: [kind:service]
+    why: Permission regressions usually don't raise errors; they silently allow or wrongly deny, and only tests catch them.
+  - id: IAM-034
+    title: "Every new protected resource or operation has at least four kinds of negative tests: horizontal privilege escalation within a tenant, cross-tenant access, access after revocation, and forged subject identity"
+    level: hard
+    check: semi
+    how: In review, check whether tests for new resources cover these four kinds; Schemathesis and OWASP ZAP can supplement at the API layer
+    applies: [kind:service]
+    why: Most access-control vulnerabilities occur in these four scenarios; testing only "unauthenticated returns 401" won't find them.
+    sources: [S14]
+    see: ["04"]
+  # ── Multi-tenancy ──
+  - id: IAM-035
+    title: Take the tenant identifier from the server's authenticated context and memberships, never trusting request parameters or values switched in the frontend; every read and write carries a tenant constraint; cross-tenant access happens only through explicit sharing or membership
+    level: hard
+    check: auto
+    how: "Cross-tenant matrix test: using tenant A's identity with tenant B's ID, endpoints, background jobs and exports all fail"
+    applies: [kind:service]
+    why: Isolation that relies only on the tenant ID in the URL or on roles lets anyone cross tenants by changing one parameter; the same email or an identically named organization is not grounds for authorization.
+    detail: |
+      - Cross-tenant collaboration does not change a resource's tenant field; instead it creates a share record or guest membership that both sides can revoke and audit.
+      - Database row-level security (RLS) is only a second line of defense and does not replace application-level checks; it involves issues such as leftover context in connection pools, bypass roles and background jobs, with implementation details in 17. Not every database supports an equivalent capability, so don't make it a required cross-database dependency.
+      - Isolation requirements for cache keys, search indexes, object storage and events are in ARC-031.
+    sources: [S14]
+    see: ["ARC-031", "17"]
+  # ── Service and agent identity ──
+  - id: IAM-036
+    title: Service-to-service calls use dedicated workload identities (OAuth client credentials, mutual TLS or SPIFFE), separated by service and environment; never use personal accounts or personal long-lived tokens as service accounts
+    level: hard
+    check: semi
+    how: Credential scanning looks for personal tokens in configuration; review the service account inventory, with one identity per service per environment
+    applies: [kind:service]
+    why: Personal tokens stop working when the person leaves or continue to be abused, and once shared there is no way to tell who is calling.
+    detail: A workload identity proves "which process is calling", not "what the user consented to let it do"; operations on behalf of users still go through the delegation check (IAM-037).
+    sources: [S16]
+  - id: IAM-037
+    title: Agents and automation have their own authenticatable identities; when acting on behalf of a user, first validate the delegation record (scope, target, validity period, revocation status) and the delegator's current permissions, with effective permissions being the intersection of the delegator's permissions, the agent's capabilities and the delegation scope; never trust a self-reported user ID in the request
+    level: hard
+    check: auto
+    how: "Negative tests: a forged user_id or actor_id in the request body does not change the authenticated identity; calls after the delegation is revoked, expired or exceeded are rejected; once the delegator is removed from the project, the agent loses access too"
+    applies: [kind:service, kind:llm]
+    why: Identity self-reported in the request is no authentication at all; a delegation that is valid only at the moment it was granted and does not track the delegator's permissions becomes a permanent, all-powerful proxy.
+    detail: |
+      - RFC 8693 (Token Exchange) can express "who acts on behalf of whom" in a token (the `act` claim), but it does not do business authorization for you. When the authorization server doesn't support it, implement delegation with server-side delegation records; don't forge a token that claims to be standards-compliant.
+      - Unattended scheduled jobs use an explicit service identity and resource permissions; don't disguise them as "some admin acting on their behalf".
+      - Human approval and authorization are two different things: an approval is valid only for the specific operation and parameters; the workflow is in 23.
+    sources: [S17]
+    see: ["23"]
+  - id: IAM-038
+    title: Delegations have an expiry and can be revoked at any time; re-delegation is not allowed by default, and sub-agents do not automatically inherit all of the parent agent's authorization
+    level: soft
+    check: auto
+    how: Test that delegations stop working after expiry or revocation; re-delegation requests are rejected unless explicitly allowed
+    applies: [kind:service, kind:llm]
+    why: Delegations that never expire and can be passed on layer after layer let permissions spread without bound, and after an incident no one can tell who granted what.
+    detail: "When an agent runs longer than the user's session, pick one of two: it expires when the session or task ends; or it is a standing delegation explicitly consented to by the user, time-limited, viewable and revocable, with the latest permissions re-checked at every step."
+  - id: IAM-039
+    title: Passing MCP authentication only means the token can access this service; tool calls still require object-level authorization per IAM-028; never forward a received token as-is to downstream services
+    level: hard
+    check: auto
+    how: Test that a tool call is rejected when the caller holds a valid token but has no permission on the target object; packet capture confirms that calls to downstream services use separately obtained tokens
+    applies: [kind:service, kind:llm]
+    why: MCP authorization only checks the token's audience and scopes and knows nothing of business objects or delegation scope; forwarding tokens enables confused deputy attacks.
+    detail: |
+      - Implementing the MCP server authorization protocol (protected resource metadata, audience validation, client registration methods) is covered in API-035.
+      - A tool being hidden from the list does not mean it cannot be called; it must be checked again at call time.
+    see: ["API-035", "16"]
+  # ── Auditing and selection ──
+  - id: IAM-040
+    title: Sign-in, token issuance and revocation, permission grants and revocations, delegation, authorization denials and sensitive operations all produce structured audit events, with the actual actor and the represented party recorded separately
+    level: hard
+    check: auto
+    how: "End-to-end tests assert that audit events have all fields: event type, time, outcome, tenant, subject, actor, client, object, action, reason, request ID"
+    applies: [kind:service]
+    why: If an agent's call is recorded as "the user did it", no one can be held accountable after an incident; records missing tenant and object fields cannot be used to investigate access violations.
+    detail: |
+      - Authorization decisions include the policy version and a decision ID to support later review.
+      - Audit records do not store credentials themselves or full request bodies (IAM-023); IP and User-Agent are personal data, with retention requirements in 27.
+    sources: [S12, S17]
+    see: ["27"]
+  - id: IAM-041
+    title: When choosing an identity provider and authorization engine, record in an ADR the license, whether it can be self-hosted and run offline, protocol interoperability, and the replacement path
+    level: soft
+    check: manual
+    how: Review whether the selection ADR covers these four items
+    applies: [kind:service, kind:onprem]
+    why: Replacing an identity system is extremely costly; license changes (such as ZITADEL moving to AGPL) and cloud IdPs not working offline must both be visible at selection time.
+    detail: |
+      - A cloud-hosted IdP does not become usable offline just because the business application is deployed on an intranet; products promising offline delivery need a local identity source.
+      - Emergency administrator accounts (break-glass) used when the upstream IdP fails or the network is down are stored separately, alert on every use, and are audited.
+    sources: [S18, S19, S20]
+    see: ["27"]
+choices:
+  - category: Identity provider for on-premises deployment
+    pick: Keycloak
+    when: "Needs enterprise single sign-on (OIDC, SAML), AD/LDAP integration and identity federation, and must be self-hosted or run offline"
+    alternatives:
+      - { name: authentik, when: "Prioritizes a flexible login portal and app onboarding configuration; note that enterprise modules are under a separate commercial license" }
+      - { name: Logto, when: "New developer-facing products that need an organization and multi-tenant model" }
+      - { name: Casdoor, when: "Needs login integration with Chinese collaboration platforms; run protocol interoperability tests before going live" }
+      - { name: Ory Hydra + Kratos, when: "Only an OAuth/OIDC server is needed, with the user store and login UI under your own control" }
+      - { name: ZITADEL, when: "Values its multi-organization model and has completed an AGPL evaluation or purchased a commercial license" }
+    avoid:
+      - { name: Building a complete identity provider in-house, why: "Maintaining protocols, MFA, key rotation and federation is extremely costly, with high vulnerability risk" }
+      - { name: Login form issuing its own JWTs, why: "Lacks OIDC discovery, logout, rotation, federation and other capabilities" }
+    license: "Keycloak is Apache-2.0; ZITADEL is AGPL-3.0-only since v3 (the proto and docs directories are Apache-2.0, the login UI and client packages are MIT); for the rest see open_questions"
+    notes: When integrated into a product and distributed with it, evaluate licensing according to 27.
+    sources: [S18, S19, S20, S21, S22, S23, S24]
+  - category: Identity provider for public-internet SaaS
+    pick: "An already-procured cloud IdP (such as Entra ID, Okta, Auth0)"
+    when: The application is on the public internet and the organization already has a cloud identity system
+    avoid:
+      - { name: Treating a cloud IdP as available offline, why: "Without network access, new sign-ins and token refreshes both stop working" }
+  - category: Enterprise with existing AD/LDAP
+    pick: The identity provider federates or syncs with the directory; applications integrate only with the identity provider
+    alternatives:
+      - { name: Application connects directly to the directory, when: Only a single minimal internal application }
+    avoid:
+      - { name: Each application verifying passwords against LDAP on its own, why: "Passwords flow through many places, and MFA and deactivation are hard to unify" }
+  - category: "Login with Chinese collaboration platforms (Feishu, DingTalk, WeCom)"
+    pick: The platform's official login or seamless sign-in API + internal session + internal user mapping
+    alternatives:
+      - { name: The identity provider's built-in platform adapter, when: The adapter has been tested in practice }
+    avoid:
+      - { name: Using the platform's user_id as the global account, why: ID rules differ across apps and across enterprises }
+      - { name: Assuming the platform offers standard OIDC, why: "Most use proprietary protocols whose APIs change quickly" }
+    notes: "Follow each platform's official developer documentation, and test separately for each app type (internal enterprise app, third-party app)."
+    sources: [S25]
+  - category: Command-line login
+    pick: System browser + loopback callback + PKCE
+    alternatives:
+      - { name: Device code flow (RFC 8628), when: SSH remote sessions or environments without a browser }
+    avoid:
+      - { name: Collecting user passwords on the command line, why: "Equivalent to the password grant, which RFC 9700 prohibits" }
+    sources: [S01, S04]
+  - category: Multi-factor authentication
+    pick: Passkeys (WebAuthn) + TOTP fallback
+    alternatives:
+      - { name: The enterprise's existing MFA, when: Already provided centrally through the enterprise IdP }
+    avoid:
+      - { name: Implementing WebAuthn verification yourself, why: Use an IdP or a mature library }
+      - { name: SMS as the only strong factor, why: Vulnerable to SIM swapping and interception }
+    sources: [S06]
+  - category: Password hashing algorithm
+    pick: Argon2id
+    alternatives:
+      - { name: scrypt, when: Argon2id is not available in the environment }
+      - { name: PBKDF2-HMAC-SHA256, when: FIPS 140 compliance is required }
+      - { name: bcrypt, when: Only for existing systems }
+    avoid:
+      - { name: "Direct hashing with MD5 or the SHA family (even salted)", why: "Too fast, can be brute-forced at scale" }
+    sources: [S07]
+  - category: Simple authorization
+    pick: "Scoped RBAC + resource ownership checks, centralized in one authorization module (implemented with database queries)"
+    alternatives:
+      - { name: Casbin, when: "You want a ready-made embedded ACL/RBAC/ABAC model without introducing a separate service" }
+    avoid:
+      - { name: Hiding frontend buttons as authorization, why: Backend endpoints can still be called directly }
+    license: "Casbin is Apache-2.0 (to be verified, see open_questions)"
+    sources: [S26]
+  - category: Relationship-based authorization (ReBAC)
+    pick: OpenFGA
+    alternatives:
+      - { name: SpiceDB, when: "High consistency requirements for authorization, needing fine-grained control of \"read no older than a given write\"" }
+      - { name: Ory Keto, when: Already using the full Ory stack }
+    avoid:
+      - { name: Stuffing all ACLs into the JWT, why: "Tokens grow too large, and revocations and sharing changes don't take effect" }
+      - { name: Writing a separate ACL algorithm for each resource type, why: Inheritance and sharing rules quickly get out of control }
+    license: "OpenFGA, SpiceDB and Ory Keto are all Apache-2.0 (to be verified, see open_questions)"
+    sources: [S27, S28, S11]
+  - category: "Conditional policies (ABAC, policy as code)"
+    pick: Cerbos
+    alternatives:
+      - { name: OPA, when: "Unified policy across services, gateways, Kubernetes and other infrastructure, and the team can accept Rego" }
+    avoid:
+      - { name: Copying the conditional branches into every controller, why: Changing one rule means changing many places }
+      - { name: Hand-writing complex policies without policy tests, why: Permission regressions become unpredictable }
+    license: "The Cerbos open-source PDP is Apache-2.0, and Cerbos Hub is a commercial service; OPA is Apache-2.0 (to be verified, see open_questions)"
+    sources: [S29, S30]
+  - category: Service-to-service identity
+    pick: Dedicated OAuth client credentials for each service
+    alternatives:
+      - { name: SPIFFE/SPIRE, when: "Many services across clusters, needing automatically issued and rotated workload certificates" }
+    avoid:
+      - { name: Sharing a human administrator's token, why: "Callers can't be distinguished, and it stops working when the person leaves or gets abused" }
+    license: "SPIRE is Apache-2.0 (to be verified, see open_questions)"
+    sources: [S16, S31]
+  - category: Agents acting on behalf of users
+    pick: The agent's own identity + server-side delegation records + an intersection check on every call
+    alternatives:
+      - { name: RFC 8693 token exchange, when: "The authorization server supports it and \"who acts on behalf of whom\" needs to be carried in the token" }
+    avoid:
+      - { name: Handing the user's long-lived API key to the agent, why: "Long-lived, cannot be narrowed, and cannot be audited separately" }
+      - { name: Treating any request carrying a userId as the user themselves, why: Identity impersonation }
+    sources: [S17]
+antipatterns:
+  - { bad: Automatically merging accounts when the emails on both sides match, instead: "Link by (issuer, sub); when a merge is truly needed, sign in on both sides or have an administrator verify" }
+  - { bad: Calling business APIs with an ID Token, instead: Request an access token whose audience is that API }
+  - { bad: "All permissions written into the JWT's role list, so revocation waits for the token to expire", instead: "Tokens carry only identity; sensitive operations check permissions in real time" }
+  - { bad: "Permission checks only on CRUD routes, with search, export and download left unchecked", instead: Every data exit performs object-level authorization and restricts the visible scope first }
+  - { bad: Using roles for tenant isolation, instead: Tenant membership + a tenant constraint on every query }
+  - { bad: Using unguessable UUIDs instead of authorization checks, instead: An object-level decision on every access }
+  - { bad: "Forcing passwords to contain upper and lower case, digits and symbols, and to be changed every 90 days", instead: "Per NIST, require length, check breached-password blocklists, adopt passkeys" }
+  - { bad: Storing passwords as salted SHA-256, instead: A slow hash such as Argon2id }
+  - { bad: "Installing Keycloak, OpenFGA, OPA and SPIRE all at once for a small project", instead: "One identity provider + a simple authorization module, upgraded as needed" }
+  - { bad: An MCP service forwarding the client's token as-is to downstream SaaS, instead: Obtain authorization separately for the downstream service }
+  - { bad: The audit table only records "user operation succeeded", instead: "Record actor, represented party, tenant, object and decision outcome separately" }
+sources:
+  - { id: S01, title: "RFC 9700: Best Current Practice for OAuth 2.0 Security", url: "https://www.rfc-editor.org/rfc/rfc9700.html", publisher: IETF, date: 2025-01, kind: standard, checked: 2026-11-14 }
+  - { id: S02, title: "The OAuth 2.1 Authorization Framework (draft-ietf-oauth-v2-1)", url: "https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/", publisher: IETF, date: 2026-10-30, kind: standard, checked: 2026-11-14 }
+  - { id: S03, title: "OpenID Connect Core 1.0", url: "https://openid.net/specs/openid-connect-core-1_0.html", publisher: OpenID Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: "RFC 8628: OAuth 2.0 Device Authorization Grant", url: "https://www.rfc-editor.org/rfc/rfc8628.html", publisher: IETF, date: 2019-08, kind: standard, checked: 2026-11-13 }
+  - { id: S05, title: "RFC 7644: System for Cross-domain Identity Management: Protocol", url: "https://www.rfc-editor.org/rfc/rfc7644.html", publisher: IETF, date: 2015-09, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: "NIST SP 800-63B-4: Authentication and Authenticator Management", url: "https://pages.nist.gov/800-63-4/sp800-63b.html", publisher: NIST, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S07, title: "OWASP Password Storage Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S08, title: "OWASP Session Management Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S09, title: "RFC 9068: JWT Profile for OAuth 2.0 Access Tokens", url: "https://www.rfc-editor.org/rfc/rfc9068.html", publisher: IETF, date: 2021-10, kind: standard, checked: 2026-11-13 }
+  - { id: S10, title: "RFC 9449: OAuth 2.0 Demonstrating Proof of Possession (DPoP)", url: "https://www.rfc-editor.org/rfc/rfc9449.html", publisher: IETF, date: 2023-09, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: "SpiceDB: Consistency", url: "https://authzed.com/docs/spicedb/concepts/consistency", publisher: AuthZed, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "OWASP Authorization Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S13, title: "OWASP API Security Top 10 (2023)", url: "https://api-security.owasp.org/editions/2023/en/0x11-t10/", publisher: OWASP, date: "2023", kind: standard, checked: 2026-11-13 }
+  - { id: S14, title: "OWASP API1:2023 Broken Object Level Authorization", url: "https://api-security.owasp.org/editions/2023/en/0xa1-broken-object-level-authorization/", publisher: OWASP, date: "2023", kind: standard, checked: 2026-11-13 }
+  - { id: S15, title: "OpenID AuthZEN Authorization API 1.0", url: "https://openid.net/specs/authorization-api-1_0.html", publisher: OpenID Foundation, date: 2026-01-12, kind: standard, checked: 2026-11-13 }
+  - { id: S16, title: "SPIFFE Concepts", url: "https://spiffe.io/docs/latest/spiffe-about/spiffe-concepts/", publisher: SPIFFE, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "RFC 8693: OAuth 2.0 Token Exchange", url: "https://www.rfc-editor.org/rfc/rfc8693.html", publisher: IETF, date: 2020-01, kind: standard, checked: 2026-11-13 }
+  - { id: S18, title: "Keycloak", url: "https://github.com/keycloak/keycloak", publisher: Keycloak, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "ZITADEL LICENSING.md", url: "https://github.com/zitadel/zitadel/blob/main/LICENSING.md", publisher: ZITADEL, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "Zitadel v3: AGPL License, Streamlined Releases, and Platform Updates", url: "https://zitadel.com/blog/zitadel-v3-announcement", publisher: ZITADEL, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "authentik LICENSE", url: "https://github.com/goauthentik/authentik/blob/main/LICENSE", publisher: Authentik Security, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "Logto LICENSE", url: "https://github.com/logto-io/logto/blob/master/LICENSE", publisher: Silverhand, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Casdoor", url: "https://github.com/casdoor/casdoor", publisher: Casdoor, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Ory Hydra", url: "https://github.com/ory/hydra", publisher: Ory, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "Feishu Open Platform: Overview of App Authorization Login", url: "https://open.feishu.cn/document/client-docs/build-login-free-system-", publisher: Feishu, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "Apache Casbin", url: "https://github.com/apache/casbin", publisher: Apache Casbin, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "OpenFGA", url: "https://github.com/openfga/openfga", publisher: OpenFGA, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: "SpiceDB", url: "https://github.com/authzed/spicedb", publisher: AuthZed, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: "Cerbos", url: "https://github.com/cerbos/cerbos", publisher: Cerbos, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "Open Policy Agent", url: "https://github.com/open-policy-agent/opa", publisher: CNCF, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: "SPIRE", url: "https://github.com/spiffe/spire", publisher: SPIFFE, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "Licenses not individually verified in this round: authentik (community edition MIT, enterprise modules under a commercial license), Logto (MPL-2.0), Casdoor, Ory Hydra/Kratos/Keto, OpenFGA, SpiceDB, Cerbos, OPA, SPIRE (all reported as Apache-2.0); verify against each repository's LICENSE before release"
+  - Whether the main Casbin Go repository has moved to apache/casbin; the repository URL and license are still to be verified
+  - The exact effective date of ZITADEL's switch to AGPL (third-party sources disagree; the official statement uses v3 as the boundary)
+  - The official publication date of NIST SP 800-63B-4, and the specific clause on the limit of consecutive failed attempts, are still to be verified word for word
+  - "The idle and absolute timeout ranges recommended by the OWASP Session Management Cheat Sheet are still to be verified (the 30 minutes / 12 hours given in the report had no source and has not been adopted)"
+  - "Passkey support on Xinchuang (domestic IT innovation) endpoints, Chinese browsers and intranet domains still needs further research"
+  - "Further research needed: implementation libraries for each language (OIDC clients, JWT validation, WebAuthn servers, session middleware, Argon2 implementations) and their licenses, or hand this over to the per-language topics 10–14"
+  - "Further research needed: field mapping recommendations for Feishu, DingTalk and WeCom login; DingTalk and WeCom should switch to their official documentation as sources"
+  - "Further research needed: hands-on compatibility testing of identity providers with Chinese domestic databases and Xinchuang CPUs/operating systems"
+  - "Further research needed: an authoritative source for the SAML validation checklist"

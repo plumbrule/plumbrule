@@ -1,9 +1,4 @@
 ---
-import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
-import TopicGrid from '../../components/TopicGrid.astro';
-import { counts } from '../../lib/site.ts';
+import TopicsIndex from '../../components/TopicsIndex.astro';
 ---
-<StarlightPage frontmatter={{ title: '全部主题', description: '准绳的 32 个主题，按领域分组。', tableOfContents: false }}>
-  <p>已整理 {counts.topics} 个主题，共 {counts.rules} 条规则，其中硬约束 {counts.hard} 条。标「整理中」的主题还在编写。</p>
-  <TopicGrid />
-</StarlightPage>
+<TopicsIndex />

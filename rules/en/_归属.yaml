@@ -1,0 +1,36 @@
+# Each concern is defined in exactly one topic; other topics reference it (see: ["NN"] or a rule ID).
+# Topic ownership for the English edition.
+
+主题:
+  "01": { slug: architecture, 名称: Architecture and Design Principles, 前缀: ARC }
+  "02": { slug: coding, 名称: General Coding Standards, 前缀: COD }
+  "03": { slug: workflow, 名称: Engineering Workflow and Collaboration, 前缀: FLW }
+  "04": { slug: testing, 名称: Testing and Quality, 前缀: TST }
+  "05": { slug: docs, 名称: Documentation and Writing, 前缀: DOC }
+  "06": { slug: product, 名称: Product and Requirements, 前缀: PRD }
+  "07": { slug: web, 名称: Web Frontend, 前缀: WEB }
+  "08": { slug: design-system, 名称: Design Systems and Visual Design, 前缀: DSN }
+  "09": { slug: a11y-i18n, 名称: "Interaction, Accessibility, and Internationalization", 前缀: A11Y }
+  "10": { slug: typescript, 名称: TypeScript and Node, 前缀: TS }
+  "11": { slug: go, 名称: Go, 前缀: GO }
+  "12": { slug: python, 名称: Python, 前缀: PY }
+  "13": { slug: rust, 名称: Rust, 前缀: RS }
+  "14": { slug: jvm, 名称: Java and Kotlin (Server-side), 前缀: JVM }
+  "15": { slug: scripts-config, 名称: Scripts and Configuration Languages, 前缀: CFG }
+  "16": { slug: api, 名称: API Contracts and Events, 前缀: API }
+  "17": { slug: database, 名称: Databases and Storage, 前缀: DB }
+  "18": { slug: middleware, 名称: Middleware Selection, 前缀: MID }
+  "19": { slug: identity, 名称: Authentication and Authorization, 前缀: IAM }
+  "20": { slug: documents, 名称: Document Parsing and Content Processing, 前缀: FILE }
+  "21": { slug: integrations, 名称: Notifications and Third-Party Integrations, 前缀: INT }
+  "22": { slug: analytics, 名称: Data Analysis and Statistics, 前缀: DATA }
+  "23": { slug: agents, 名称: Coding Agent Standards, 前缀: AGT }
+  "24": { slug: llm, 名称: Model and LLM Engineering, 前缀: LLM }
+  "25": { slug: security, 名称: Security, 前缀: SEC }
+  "26": { slug: ops, 名称: "Operations, Deployment, and SRE", 前缀: OPS }
+  "27": { slug: compliance, 名称: "Compliance, Privacy, and Licensing", 前缀: LGL }
+  "28": { slug: mobile, 名称: Mobile Strategy, 前缀: MOB }
+  "29": { slug: android, 名称: Android, 前缀: AND }
+  "30": { slug: ios, 名称: iOS, 前缀: IOS }
+  "31": { slug: desktop, 名称: Desktop Applications, 前缀: DSK }
+  "32": { slug: local-agent-runtime, 名称: Running Coding Agents Safely on the Local Machine, 前缀: RUN }

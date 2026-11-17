@@ -1,0 +1,157 @@
+---
+// 全部规则：按关键词、级别、适用范围、检查方式筛选；可复制为 AGENTS.md 片段或下载 JSON。
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { browserData, getLang, getSite, levelName, checkName, ruleAnchor, localize } from '../lib/site.ts';
+
+const lang = getLang(Astro.url.pathname);
+const site = getSite(lang);
+const data = browserData(lang);
+const scopes = Object.entries(site.vocab['适用范围'] as Record<string, string>);
+const firstScopes = 7;
+const c = lang === 'en' ? {
+  title: 'All rules',
+  description: 'Filter rules by language, platform, or project type and copy them as an AGENTS.md snippet.',
+  lede: 'Filter rules by language, platform, or project type, then copy the applicable set as an AGENTS.md snippet.',
+  filters: 'Filters', keyword: 'Keyword', keywordPlaceholder: 'e.g. idempotency, Gitleaks, AGT-0',
+  level: 'Level', hard: 'Hard constraint', soft: 'Soft guidance',
+  scope: 'Applies to', scopeHint: 'Leave unchecked for no restriction. Within the same class, any checked tag matches; across classes, all must match.',
+  more: `More (${scopes.length - firstScopes})`, less: 'Show less',
+  check: 'Check method', auto: 'Automated', semi: 'Semi-automated', manual: 'Manual',
+  matching: 'Matching:', countSuffix: 'rules', copy: 'Copy as AGENTS.md snippet',
+  download: 'Download JSON', colId: 'ID', colRule: 'Rule', colLevel: 'Level', colCheck: 'Check', colTopic: 'Topic',
+  empty: 'No rules match these filters.',
+  note: 'Every rule has a permanent link, e.g.', copied: 'Copied {n} rules.',
+  copyFailed: 'The browser blocked clipboard access. Use the generator on the install page instead.',
+} : {
+  title: '全部规则',
+  description: '按语言、端或项目类型筛出适用的规则，复制成 AGENTS.md 片段。',
+  lede: '按语言、端或项目类型筛出适用的规则；筛好后可以直接复制成 AGENTS.md 片段。',
+  filters: '筛选', keyword: '关键词', keywordPlaceholder: '如：幂等、Gitleaks、AGT-0',
+  level: '级别', hard: '硬约束', soft: '软指导',
+  scope: '适用范围', scopeHint: '不勾选表示不限。勾选后，同类之间任一符合即可，不同类要同时符合。',
+  more: `更多（${scopes.length - firstScopes} 项）`, less: '收起',
+  check: '检查方式', auto: '自动', semi: '半自动', manual: '人工',
+  matching: '符合条件：', countSuffix: '条', copy: '复制为 AGENTS.md 片段',
+  download: '下载 JSON', colId: '编号', colRule: '规则', colLevel: '级别', colCheck: '检查', colTopic: '主题',
+  empty: '没有符合条件的规则。',
+  note: '每条规则有固定链接，如', copied: '已复制 {n} 条。',
+  copyFailed: '浏览器不允许写剪贴板，请改用安装页的生成器。',
+};
+---
+<StarlightPage frontmatter={{ title: c.title, description: c.description, template: 'splash' }}>
+  <p class="lede">{c.lede}</p>
+  <div class="not-content layout" data-rules-root data-lang={lang} data-copy-failed={c.copyFailed} data-copied={c.copied}>
+    <aside aria-label={c.filters} class="filters">
+      <label class="kw">
+        <span class="fl">{c.keyword}</span>
+        <input type="search" data-kw placeholder={c.keywordPlaceholder} />
+      </label>
+      <fieldset>
+        <legend class="fl">{c.level}</legend>
+        <label><input type="checkbox" data-level value="hard" checked /> {c.hard}</label>
+        <label><input type="checkbox" data-level value="soft" checked /> {c.soft}</label>
+      </fieldset>
+      <fieldset>
+        <legend class="fl">{c.scope}</legend>
+        <p class="hint pr-muted">{c.scopeHint}</p>
+        {scopes.map(([k, v], i) => <label class:list={{ more: i >= firstScopes }} hidden={i >= firstScopes}><input type="checkbox" data-scope value={k} /> {v}</label>)}
+        <button type="button" class="linkbtn" data-more data-label={c.more} aria-expanded="false">{c.more}</button>
+      </fieldset>
+      <fieldset>
+        <legend class="fl">{c.check}</legend>
+        <label><input type="checkbox" data-check value="auto" checked /> {c.auto}</label>
+        <label><input type="checkbox" data-check value="semi" checked /> {c.semi}</label>
+        <label><input type="checkbox" data-check value="manual" checked /> {c.manual}</label>
+      </fieldset>
+    </aside>
+    <section class="results">
+      <div class="bar">
+        <span class="count" aria-live="polite">{c.matching}<span data-count>{site.allRules.length}</span> {c.countSuffix}</span>
+        <button type="button" class="pr-btn" data-copy>{c.copy}</button>
+        <a class="pr-btn ghost" href={localize('/rules.json', lang)} download="plumbrule-rules.json">{c.download}</a>
+      </div>
+      <div class="pr-card tablewrap">
+        <table>
+          <thead><tr><th class="c-id">{c.colId}</th><th>{c.colRule}</th><th class="c-lv">{c.colLevel}</th><th class="c-ck">{c.colCheck}</th><th class="c-tp">{c.colTopic}</th></tr></thead>
+          <tbody>
+            {site.allRules.map((r) => (
+              <tr data-id={r.id} data-level={r.level} data-check={r.check} data-applies={r.applies.join(' ')} data-text={`${r.id} ${r.title} ${r.how} ${r.topic.title}`.toLowerCase()}>
+                <td class="pr-mono"><a href={`${localize(`/topics/${r.topic.slug}/`, lang)}#${ruleAnchor(r.id)}`}>{r.id}</a></td>
+                <td>{r.title.replaceAll('`', '')}</td>
+                <td><span class:list={['pr-badge', r.level]}>{levelName(r.level, lang)}</span></td>
+                <td>{checkName(r.check, lang)}</td>
+                <td>{r.topic.id} {r.topic.title}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p class="empty pr-muted" data-empty hidden>{c.empty}</p>
+      </div>
+      <p class="pr-muted note">{c.note} <span class="pr-mono">{localize('/topics/testing/', lang)}#tst-012</span>{lang === 'en' ? '.' : '。'}<span data-copied aria-live="polite"></span></p>
+    </section>
+  </div>
+  <script type="application/json" id="rules-data" set:html={JSON.stringify(data).replaceAll('<', '\\u003c')} />
+</StarlightPage>
+
+<script>
+  import { renderAgentsMd, appliesTo } from '../../tools/agents-md-core.mjs';
+  const root = document.querySelector<HTMLElement>('[data-rules-root]')!;
+  const lang = root.dataset.lang === 'en' ? 'en' : 'zh';
+  const data = JSON.parse(document.getElementById('rules-data')!.textContent!);
+  const rows = [...root.querySelectorAll<HTMLTableRowElement>('tbody tr')];
+  const vals = (sel: string) => new Set([...root.querySelectorAll<HTMLInputElement>(sel)].filter((x) => x.checked).map((x) => x.value));
+  let visible: string[] = [];
+  const apply = () => {
+    const kw = root.querySelector<HTMLInputElement>('[data-kw]')!.value.trim().toLowerCase();
+    const lv = vals('[data-level]'), ck = vals('[data-check]'), sc = vals('[data-scope]');
+    visible = [];
+    for (const r of rows) {
+      const applies = r.dataset.applies!.split(' ');
+      const ok = lv.has(r.dataset.level!) && ck.has(r.dataset.check!) && (!sc.size || appliesTo(applies, sc)) && (!kw || r.dataset.text!.includes(kw));
+      r.hidden = !ok;
+      if (ok) visible.push(r.dataset.id!);
+    }
+    root.querySelector('[data-count]')!.textContent = String(visible.length);
+    root.querySelector<HTMLElement>('[data-empty]')!.hidden = visible.length > 0;
+  };
+  root.addEventListener('input', apply);
+  root.querySelector('[data-more]')!.addEventListener('click', (e) => {
+    const b = e.currentTarget as HTMLButtonElement;
+    const open = b.getAttribute('aria-expanded') !== 'true';
+    b.setAttribute('aria-expanded', String(open));
+    for (const l of root.querySelectorAll<HTMLElement>('label.more')) l.hidden = !open;
+    b.textContent = open ? (lang === 'en' ? 'Show less' : '收起') : b.dataset.label ?? b.textContent;
+  });
+  root.querySelector('[data-copy]')!.addEventListener('click', async () => {
+    const ids = new Set(visible);
+    const tags = new Set([...vals('[data-scope]')].filter((t) => t !== 'all'));
+    const { text } = renderAgentsMd({ ...data, rules: data.rules.filter((r: { id: string }) => ids.has(r.id)) }, tags, { soft: true, full: true, lang });
+    const msg = root.querySelector('[data-copied]')!;
+    const copied = (root.dataset.copied ?? '').replace('{n}', String(ids.size));
+    try { await navigator.clipboard.writeText(text); msg.textContent = copied; }
+    catch { msg.textContent = root.dataset.copyFailed ?? ''; }
+  });
+  apply();
+</script>
+
+<style>
+  .lede { color: var(--sl-color-gray-2); }
+  .layout { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-top: 1.25rem; }
+  .filters { flex: 1 1 15rem; max-width: 17.5rem; display: flex; flex-direction: column; gap: 1.125rem; font-size: var(--sl-text-sm); }
+  .fl { font-weight: 600; display: block; margin-bottom: 0.25rem; color: var(--sl-color-white); }
+  .kw input { width: 100%; border: 1px solid var(--sl-color-gray-5); border-radius: 8px; padding: 0.4375rem 0.625rem; font: inherit; background: var(--pr-card); color: var(--sl-color-white); }
+  fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+  fieldset label { color: var(--sl-color-gray-1); }
+  .hint { margin: 0 0 0.125rem; font-size: 0.75rem; }
+  .linkbtn { background: none; border: 0; padding: 0; color: var(--sl-color-accent); font: inherit; text-align: start; cursor: pointer; margin-top: 0.125rem; }
+  .results { flex: 999 1 35rem; min-width: 0; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
+  .count { color: var(--sl-color-gray-2); font-size: var(--sl-text-sm); margin-inline-end: auto; }
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: var(--sl-text-sm); min-width: 40rem; }
+  th { text-align: start; background: var(--sl-color-gray-7); padding: 0.625rem 0.875rem; font-weight: 600; }
+  td { border-top: 1px solid var(--pr-line); padding: 0.625rem 0.875rem; vertical-align: top; color: var(--sl-color-gray-1); }
+  .c-id { width: 6rem; } .c-lv, .c-ck { width: 5.25rem; } .c-tp { width: 10rem; }
+  .empty { padding: 1rem; margin: 0; }
+  .note { font-size: 0.8125rem; margin-top: 0.75rem; }
+</style>

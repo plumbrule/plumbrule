@@ -1,0 +1,658 @@
+id: "30"
+slug: ios
+title: iOS
+summary: "Platform details for native iOS development: Swift 6 and strict concurrency, SwiftUI, Xcode and minimum deployment targets, Swift Package Manager, formatting and lint, ATS and Keychain, privacy manifests and permissions, background tasks and extensions, testing, signing and distribution."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - Swift language mode, strict concurrency, actor isolation settings
+    - SwiftUI, UIKit interoperability and Observation
+    - Xcode versions, App Store upload requirements, minimum deployment target policy
+    - Swift Package Manager and dependency locking
+    - swift-format and SwiftLint
+    - App Transport Security (ATS), Keychain, Data Protection
+    - Privacy manifests, required reason APIs, App Tracking Transparency (ATT), permission usage descriptions
+    - Background tasks, background transfers, notification extensions, widgets, entitlement configuration for extensions
+    - XCTest, XCUITest, Swift Testing, snapshot testing
+    - Signing, TestFlight, App Store, Apple Business custom apps, enterprise distribution, alternative distribution in the EU
+    - The iOS APIs for implementing contrast, Dynamic Type and VoiceOver
+  excludes:
+    - { what: "Cross-platform framework selection, offline sync architecture, overall push strategy, crash reporting", see: "28" }
+    - { what: "Mobile E2E tools (Maestro, Detox, etc.)", see: "28" }
+    - { what: Over-the-air updates and app store policies on them, see: "28" }
+    - { what: How the server calls APNs for push, see: "21" }
+    - { what: "General requirements for contrast, touch target size, screen readers and internationalization", see: "09" }
+    - { what: "Visual tokens such as colors and font sizes", see: "08" }
+    - { what: "General definitions for test layering, coverage and acceptance evidence", see: "04" }
+    - { what: "CI gate order, PRs and review, release approval process", see: "03" }
+    - { what: General principles for formatting and lint, see: "02" }
+    - { what: OpenAPI contracts and API design, see: "16" }
+    - { what: Principles for local database migrations, see: "17" }
+    - { what: "Sign-in, token rotation and sessions", see: "19" }
+    - { what: "General rules for secret scanning, SBOM, supply chain and signing provenance", see: "25" }
+    - { what: "App filing (ICP registration), personal information protection regulations, SDK compliance list, open-source license policy", see: "27" }
+overview: |
+  1. **New code uses the Swift 6 language mode.** Strict concurrency checking turns data races into compile-time errors; every target states its default actor isolation explicitly, and UI state lives on the main actor. Do not silence errors with `@unchecked Sendable` or `nonisolated(unsafe)`.
+  2. **Three versions are three different things.** The Xcode and SDK used for builds must meet the App Store's current upload requirements; the minimum deployment target is decided from target users' device data and recorded in a decision record; the OS versions users actually run are a separate statistic. CI pins the Xcode version and never ships builds made with a beta.
+  3. **UI defaults to SwiftUI + Observation.** Use UIKit interop for rich text editing, the camera and demanding performance scenarios. No I/O inside `View.body`.
+  4. **Use system capabilities first.** Networking uses URLSession + async/await + Codable; storage uses Keychain, UserDefaults and SwiftData; use GRDB for offline-first or SQL-heavy work. A minimal app can run with zero third-party runtime dependencies.
+  5. **Dependencies use SPM, and `Package.resolved` is committed.** CI resolves only from the lock file and never upgrades silently.
+  6. **Formatting and lint each have their own job.** swift-format handles formatting, SwiftLint handles quality rules, and rules that overlap between them are turned off.
+  7. **Do not loosen security defaults.** Do not disable ATS globally; tokens and secrets go only into the Keychain; signing private keys and `.p8` keys never go into the repository.
+  8. **Fill in privacy manifests according to actual use.** The app and every extension need one; any use of a required reason API must state its reason; commonly used SDKs listed by Apple must ship with a privacy manifest and a signature; request ATT only when you actually track; apps that support account creation must allow account deletion inside the app.
+  9. **The system schedules background work.** BGTaskScheduler must handle expiration and interruption and cannot be used as a timer; large files use a background URLSession; push is only a nudge.
+  10. **Testing: Swift Testing for unit tests, XCUITest for UI tests.** Swift Testing provides no UI testing API; changes to snapshot baselines must be reviewed by a human.
+  11. **Distribute only through channels Apple sanctions.** Use the App Store for the public, Apple Business custom apps for external business customers, and the Enterprise Program only for internal employees of eligible organizations; alternative distribution in the EU still requires Apple notarization.
+rules:
+  # ── Language and concurrency ──
+  - id: IOS-001
+    title: New targets use the Swift 6 language mode; legacy targets still on the Swift 5 mode must have a migration plan and a deadline
+    level: hard
+    check: auto
+    how: Check each target's `SWIFT_VERSION` with `xcodebuild -showBuildSettings`; record the target, reason and deadline in the exception list
+    applies: [platform:ios]
+    why: The Swift 6 language mode turns data races from intermittent runtime crashes into compile errors; staying on the old mode long-term only lets migration debt pile up.
+    detail: |
+      - Migrate legacy projects module by module: first enable complete concurrency checking in Swift 5 mode and clear the warnings, then switch to Swift 6 mode.
+      - Do not "finish the migration" by silencing every warning at once with repo-wide `@preconcurrency import`.
+    sources: [S02]
+  - id: IOS-002
+    title: Every target explicitly sets default actor isolation and the "approachable concurrency" build settings, rather than relying on Xcode template defaults
+    level: soft
+    check: auto
+    how: Export each target's `SWIFT_DEFAULT_ACTOR_ISOLATION` and `SWIFT_APPROACHABLE_CONCURRENCY` into a snapshot; CI diffs it and requires reviewer confirmation on changes
+    applies: [platform:ios]
+    why: Whether default isolation is MainActor changes the isolation semantics of the same code; when targets have different defaults, moving code between them causes behavior changes that are hard to track down.
+    detail: |
+      - App and UI targets usually default to MainActor isolation; pure logic and networking libraries stay nonisolated and add explicit annotations where needed.
+    sources: [S02]
+  - id: IOS-003
+    title: Code that updates UI state runs on the main actor (`@MainActor`); mutable state shared across tasks is protected by an actor or immutable value types
+    level: hard
+    check: semi
+    how: Compiles with no concurrency errors in the Swift 6 language mode; review checks how shared mutable state is protected, and run tests under Thread Sanitizer when needed
+    applies: [platform:ios]
+    why: UIKit and SwiftUI can only be updated on the main thread; unprotected shared mutable state is a data race.
+    sources: [S02]
+  - id: IOS-004
+    title: Do not use `@unchecked Sendable` or `nonisolated(unsafe)` to silence concurrency errors; when truly necessary, comment the reason in place and register it in the exception list
+    level: hard
+    check: auto
+    how: A SwiftLint custom rule or a CI grep scans for these keywords and compares against the exception list; anything not in the list fails
+    applies: [platform:ios]
+    why: These two annotations tell the compiler "trust me"; using them to clear warnings hides real data races.
+    detail: |
+      - First try value types, actors or explicit isolation boundaries; keep them only with a real reason, such as wrapping legacy code that has its own locking.
+  - id: IOS-005
+    title: Production code does not use `try!` or force unwrapping (`!`); test code and literals that cannot fail are exempt
+    level: soft
+    check: auto
+    how: Enable the SwiftLint rules `force_try` and `force_unwrapping`, relaxed separately for test targets
+    applies: [platform:ios]
+    why: Unexpected data causes an immediate crash, and the crash site is often far from the real cause.
+    sources: [S21]
+  # ── Toolchain and versions ──
+  - id: IOS-006
+    title: Builds uploaded to App Store Connect use an Xcode and SDK that meet the App Store's current requirements; CI pins the Xcode version and does not build release packages with a beta Xcode
+    level: hard
+    check: auto
+    how: CI prints and asserts `xcodebuild -version` at the start; the release pipeline rejects beta Xcode; update the CI image whenever Apple updates its upload requirements
+    applies: [platform:ios]
+    why: Builds that do not meet upload requirements are rejected by App Store Connect; beta toolchains may behave differently from release versions.
+    ref_value: "Verified on 2026-11-14 (Apple's \"Upcoming Requirements\" page): since 2026-04-28, uploaded apps must be built with Xcode 26 or later and the iOS 26 SDK or later; since 2026-09-09, uploaded iOS/iPadOS apps must have a minimum deployment target no lower than iOS 13. Apple usually raises the SDK requirement once a year in spring; the official page is authoritative."
+    detail: |
+      - When upgrading Xcode or Swift, run the full build, test and snapshot regression on a branch first, then update the version pinned in CI.
+    sources: [S01]
+  - id: IOS-007
+    title: Decide the minimum deployment target from target users' device data, record it in a decision record, and list the system APIs that consequently cannot be used or need fallbacks
+    level: soft
+    check: semi
+    how: CI compares each target's `IPHONEOS_DEPLOYMENT_TARGET` with the value in the decision record; review confirms the decision record is backed by device data
+    applies: [platform:ios]
+    why: The SDK used to compile, the minimum deployment target and the OS versions users actually run are three different things. Set it too high and you lose users; set it too low and you cannot use newer APIs such as Observation and SwiftData.
+    ref_value: "Reference: Observation and SwiftData require iOS 17 or later; with a minimum deployment target below iOS 17 you must keep older approaches such as ObservableObject and Core Data. Public statistics (App Store usage statistics) represent only the overall App Store device population; for internal enterprise devices, use the customer's own data."
+    detail: |
+      - Guard APIs above the minimum version with `if #available` / `@available` and write the fallback path.
+      - Review once a year after each new OS release.
+    sources: [S03, S35]
+  # ── UI and architecture ──
+  - id: IOS-008
+    title: New UI defaults to SwiftUI; for scenarios SwiftUI handles poorly, such as rich text editing, camera and video, and complex list performance, use UIKit and interoperate through `UIViewRepresentable` / `UIViewControllerRepresentable`
+    level: soft
+    check: manual
+    how: When reviewing new UI, confirm that the reason for each UIKit part is written down
+    applies: [platform:ios]
+    why: SwiftUI is Apple's primary UI framework and new features land there first; but UIKit is still more mature in some scenarios, and forcing SwiftUI there produces a lot of workaround code.
+  - id: IOS-009
+    title: New code with a minimum deployment target of iOS 17 or later manages state with Observation (`@Observable`); when it coexists with `ObservableObject`, separate them at module boundaries and do not mix them in the same layer
+    level: soft
+    check: semi
+    how: Scan for modules where both `@Observable` and `ObservableObject` appear, and flag them for reviewer confirmation
+    applies: [platform:ios]
+    why: Observation refreshes a view only when a property it reads changes, which is finer-grained than ObservableObject; when both mechanisms are mixed, it is hard to tell where a refresh came from.
+    detail: |
+      - State objects are owned by the root view or the composition root (`@State`) and are not recreated repeatedly in `body`.
+    sources: [S03]
+  - id: IOS-010
+    title: '`View.body` does not send network requests, read or write the database, or create heavyweight objects; put side effects in the `.task` modifier or the model layer'
+    level: soft
+    check: semi
+    how: Review checks whether `body` calls network, database or file APIs; a SwiftLint custom rule can find candidates
+    applies: [platform:ios]
+    why: '`body` is recomputed by the system frequently and unpredictably, so side effects in it run repeatedly and are hard to test.'
+  - id: IOS-011
+    title: Architecture starts from "feature modules + observable models + Repository + protocol injection"; adopting a state framework such as The Composable Architecture (TCA) requires a decision record justifying it
+    level: soft
+    check: manual
+    how: When reviewing new architecture dependencies, check the corresponding decision record
+    applies: [platform:ios]
+    why: System capabilities are enough for small and medium apps; heavyweight architecture frameworks are costly to learn and upgrade, and hard to replace.
+    sources: [S31]
+    see: ["01"]
+  # ── Dependencies ──
+  - id: IOS-012
+    title: Manage dependencies with Swift Package Manager; new projects do not adopt CocoaPods or Carthage, and only vendor SDKs that do not offer SPM are integrated as XCFrameworks
+    level: soft
+    check: auto
+    how: CI checks that no new `Podfile` or `Cartfile` has been added to the repository
+    applies: [platform:ios]
+    why: SPM is built into Xcode and the Swift toolchain and needs no extra tools; new community libraries generally support SPM first.
+  - id: IOS-013
+    title: App repositories commit `Package.resolved`; CI resolves dependencies only from the lock file and does not upgrade automatically
+    level: hard
+    check: auto
+    how: CI checks that `Package.resolved` exists; builds add `-disableAutomaticPackageResolution` (or `-onlyUsePackageVersionsFromResolvedFile`) and fail if the lock file and resolution result disagree
+    applies: [platform:ios]
+    why: Without locked versions, the same commit built at different times gets different dependencies, and problems cannot be reproduced.
+    detail: |
+      - Swift packages (libraries) consumed by others declare version ranges for their dependencies (`from:`, `.upToNextMinor`) rather than pinning with `exact:`, which easily conflicts with the consumer's other dependencies during resolution; the consuming app locks the specific versions.
+      - When offline builds are required, dependency sources and binary artifacts need internal mirrors; see 28.
+    see: ["25", "28"]
+  - id: IOS-014
+    title: Before adding a third-party runtime dependency, document its purpose, license, maintenance status, transitive dependencies and how to replace it; do not add one when a system framework suffices
+    level: soft
+    check: semi
+    how: When CI detects a new package in `Package.resolved`, it requires this information in the PR description
+    applies: [platform:ios]
+    why: Every dependency brings long-term costs in upgrades, licensing, privacy manifests and binary size; an app that only displays content and makes simple API calls can run entirely without third-party runtime dependencies.
+    sources: [S09]
+    see: ["25", "27"]
+  # ── Formatting and lint ──
+  - id: IOS-015
+    title: Use swift-format for formatting and SwiftLint for quality rules; turn off SwiftLint rules that overlap with formatting, and run both in strict mode in CI
+    level: soft
+    check: auto
+    how: CI runs `swift-format lint --strict --recursive <source-dir>` and `swiftlint lint --strict`; the config files `.swift-format` and `.swiftlint.yml` are committed
+    applies: [platform:ios]
+    why: When both tools manage indentation and line length they fight each other, and developers fix one only to get an error from the other.
+    detail: |
+      - swift-format ships with the Xcode toolchain and can be invoked as `xcrun swift-format`; pin the version when the team needs to match CI.
+      - Using only one tool is fine, but the rules must be reproducible and must not depend on manual style review.
+    sources: [S19, S20]
+    see: ["02"]
+  # ── Networking and local security ──
+  - id: IOS-016
+    title: Network requests default to URLSession + async/await + Codable; set timeouts, honor task cancellation, classify errors by status code, and never log tokens or personal information
+    level: soft
+    check: semi
+    how: Networking unit tests use `URLProtocol` stubs to cover timeouts, cancellation, 4xx, 5xx and decoding failures; review log statements
+    applies: [platform:ios]
+    why: The system networking library covers common needs; not handling cancellation and timeouts freezes the UI, and showing "network error" for every failure hides real causes such as expired permissions.
+    sources: [S04]
+  - id: IOS-017
+    title: Do not disable App Transport Security globally in Info.plist (`NSAllowsArbitraryLoads`); where plaintext HTTP is unavoidable, scope each domain individually in `NSExceptionDomains` and state the reason
+    level: hard
+    check: auto
+    how: CI scans the Info.plist of every target and fails on `NSAllowsArbitraryLoads = true`; every entry in `NSExceptionDomains` must be in the exception list
+    applies: [platform:ios]
+    why: ATS requires HTTPS by default; disabling it globally exposes every request to man-in-the-middle eavesdropping and tampering, and App Review will also ask for a justification.
+    detail: |
+      - The right way to handle self-signed certificates on an internal network is to deploy the enterprise root certificate via MDM, not to disable ATS.
+    sources: [S05]
+    see: ["25"]
+  - id: IOS-018
+    title: Access tokens, refresh tokens, passwords and private keys are stored only in the Keychain with an appropriate accessibility level; never in UserDefaults, plists or ordinary files
+    level: hard
+    check: semi
+    how: Scan code for UserDefaults and `@AppStorage` keys containing words such as token, password or secret; review the accessibility settings of the Keychain wrapper
+    applies: [platform:ios]
+    why: UserDefaults and ordinary files are stored in plaintext, included in backups, and directly readable on jailbroken devices.
+    detail: |
+      - Credentials that do not need to migrate across devices use `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, or `AfterFirstUnlockThisDeviceOnly` when background access is needed.
+      - To share with extensions, use a Keychain access group and share only the items that are required.
+      - Prefer a mature Keychain wrapper or write a very thin one of your own, with unit tests.
+    sources: [S06]
+    see: ["MOB-012", "19"]
+  - id: IOS-019
+    title: Files holding sensitive business data set a data protection level (such as `FileProtectionType.complete`) and are deleted on sign-out
+    level: soft
+    check: semi
+    how: Review whether file-writing code specifies a protection level; test on a real device that the file is unreadable when locked and removed after sign-out
+    applies: [platform:ios]
+    why: Data Protection keeps files encrypted while the device is locked; without cleanup on sign-out, the next user can see the previous user's data.
+    see: ["MOB-015"]
+  # ── Privacy and permissions ──
+  - id: IOS-020
+    title: The app and every extension include a privacy manifest (`PrivacyInfo.xcprivacy`) that declares the collected data types and the reasons for required reason APIs according to actual use, not copied from a template
+    level: hard
+    check: semi
+    how: After archiving, use Xcode's "Generate Privacy Report" to aggregate all privacy manifests; scan code for required reason APIs (such as UserDefaults, file timestamps, system boot time, disk space) and confirm each category has a matching reason code
+    applies: [platform:ios]
+    why: Since 2024-05-01, App Store Connect rejects apps that use required reason APIs without declaring reasons (including use through third-party SDKs); copying a template makes the declarations diverge from real behavior.
+    sources: [S01, S07, S08]
+  - id: IOS-021
+    title: When adopting a commonly used third-party SDK on Apple's list, confirm it ships with its own privacy manifest; for binary dependencies, also confirm it is signed
+    level: hard
+    check: semi
+    how: When adding or upgrading dependencies, check against Apple's third-party SDK list; Xcode verifies that a new SDK version has the same signer as the previous one
+    applies: [platform:ios]
+    why: When submitting a new app that includes a listed SDK, or an update that adds one, Apple requires a privacy manifest, and binary dependencies must also be signed.
+    detail: |
+      - The list includes Alamofire, Kingfisher, SDWebImage, Lottie, the Firebase components, Flutter and its plugins, among others; the official page is authoritative. Artifacts that repackage these SDKs are covered too.
+    sources: [S09]
+  - id: IOS-022
+    title: The App Privacy details on the App Store stay consistent with the privacy manifest and what third-party SDKs actually collect; recheck after adding, removing or upgrading SDKs
+    level: hard
+    check: manual
+    how: Before release, compare the Privacy Report, the SDK list and the privacy details in App Store Connect, and sign off item by item
+    applies: [platform:ios]
+    why: Inaccurate privacy details violate the App Review Guidelines and may also amount to misrepresentation to users.
+    sources: [S10, S11]
+    see: ["27"]
+  - id: IOS-023
+    title: Request authorization through App Tracking Transparency (ATT) only when performing what Apple defines as "tracking" (linking user data across other companies' apps or websites); after the user declines, do not continue tracking with other identifiers
+    level: hard
+    check: manual
+    how: Review determines from the SDK list whether tracking occurs; test that after authorization is declined the advertising identifier is all zeros and no substitute such as fingerprinting is used
+    applies: [platform:ios]
+    why: Unauthorized tracking and bypassing ATT with device fingerprinting both violate App Store policy; showing the ATT prompt without tracking only annoys users.
+    sources: [S10]
+  - id: IOS-024
+    title: Each permission usage description in Info.plist (`NS…UsageDescription`) states clearly what the app uses it for and is localized; request authorization only when the user reaches the corresponding feature
+    level: hard
+    check: semi
+    how: CI checks that every permission used in code has a matching usage key with non-empty, non-placeholder text; review when authorization requests are triggered
+    applies: [platform:ios]
+    why: An app missing a usage key crashes as soon as it calls the permission API; vague text or prompting for every permission at launch gets rejected in review and makes users more likely to decline.
+    sources: [S11]
+    see: ["MOB-039"]
+  - id: IOS-025
+    title: Apps that support account creation provide an in-app entry point for deleting the account
+    level: hard
+    check: manual
+    how: The release checklist confirms the deletion entry point is reachable and actually deletes the account and its associated data
+    applies: [platform:ios]
+    why: The App Review Guidelines require apps that support account creation to let users initiate account deletion within the app.
+    sources: [S11]
+    see: ["27"]
+  # ── Background, push and extensions ──
+  - id: IOS-026
+    title: Background work uses BGTaskScheduler, sets an expiration handler (`expirationHandler`), persists progress and can resume after interruption; do not use background tasks as timers
+    level: hard
+    check: semi
+    how: Code checks confirm every task sets `expirationHandler` and calls `setTaskCompleted`; on a real device, trigger tasks and expiration with debugger commands and verify recovery after interruption
+    applies: [platform:ios]
+    why: The system decides when background tasks run and how long they get, and can terminate them at any moment; features designed as "run every N minutes" do not hold on iOS.
+    detail: |
+      - Large uploads and downloads use a background URLSession (`URLSessionConfiguration.background`), so the system continues the transfer after the app is suspended or terminated.
+      - `BGContinuedProcessingTask` is only for tasks the user starts in the foreground that continue after the app goes to the background; it must show progress and allow cancellation, and it is not an exemption for permanent background execution.
+      - Work that needs long-running continuous computation belongs on the server.
+    sources: [S12, S13]
+    see: ["MOB-021"]
+  - id: IOS-027
+    title: Report the push device token to the server on every launch, labeled as development or production environment; push is only a nudge, and the server is the source of truth for business data
+    level: soft
+    check: semi
+    how: Test three cases, token change, environment switch and lost push, and confirm the server mapping is correct and the app backfills data when opened
+    applies: [platform:ios]
+    why: APNs tokens change on reinstall, backup restore and similar events, and development and production tokens are not interchangeable; push itself does not guarantee delivery.
+    sources: [S14]
+    see: ["MOB-023", "21"]
+  - id: IOS-028
+    title: The APNs authentication key (`.p8`) lives only in the server-side secret store; it is never bundled into the app or committed to the repository
+    level: hard
+    check: auto
+    how: Secret-scanning rules match `.p8` files and `-----BEGIN PRIVATE KEY-----`; scan the app bundle contents
+    applies: [platform:ios]
+    why: Anyone holding the `.p8` key can send push notifications to all your users as you.
+    sources: [S14]
+    see: ["25"]
+  - id: IOS-029
+    title: Notification service extensions do only lightweight processing (such as downloading attachments or decrypting the body) and finish within the system time limit; when time is about to run out, fall back to showing the original content
+    level: soft
+    check: semi
+    how: Check that `serviceExtensionTimeWillExpire` is implemented; test that notifications still display on slow and offline networks
+    applies: [platform:ios]
+    why: Extensions have strict time and memory limits, and an unhandled timeout leads to broken notification content.
+    sources: [S14]
+  - id: IOS-030
+    title: Design widgets around timelines and the refresh budget, with a UI that tolerates delayed refreshes; do not build second-by-second real-time dashboards
+    level: soft
+    check: manual
+    how: Review the widget refresh strategy; confirm widgets visible on the Lock Screen do not show sensitive data
+    applies: [platform:ios]
+    why: Widgets are not resident processes; the system refreshes them within a budget, and frequent refresh requests only exhaust the budget faster.
+    sources: [S15]
+  - id: IOS-031
+    title: The entitlements of each target and extension enable only the capabilities required; App Groups and Keychain sharing groups share only the data required
+    level: soft
+    check: semi
+    how: CI exports and diffs each target's `.entitlements`, and changes require an explanation in review
+    applies: [platform:ios]
+    why: Extensions are separate processes; extra capabilities and shared containers widen the data exposure surface, and each one must be justified in App Review.
+  # ── Testing ──
+  - id: IOS-032
+    title: New unit and integration tests use Swift Testing; UI automation and performance tests use XCTest (XCUITest); existing XCTest cases need not be rewritten
+    level: soft
+    check: semi
+    how: Review which framework new test files use; both frameworks can coexist in the same test target
+    applies: [platform:ios]
+    why: Swift Testing is the new unit testing framework bundled with Xcode and is more expressive; it provides no UI testing API, so UI tests still use XCUITest.
+    sources: [S16, S17]
+    see: ["04"]
+  - id: IOS-033
+    title: UI tests locate elements by `accessibilityIdentifier` and call `performAccessibilityAudit()` on key screens for automated accessibility audits
+    level: soft
+    check: auto
+    how: UI tests contain no coordinate taps; tests for key screens include an accessibility audit call, and an audit failure fails the test in CI
+    applies: [platform:ios]
+    why: Tests that locate elements by text or coordinates break whenever copy or layout changes; automated audits cheaply catch missing labels, insufficient contrast, truncated text and similar issues.
+    sources: [S17]
+    see: ["MOB-037", "09"]
+  - id: IOS-034
+    title: CI keeps the test result bundle (`.xcresult`) so screenshots and logs are available on failure
+    level: soft
+    check: auto
+    how: '`xcodebuild test` adds `-resultBundlePath`, and CI uploads the result bundle as a build artifact'
+    applies: [platform:ios]
+    why: A single line saying "tests failed" cannot be debugged; the result bundle contains failure screenshots, logs and attachments.
+    sources: [S16]
+    see: ["04"]
+  - id: IOS-035
+    title: Snapshot tests cover only key screens and pin the simulator model, OS version, language, text size and light/dark appearance; baseline changes must be reviewed by a human, and CI never accepts them automatically
+    level: soft
+    check: semi
+    how: Hard-code the runtime environment in the snapshot configuration; changes to baseline images go through PR review
+    applies: [platform:ios]
+    why: OS or Xcode upgrades change font rendering and UI appearance; automatically accepting new baselines is the same as not testing.
+    sources: [S18]
+  # ── Implementing accessibility and localization on iOS ──
+  - id: IOS-036
+    title: Controls provide an `accessibilityLabel` VoiceOver can read meaningfully, adding `accessibilityValue` and `accessibilityHint` when needed; icon-only buttons must have a label, and custom controls declare correct traits
+    level: hard
+    check: semi
+    how: XCUITest accessibility audits find candidates; walk through the core flows with VoiceOver on a real device
+    applies: [platform:ios]
+    why: An unlabeled button is read by the screen reader only as "button" or an image name, leaving screen reader users unable to use it.
+    sources: [S22]
+    see: ["09"]
+  - id: IOS-037
+    title: Text uses Dynamic Type text styles (SwiftUI's `.font(.body)` and similar; UIKit's `preferredFont(forTextStyle:)` plus `adjustsFontForContentSizeCategory`), and core content is not truncated at the largest accessibility text size
+    level: hard
+    check: semi
+    how: Screenshot core screens at the largest accessibility text size and inspect them manually; accessibility audits report truncated text
+    applies: [platform:ios]
+    why: Text with hard-coded sizes does not follow system settings; when users with low vision enlarge text, it is either still hard to read or gets truncated.
+    sources: [S22]
+    see: ["09"]
+  - id: IOS-038
+    title: Colors use system semantic colors or asset catalog colors with light and dark variants; animations respect the Reduce Motion setting; when supporting iPad, adapt to size changes and Split View
+    level: soft
+    check: semi
+    how: Check screenshots across combinations of dark, light, Increase Contrast, Reduce Motion and iPad Split View
+    applies: [platform:ios]
+    why: Hard-coded colors produce white text on white backgrounds in Dark Mode; ignoring Reduce Motion causes discomfort for users with vestibular sensitivity; simply scaling up the iPhone layout on iPad gives a poor experience.
+    detail: |
+      - SwiftUI reads `@Environment(\.accessibilityReduceMotion)`; UIKit reads `UIAccessibility.isReduceMotionEnabled`.
+    sources: [S22]
+    see: ["08", "09"]
+  - id: IOS-039
+    title: UI copy goes into a String Catalog (`.xcstrings`); dates, numbers and currencies are formatted per locale with `FormatStyle`, plurals use String Catalog plural variants, and sentences are never concatenated
+    level: soft
+    check: auto
+    how: CI checks that the String Catalog has no entries in the "Needs Review" or "untranslated" state; run the UI tests once under pseudo-localization
+    applies: [platform:ios]
+    why: Concatenated sentences get the word order wrong in other languages; hand-formatted dates and numbers display incorrectly in other regions.
+    sources: [S23]
+    see: ["09"]
+  # ── Signing, distribution and App Store release ──
+  - id: IOS-040
+    title: Signing certificate private keys, provisioning profiles and App Store Connect API keys are kept in a secret store or CI secrets, isolated per environment, and never committed to the repository
+    level: hard
+    check: auto
+    how: Secret scanning matches `.p12`, `.mobileprovision`, `.p8` and private key headers; CI signing credentials are visible only to the release pipeline
+    applies: [platform:ios]
+    why: Once a signing private key leaks, others can sign apps as you.
+    see: ["25"]
+  - id: IOS-041
+    title: Every release build retains the `.xcarchive`, dSYM symbol files, the corresponding commit hash, the Xcode version and `Package.resolved`
+    level: soft
+    check: auto
+    how: The release pipeline archives these artifacts and fails if any is missing; dSYMs are also uploaded to the crash reporting service
+    applies: [platform:ios]
+    why: Without symbol files, production crash stack traces cannot be symbolicated; without commit and toolchain information, the affected version cannot be rebuilt.
+    see: ["MOB-026", "03"]
+  - id: IOS-042
+    title: Decide the distribution channel in writing at project kickoff and meet Apple's eligibility requirements; do not use Enterprise certificates to distribute to external customers or the public
+    level: hard
+    check: manual
+    how: "Review the distribution decision record: who the users are, which channel is used, and whether the organization is eligible for that channel"
+    applies: [platform:ios]
+    why: The Enterprise Program only allows an organization to distribute internal apps to its own employees; misuse gets the certificate revoked, and every installed app stops launching.
+    detail: |
+      - For the public: the App Store, with TestFlight for pre-release testing.
+      - For specific external business customers: custom apps (Custom Apps) distributed through Apple Business.
+      - For an organization's own employees only, where the organization meets the Enterprise Program requirements: Enterprise Program + MDM; first evaluate whether custom apps would be enough.
+      - For a small number of test devices: Ad Hoc.
+      - TestFlight, the App Store and Apple Business all depend on Apple's online services; an "offline business" does not mean "offline distribution", so if the customer's network cannot reach Apple services, state this at project kickoff.
+    sources: [S24, S25]
+  - id: IOS-043
+    title: Before distributing in the EU through an alternative app marketplace or the web, confirm the corresponding terms have been signed and the app can pass Apple notarization, and assess the commission
+    level: soft
+    check: manual
+    how: The distribution decision record states the applicable terms, the notarization process and the cost estimate
+    applies: [platform:ios]
+    why: Alternative distribution under the EU Digital Markets Act (DMA) still goes through Apple's notarization review, and the terms and fees have changed frequently in recent years, so decisions based on outdated material are easily wrong.
+    ref_value: "Verified on 2026-11-14: in 2026-08 Apple announced new EU terms under which apps distributed through alternative app marketplaces and the web pay a 5% Core Technology Commission, replacing the previous per-install Core Technology Fee; the new terms took effect on 2026-10-01. All alternatively distributed apps still require notarization."
+    sources: [S26, S27]
+  - id: IOS-044
+    title: When submitting for review, provide a working demo account and a backend reachable during review; for features that need special hardware or environments, attach a demo video
+    level: soft
+    check: manual
+    how: The release checklist confirms the demo account can sign in on the day of submission and the backend is reachable from the public internet
+    applies: [platform:ios]
+    why: If reviewers cannot sign in or cannot reach the service, the app is rejected outright.
+    sources: [S11]
+  - id: IOS-045
+    title: Apps released on the mainland China App Store that require ICP filing enter, in App Store Connect, the app filing number matching the app
+    level: hard
+    check: manual
+    how: Before release, verify that the filing entity, app name and Bundle ID match the filing number entered in App Store Connect
+    applies: [platform:ios]
+    why: Missing or mismatched filing information prevents the app from being released on the mainland China App Store. Whether filing is required is determined according to 27.
+    sources: [S28]
+    see: ["27"]
+  - id: IOS-046
+    title: "Cross-platform projects such as React Native and Flutter also maintain the native iOS assets: privacy manifests (including each plugin's manifest), entitlements, permission usage descriptions and signing configuration"
+    level: soft
+    check: semi
+    how: After archiving, use the Privacy Report to check that all plugins' privacy manifests have been merged; CI diffs changes to entitlements and Info.plist
+    applies: [platform:ios, platform:mobile]
+    why: Configuration in the JS or Dart layer does not automatically satisfy iOS permission, privacy and signing requirements; App Review looks at the final native package.
+    sources: [S09]
+    see: ["28"]
+choices:
+  - category: Toolchain
+    pick: The current release version of Xcode (meeting the App Store's current upload requirements), pinned in CI
+    avoid:
+      - { name: Building release packages with a beta Xcode, why: "It may behave differently from the release version, and cannot be used for submission" }
+      - { name: Building and signing iOS apps on Linux, why: Signing and archiving require macOS and Xcode }
+    sources: [S01]
+  - category: UI
+    pick: SwiftUI
+    alternatives:
+      - { name: UIKit (interop via UIViewRepresentable), when: "Rich text editing, camera and video, complex list performance, or maintaining an existing UIKit project" }
+    avoid:
+      - { name: Building your own UI framework, why: Cannot keep up with new system features and accessibility support }
+  - category: State observation
+    pick: "Observation (@Observable), requires iOS 17 or later"
+    alternatives:
+      - { name: ObservableObject / Combine, when: Minimum deployment target below iOS 17 or existing code }
+    avoid:
+      - { name: Mixing both observation mechanisms in the same layer, why: The source of refreshes is hard to trace }
+    sources: [S03]
+  - category: Architecture
+    pick: Feature modules + observable models + Repository + protocol injection (manual injection at the composition root)
+    alternatives:
+      - { name: The Composable Architecture (TCA), when: "Multiple teams share complex state, there are many side effects that must be testable, and there is a decision record" }
+    avoid:
+      - { name: Forcing a heavyweight architecture framework onto a small project, why: "High learning and upgrade costs, with unclear benefit" }
+    license: TCA is MIT
+    sources: [S31]
+  - category: Networking
+    pick: URLSession + async/await + Codable
+    alternatives:
+      - { name: "swift-openapi-generator (official Apple, with the URLSession transport)", when: The backend has a stable OpenAPI contract and many endpoints }
+      - { name: Alamofire, when: "You genuinely need its interception, retry and similar capabilities, and have evaluated it" }
+    avoid:
+      - { name: A home-grown HTTP stack, why: "The system library already covers it, and a home-grown one is hard to maintain" }
+      - { name: Hand-writing large numbers of API DTOs, why: They drift from the contract }
+    license: swift-openapi-generator is Apache-2.0; Alamofire is MIT
+    sources: [S04, S29]
+  - category: Local storage
+    pick: "UserDefaults / @AppStorage for preferences, Keychain for credentials, SwiftData for simple object models"
+    alternatives:
+      - { name: GRDB.swift, when: "Offline-first, needing explicit SQL, transactions and migration control" }
+      - { name: Core Data, when: "Existing projects keep using it; do not rewrite just to chase the new thing" }
+    avoid:
+      - { name: Wrapping SQLite and a connection pool yourself, why: Deadlocks and data corruption are likely }
+      - { name: Assuming SwiftData or GRDB provides sync or encryption, why: Sync and encryption must be designed separately }
+    license: GRDB is MIT; when encryption is needed, evaluate SQLCipher's license and export controls
+    notes: For SwiftData model changes, use VersionedSchema + SchemaMigrationPlan and test migrations with data from older versions (see MOB-022).
+    sources: [S30, S32]
+  - category: Image loading
+    pick: SwiftUI AsyncImage
+    alternatives:
+      - { name: Nuke or Kingfisher, when: "You need advanced capabilities such as disk caching, prefetching and progressive decoding; use only one per project" }
+    license: Nuke and Kingfisher are both MIT
+    sources: [S33]
+  - category: Dependency management
+    pick: "Swift Package Manager, with Package.resolved committed"
+    alternatives:
+      - { name: XCFramework, when: The vendor SDK does not offer an SPM package }
+    avoid:
+      - { name: Using CocoaPods or Carthage in new projects, why: "Requires an extra toolchain, and new community libraries have broadly moved to SPM" }
+  - category: Formatting and lint
+    pick: swift-format (formatting) + SwiftLint (quality rules)
+    alternatives:
+      - { name: Using only one of them, when: "The team is willing to give up the other kind of check, but the rules must be reproducible" }
+    avoid:
+      - { name: Both tools managing indentation and line length, why: They fight each other }
+    license: swift-format is Apache-2.0; SwiftLint is MIT (both are standalone development tools that do not ship in the app)
+    sources: [S19, S20]
+  - category: Testing
+    pick: Swift Testing (unit, integration) + XCUITest (UI)
+    alternatives:
+      - { name: XCTest unit tests, when: "Existing test cases, or when you need performance testing APIs unique to XCTest" }
+      - { name: swift-snapshot-testing, when: "Design-critical screens need visual regression testing; keep it in test targets only" }
+    avoid:
+      - { name: Using Swift Testing in place of UI tests, why: It provides no UI testing API }
+    license: swift-snapshot-testing is MIT
+    notes: For cross-platform mobile E2E tools, see 28.
+    sources: [S16, S17, S18]
+  - category: Build and release automation
+    pick: "Self-hosted macOS build machines + xcodebuild, adding fastlane as needed"
+    alternatives:
+      - { name: Xcode Cloud, when: It is acceptable for Apple to access the source repository and build in the cloud }
+    avoid:
+      - { name: "Committing signing private keys to Git, sharing a personal developer account", why: "Cannot be audited, and damage is hard to contain after a leak" }
+    license: fastlane is MIT
+    notes: Use Xcode automatic signing during development; CI uses an App Store Connect API key or controlled manual signing.
+    sources: [S34]
+  - category: Distribution
+    pick: App Store (TestFlight for pre-release testing)
+    alternatives:
+      - { name: Custom apps (Custom Apps) distributed through Apple Business, when: For specific external business customers }
+      - { name: Enterprise Program + MDM, when: An eligible organization distributing internal apps to its own employees }
+      - { name: Ad Hoc, when: Testing on a small number of registered devices }
+      - { name: EU alternative app marketplaces or web distribution, when: "Targeting EU users, with the terms, notarization and commission already evaluated" }
+    avoid:
+      - { name: Using Enterprise certificates to distribute to external customers or the public, why: "Violates the agreement, and the certificate will be revoked" }
+    notes: In 2026, Apple Business Manager was merged into the new Apple Business platform.
+    sources: [S24, S25, S26]
+antipatterns:
+  - bad: Adding `@unchecked Sendable` in bulk to make Swift 6 concurrency errors go away
+    instead: Switch to value types, actors or explicit isolation boundaries
+  - bad: Patching state problems everywhere with `DispatchQueue.main.async` and `Task.detached`
+    instead: Use `@MainActor` and structured concurrency, with tasks cancelled along with their owner
+  - bad: Pulling in the whole kit of TCA, Alamofire, an image library and an ORM at the start of a new project
+    instead: Start from SwiftUI + Observation + URLSession, and add dependencies as needed with a reason
+  - bad: Disabling ATS globally for debugging convenience
+    instead: Use HTTPS; trust internal certificates via MDM, and set per-domain exceptions when necessary
+  - bad: Storing tokens, phone numbers and passwords in UserDefaults
+    instead: Store credentials in the Keychain, and set data protection on sensitive files
+  - bad: Copying `PrivacyInfo.xcprivacy` from another project to get through review
+    instead: Fill it in according to the APIs and SDKs actually used, and check the Privacy Report after archiving
+  - bad: Requesting every permission as soon as the app launches
+    instead: Request when the user reaches the feature, and degrade gracefully if declined
+  - bad: Treating silent push or background tasks as reliable scheduled execution
+    instead: System scheduling + locally persisted tasks + catching up when the app returns to the foreground
+  - bad: A widget requesting a refresh every few seconds
+    instead: Design around timelines, and evaluate Live Activities when real-time progress is needed
+  - bad: Snapshot testing every screen and automatically accepting diffs in CI
+    instead: Test only key screens, pin the runtime environment, and have humans review baseline changes
+  - bad: Signing an IPA with an Enterprise certificate and sending it to customers
+    instead: Use Apple Business custom apps or the App Store
+sources:
+  - { id: S01, title: "Upcoming Requirements", url: "https://developer.apple.com/news/upcoming-requirements/", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Xcode Build Settings Reference", url: "https://developer.apple.com/documentation/xcode/build-settings-reference", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "Migrating from the Observable Object protocol to the Observable macro", url: "https://developer.apple.com/documentation/swiftui/migrating-from-the-observable-object-protocol-to-the-observable-macro", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S04, title: "URLSession", url: "https://developer.apple.com/documentation/foundation/urlsession", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "NSAppTransportSecurity", url: "https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "Keychain Services", url: "https://developer.apple.com/documentation/security/keychain-services", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Privacy manifest files", url: "https://developer.apple.com/documentation/bundleresources/privacy-manifest-files", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Describing use of required reason API", url: "https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "Third-party SDK requirements", url: "https://developer.apple.com/support/third-party-SDK-requirements/", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: "User Privacy and Data Use", url: "https://developer.apple.com/app-store/user-privacy-and-data-use/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "App Review Guidelines", url: "https://developer.apple.com/app-store/review/guidelines/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "Background Tasks", url: "https://developer.apple.com/documentation/backgroundtasks/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "Downloading files in the background", url: "https://developer.apple.com/documentation/foundation/downloading-files-in-the-background", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "User Notifications", url: "https://developer.apple.com/documentation/usernotifications", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "Keeping a widget up to date", url: "https://developer.apple.com/documentation/widgetkit/keeping-a-widget-up-to-date", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Testing in Xcode", url: "https://developer.apple.com/documentation/xcode/testing", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "XCTest", url: "https://developer.apple.com/documentation/xctest", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: "swift-snapshot-testing", url: "https://github.com/pointfreeco/swift-snapshot-testing", publisher: Point-Free, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S19, title: "swift-format", url: "https://github.com/swiftlang/swift-format", publisher: Swift Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "SwiftLint", url: "https://github.com/realm/SwiftLint", publisher: Realm, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S21, title: "SwiftLint rule directory", url: "https://realm.github.io/SwiftLint/rule-directory.html", publisher: Realm, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S22, title: "Human Interface Guidelines: Accessibility", url: "https://developer.apple.com/design/human-interface-guidelines/accessibility", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Localizing and varying text with a string catalog", url: "https://developer.apple.com/documentation/xcode/localizing-and-varying-text-with-a-string-catalog", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Apple Developer Enterprise Program", url: "https://developer.apple.com/programs/enterprise/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "Introducing Apple Business", url: "https://www.apple.com/newsroom/2026/03/introducing-apple-business/", publisher: Apple, date: 2026-03-24, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: "Changes for apps in the European Union", url: "https://developer.apple.com/support/dma-and-apps-in-the-EU", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: "Apple announces changes for apps in the European Union", url: "https://www.apple.com/newsroom/2026/08/apple-announces-changes-for-apps-in-the-european-union/", publisher: Apple, date: 2026-08, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "App Store Connect: App information", url: "https://developer.apple.com/help/app-store-connect/reference/app-information/app-information", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: "swift-openapi-generator", url: "https://github.com/apple/swift-openapi-generator", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "GRDB.swift", url: "https://github.com/groue/GRDB.swift", publisher: Gwendal Roué, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S31, title: "The Composable Architecture", url: "https://github.com/pointfreeco/swift-composable-architecture", publisher: Point-Free, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S32, title: "SwiftData: SchemaMigrationPlan", url: "https://developer.apple.com/documentation/swiftdata/schemamigrationplan", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: "Nuke", url: "https://github.com/kean/Nuke", publisher: kean, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S34, title: "fastlane", url: "https://github.com/fastlane/fastlane", publisher: fastlane, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S35, title: "App Store usage statistics", url: "https://developer.apple.com/support/app-store/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "The current toolchain versions stated in the report (Xcode 27.2, Swift 6.4.2) were not verified online; the rules do not depend on specific versions, and a version ledger is maintained separately."
+  - "The report claims Xcode 27 introduces a JSON-format project configuration file, based on a single sentence of sourcing and not verified; once verified, decide whether it affects the practice of committing and reviewing project files."
+  - "The report claims that in 2026-06 App Store statistics, 79% of iPhones were on iOS 26; not verified and not written into the rules."
+  - "The plan and date for making the CocoaPods trunk read-only were not verified; once verified, they can serve as a stronger reason for \"new projects do not use CocoaPods\"."
+  - "SwiftLint's license (MIT) and maintenance status were not rechecked online this time; the claim that swift-format ships with the Xcode toolchain comes from community material since 2024, and no official Apple documentation page was found."
+  - "Whether the specific name and process for custom app distribution have changed under the Apple Business platform has not been confirmed in official Apple documentation."
+  - "Interoperability details between Swift Testing and XCTest in newer Xcode versions (the community says it is on by default) have not been confirmed in official Apple documentation."
+  - "Research pending: the default approach to navigation (NavigationStack and how routing is organized)."
+  - "Research pending: whether to recommend an off-the-shelf dependency injection library (compare with Hilt in 29 Android)."
+  - "Research pending: implementing logging (OSLog), crashes and performance (MetricKit) on iOS."
+  - "Research pending: engineering standards for in-app purchases (StoreKit 2) and subscriptions."
+  - "Research pending: review requirements for deep links and Universal Links, and Sign in with Apple."
+  - "Research pending: whether to recommend project generation tools (Tuist, XcodeGen)."
+  - "Research pending: the concrete steps for cross-platform projects (React Native, Flutter) to migrate the iOS side from CocoaPods to SPM and to merge privacy manifests."

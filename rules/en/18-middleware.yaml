@@ -1,0 +1,569 @@
+id: "18"
+slug: middleware
+title: Middleware Selection
+summary: "How to choose and correctly use caches, message queues and event streams, database-backed task queues, scheduling and durable workflows, distributed locks, rate limiting, search engines, and object storage, plus testing consumers for duplicates, out-of-order delivery, and recovery."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Whether to introduce middleware at all, and what must be written down before introducing it
+    - Cache (Valkey, Redis, etc.) usage and licensing
+    - Selection and reliability requirements for message queues and event streams (RabbitMQ, NATS JetStream, Kafka, etc.)
+    - PostgreSQL-based task queue libraries (by language)
+    - Scheduling and durable workflows (Temporal, etc.)
+    - Distributed locks and rate limiting
+    - Search engines (PostgreSQL full-text search, Meilisearch, OpenSearch, Elasticsearch, etc.)
+    - Self-hosted object storage
+    - Testing consumers for duplicates, out-of-order delivery, and crash recovery
+  excludes:
+    - { what: "Transactions and isolation levels, SKIP LOCKED, advisory locks, outbox and inbox table design", see: "17" }
+    - { what: "Idempotency semantics, Idempotency-Key status codes, event envelopes (CloudEvents) and the event catalog", see: "16" }
+    - { what: "How open-source licenses are assessed (standalone tools vs. components distributed with the product), license scanning tools", see: "27" }
+    - { what: "Image pinning, SBOM, vulnerability scanning", see: "25" }
+    - { what: "Deployment, upgrade drills, monitoring and alerting, capacity and SLOs", see: "26" }
+    - { what: "Client library usage in each language", see: "10-15" }
+    - { what: "Login sessions and authorization models", see: "19" }
+overview: |
+  1. **First ask whether you need it.** If the database can handle the load, don't add a cache, a queue, or a search engine. Every piece of middleware is one more system to back up, upgrade, monitor, and troubleshoot; before introducing one, write down why what you have is not enough and how you would get out.
+  2. **Neither caches nor search indexes are the source of truth.** Authoritative data lives only in the database; caches can be lost and indexes can be rebuilt. Cache keys include the tenant and a version; every key class defines its expiry, invalidation method, and what happens when the cache is down. Default cache is Valkey (BSD-3-Clause); from Redis 8 on, Redis is licensed under a choice of AGPLv3 / SSPLv1 / RSALv2.
+  3. **For background jobs, use a database queue library first; don't write your own.** For background jobs that live in the same database and transaction as the business data, use an existing PostgreSQL task queue library: River for Go, pg-boss or Graphile Worker for Node, Procrastinate for Python, Oban for Elixir, db-scheduler or JobRunr for Java. Claiming, leases, retries, and dead-lettering are already handled by these libraries.
+  4. **First be clear about which semantics you need.** Work queues (each task processed once, acknowledged, retried) default to RabbitMQ; lightweight pub/sub and durable events use NATS JetStream (Core NATS is not durable); only move to Kafka when you need long-term replay, multiple independent consumer groups, and high-throughput partitioned logs. There is no mandatory upgrade path of "database queue → RabbitMQ → Kafka".
+  5. **At-least-once is the norm.** Writing to the database and then publishing a message uses an outbox (see 17); consumers deduplicate by business key; retries have a cap, backoff, and a dead-letter queue. No middleware's "exactly once" covers external payments or HTTP calls. Consumers must be specifically tested for duplicates, out-of-order delivery, and crash recovery.
+  6. **Scheduling, queues, and workflows are three different things.** Scheduled jobs state their time zone, how missed runs are caught up, and whether runs may overlap; only long-running processes that span days, wait for human approval, or need compensation justify Temporal; a few cron jobs do not justify Temporal or Airflow.
+  7. **Locks and rate limiting need explicit semantics.** Business uniqueness relies on database unique constraints; strong cross-system mutual exclusion needs a fencing token (a monotonically increasing token; downstream rejects stale tokens); Redis locks and Redlock do not guarantee that an external side effect happens only once. Global rate limiting needs a shared atomic counter.
+  8. **For search, start with what the database provides.** In-app search starts with PostgreSQL full-text search and `pg_trgm`; Chinese search must be evaluated with real queries, never launched on the basis of "supports Chinese". The default standalone search engine is OpenSearch (Apache-2.0); Elasticsearch source code can be taken under AGPLv3, but the official default distribution is under Elastic License 2.0.
+  9. **Check licenses against the distribution you actually use.** Key points: Redis 8 offers a choice of three; Dragonfly is under a source-available license (production capped at 100 vCPU); the Elasticsearch distribution is ELv2; XXL-JOB and Typesense are GPL-3.0; the MinIO community edition repository is archived and no longer maintained. For how to assess licenses, see 27.
+rules:
+  # ── Introduction and governance ──
+  - id: MID-001
+    title: "Before introducing new middleware, write a decision record covering the requirement, why the existing database or services are not enough, alternatives considered, the exit path, and the license"
+    level: soft
+    check: manual
+    how: When reviewing a PR that adds middleware, check that it comes with a decision record (ADR) and that all five items are filled in
+    applies: [kind:service]
+    why: Once middleware is in production it is very hard to remove; introductions without a clear rationale are often just following trends and end up as dependencies no one dares to touch.
+    see: ["05"]
+  - id: MID-002
+    title: "Before adding reliability requirements for caches, queues, search, or scheduling, write down capacity, backlog limits, how much data may be lost, recovery time, and who operates it"
+    level: soft
+    check: manual
+    how: These items appear in the decision record or the operations runbook; verify them during review
+    applies: [kind:service]
+    why: Verbally promised reliability is never delivered; only when the middleware fails do you discover that no one is on call and no one knows how to recover it.
+    see: ["26"]
+  - id: MID-003
+    title: "Record the actual version, image digest, and distribution license of each piece of middleware; do not use floating tags such as latest in production"
+    level: hard
+    check: auto
+    how: CI scans deployment manifests and fails on floating tags or missing image digests; generate the component inventory with an SBOM tool
+    applies: [kind:service]
+    why: Floating tags can silently swap the version or even the license; in air-gapped environments the image simply cannot be pulled.
+    see: ["25", "26"]
+  - id: MID-004
+    title: "Check licenses against the distribution and version actually downloaded and distributed, not just the LICENSE in the source repository; recheck on every upgrade"
+    level: hard
+    check: semi
+    how: On upgrade, compare against the official license page and the license files inside the distribution, and record the result; use license scanning tools to find candidates
+    applies: [kind:service, kind:onprem]
+    why: "The same project may use different licenses for source and binaries, community and enterprise editions, or old and new versions (e.g. Elasticsearch, Redis, Dragonfly)."
+    detail: |
+      - The selection tables in this topic only list licenses; whether a component may be used and what is required when distributing it with the product are judged per 27.
+      - Also confirm whether there is online activation, usage reporting, or usage caps (e.g. Dragonfly's production vCPU cap).
+    sources: [S01, S03, S05]
+    see: ["27"]
+  - id: MID-005
+    title: "For projects delivered into air-gapped environments, test cold start, restart, failure recovery, and upgrade of the middleware offline before delivery, with all required images, dependencies, and tokenizer dictionaries prepared in advance"
+    level: hard
+    check: semi
+    how: Run startup, restart, recovery, and upgrade in an air-gapped acceptance environment and keep the records
+    applies: [kind:onprem]
+    why: "\"Can be deployed on-premises\" does not mean it can run offline; one missing dependency or one online check and it won't start on site."
+    see: ["26"]
+  - id: MID-006
+    title: "When adding dedicated middleware, document how the business degrades when it fails; if it cannot degrade, document the incident response"
+    level: soft
+    check: manual
+    how: The operations runbook has a section on degradation or incident handling; verify it during failure drills
+    applies: [kind:service]
+    why: Every additional dependency is another single point of failure; without a degradation plan, when the cache goes down the whole system goes down with it.
+    see: ["26"]
+  # ── Caching ──
+  - id: MID-007
+    title: "A cache must not be the only store for orders, funds, approvals, permissions, or audit records; after the entire cache is lost, the system must be able to recover from authoritative data"
+    level: hard
+    check: semi
+    how: In the test environment, flush the cache and run integration tests of the core flows; the results must be correct
+    applies: [kind:service]
+    why: "Caches expire, evict, and lose data; any \"truth\" stored in them will eventually be lost."
+  - id: MID-008
+    title: "For each class of cache key, document the owner, expiry, key version, tenant scope, invalidation method, and behavior when the cache is unavailable; do not default to \"never expires\""
+    level: soft
+    check: semi
+    how: Keep cache key definitions in one place (code constants or a config file) and check each class during review; use static analysis to find writes without an expiry
+    applies: [kind:service]
+    why: Keys with no owner and no expiry grow without bound, and after a structure change old data gets read back as if it were new.
+    detail: |
+      - Key name example: `<app>:<env>:<tenant>:<domain>:<object>:<id>:v<version>`.
+      - Escape user input before putting it in a key name so colons and control characters don't corrupt the key space; don't put high-cardinality fields in key names.
+      - When personal information is involved, use internal IDs in keys, not phone numbers or email addresses.
+  - id: MID-009
+    title: Cache keys in multi-tenant systems must include the tenant identifier, with negative tests for cross-tenant reads
+    level: hard
+    check: auto
+    how: "Integration test: after tenant A writes, reading the same business key as tenant B must return nothing"
+    applies: [kind:service]
+    why: A cache key that omits the tenant will return one customer's data directly to another customer.
+    see: ["19"]
+  - id: MID-010
+    title: "After updating authoritative data there must be an explicit cache consistency strategy (delete cache after update, versioned writes, or bypass the cache), with tests for read-after-write and concurrent races"
+    level: hard
+    check: semi
+    how: "Integration tests cover two scenarios: \"read immediately after write\" and \"concurrent writes interleaved with cache refill\""
+    applies: [kind:service]
+    why: "Under concurrency, \"delete cache after writing to the database\" can still be overwritten with a stale value by a late refill; without tests you won't find it."
+    detail: |
+      - For ordinary hot data use cache-aside: on a miss, read from the database and refill; after writing to the database, delete the cache entry.
+      - Use a version number or timestamp to block late refills with stale values.
+      - Where read-after-write consistency matters (e.g. checking order status after payment), read directly from the database.
+  - id: MID-011
+    title: "Handle cache penetration, breakdown, and avalanche for hot caches: negative caching with short expiry, coalesced rebuilds per key, and random jitter on expiry"
+    level: soft
+    check: semi
+    how: During load testing, simulate large numbers of nonexistent keys, hot key expiry, and mass simultaneous expiry, and observe database load
+    applies: [kind:service]
+    why: Once the cache fails, all traffic hits the database, which is often worse than having no cache at all.
+    detail: |
+      - Penetration (querying nonexistent data): validate parameters first, then use short-lived negative caching; use Bloom filters only for high-frequency scenarios with a stable data set.
+      - Breakdown (hot key expiry): let only one request rebuild a given key (singleflight); where stale values are acceptable, return the stale value first and refresh in the background.
+      - Avalanche (many keys expiring at once): add random jitter to expiry, pre-warm hot keys, and put rate limiting in front of the database.
+  - id: MID-012
+    title: "When caching login state or authorization results, they must be revocable promptly; negative caches and caches of sensitive data must both have an expiry"
+    level: hard
+    check: semi
+    how: "Test: after revoking a user's permissions or logging out, the cache stops granting access within the agreed time"
+    applies: [kind:service]
+    why: If the cache still grants access after permissions are revoked, they were never really revoked.
+    see: ["19"]
+  # ── Messages and events ──
+  - id: MID-013
+    title: "When a database write and a message publish must both succeed, use a transactional outbox or an equivalent mechanism; do not publish directly after committing the transaction"
+    level: hard
+    check: semi
+    how: "Code review looks for \"publish directly after commit\"; fault injection tests kill the process after commit but before publish, and the event must not be lost"
+    applies: [kind:service]
+    why: If the commit succeeds and the publish fails, the event is lost forever; conversely, publishing before committing emits events that never happened.
+    detail: |
+      - For outbox table design see 17. The relay marks a record as sent only after receiving the middleware's publish confirmation; the relay may send duplicates, which consumers deduplicate.
+      - Change data capture (CDC, reading the database change log) can also be used instead of polling the outbox.
+    see: ["17", "16"]
+  - id: MID-014
+    title: "Persisted messages must carry a unique event ID, event type and version, occurrence time, tenant, and trace ID; large payloads are passed by reference only"
+    level: hard
+    check: auto
+    how: Contract tests use JSON Schema to verify that sample messages contain these fields
+    applies: [kind:service]
+    why: Without an ID you cannot deduplicate, without a version you cannot evolve, and without a trace ID you cannot follow the call chain when something goes wrong.
+    detail: Requirements for externally published event envelopes (CloudEvents) and the event catalog are in 16; this is the minimum for internal queue messages.
+    see: ["API-026", "API-027"]
+  - id: MID-015
+    title: "Consumers must be idempotent by business key: processing the same message multiple times yields the same result as processing it once"
+    level: hard
+    check: auto
+    how: Integration tests deliver the same message repeatedly and concurrently, and check that the business result does not change
+    applies: [kind:service]
+    why: Standard delivery in RabbitMQ, NATS JetStream, and Kafka is at-least-once; duplicates are unavoidable.
+    detail: |
+      - Complete the idempotent business processing first, then acknowledge (ACK) the message; when processing and acknowledgment are not in the same transaction, accept "possible duplicates" and rely on business unique constraints as the safety net.
+      - For consumer-side deduplication records (inbox table) see 17; for idempotency semantics see 16.
+    sources: [S07, S12]
+    see: ["16", "17"]
+  - id: MID-016
+    title: "Do not use a middleware's \"exactly once\" feature in place of business idempotency; ensuring that external payments, HTTP calls, and database updates happen only once is the job of business uniqueness"
+    level: hard
+    check: manual
+    how: Review consumers with external side effects and confirm they have a business idempotency key or a downstream idempotency key
+    applies: [kind:service]
+    why: Kafka transactions and the JetStream deduplication window only cover the inside of the middleware, not external systems.
+    sources: [S07]
+  - id: MID-017
+    title: "Retries of messages and tasks must have a maximum attempt count, exponential backoff with random jitter, a dead-letter or quarantine queue, and entry points for manual compensation and replay"
+    level: hard
+    check: semi
+    how: Check the queue's maximum delivery count and dead-letter settings; use fault injection with a message that always fails and confirm it ends up in the dead-letter queue instead of looping forever
+    applies: [kind:service]
+    why: A "poison message" retried forever blocks the whole queue and repeatedly triggers side effects.
+    detail: Replaying dead letters requires access control and logging to avoid accidentally re-triggering side effects.
+    sources: [S07, S13]
+  - id: MID-018
+    title: "When ordered processing is required, document the ordering key and ordering scope (ordered within a single business object), and test ordering after rebalancing and retries; do not promise global ordering"
+    level: soft
+    check: semi
+    how: Integration tests check the processing order for the same object while consumers scale up/down and messages are retried
+    applies: [kind:service]
+    why: Partition rebalancing and retries both break ordering; global ordering is almost never achievable and rarely truly needed.
+    see: ["API-027"]
+  - id: MID-019
+    title: "Before going live, consumers must pass three classes of tests: duplicate delivery, out-of-order delivery, and recovery from a crash mid-processing"
+    level: hard
+    check: auto
+    how: "CI runs integration tests against real middleware containers: deliver the same message twice, deliver out of order, kill the consumer mid-processing and restart it, then check that the final business state is correct and nothing is lost"
+    applies: [kind:service]
+    why: A consumer tested only on the happy path will lose tasks or execute them twice as soon as it hits redelivery, reordering, or a killed process.
+    detail: |
+      - Duplicates: deliver the same message two or more times; the business result is the same as for one delivery.
+      - Out of order: when an older event for the same object arrives late, it must not overwrite the newer state (decide by version number).
+      - Recovery: `kill -9` the consumer or cut its connection to the middleware mid-processing; the task is eventually processed and produces its side effect only once; tasks whose lease has expired can be picked up by another worker.
+      - When the middleware is briefly unavailable, producers and consumers recover automatically and no acknowledged message is lost.
+    see: ["04"]
+  - id: MID-020
+    title: Tasks that must not be lost must not be carried over Core NATS or any other non-durable pub/sub
+    level: hard
+    check: manual
+    how: "Review the messaging channel configuration and confirm that must-not-lose tasks go over durable channels (JetStream, RabbitMQ durable queues, database queues)"
+    applies: [kind:service]
+    why: "Core NATS is \"fire and forget\"; messages are simply lost when subscribers are offline."
+    sources: [S07]
+  # ── Database task queues ──
+  - id: MID-021
+    title: "For PostgreSQL-based task queues use an existing library (by language, see selection); do not write your own claiming, lease, retry, and dead-letter logic"
+    level: soft
+    check: manual
+    how: During review, check for a home-grown task table plus polling code; if present, require an explanation of why existing libraries don't fit
+    applies: [kind:service]
+    why: "Claiming, reclaiming expired leases, maximum attempts, dead-lettering, cleanup and archiving, priority and fairness: there are many details, easy to miss when writing your own, and existing libraries already handle them and are widely used."
+    detail: |
+      - These libraries all claim tasks with `FOR UPDATE SKIP LOCKED` in short transactions; for the mechanism and transaction requirements see 17.
+      - The benefit is that tasks can be written in the same transaction as the business data, with no outbox needed.
+      - Throughput, long backlogs, or high-frequency polling cause table bloat and database load; evaluate a dedicated queue when these signals appear.
+    sources: [S10]
+    see: ["17"]
+  - id: MID-022
+    title: "If you really must implement database task claiming yourself, it must have a lease expiry time, a holder token, lease renewal and expiry reclamation, a maximum attempt count, and a dead-letter state"
+    level: hard
+    check: auto
+    how: "Integration tests: kill the worker after claiming and the task is reclaimed once the lease expires; after the maximum attempts it goes to dead-letter; submitting a result with a stale token is rejected"
+    applies: [kind:service]
+    why: "Without a lease, a crashed worker leaves the task stuck \"in progress\" forever; without a token, an expired worker can overwrite newer results."
+    detail: For the database implementation of leases and fencing tokens see 17; this only lists the required capabilities.
+    see: ["17"]
+  - id: MID-023
+    title: "Do not make network calls, LLM calls, or other slow operations inside transactions that claim tasks or hold database locks"
+    level: hard
+    check: semi
+    how: Code review checks transaction blocks for HTTP, RPC, and LLM calls; monitor long transactions and lock waits
+    applies: [kind:service]
+    why: Waiting on an external service inside a transaction keeps the lock held, makes other requests queue up, and ties up database connections.
+    see: ["17"]
+  # ── Scheduling and workflows ──
+  - id: MID-024
+    title: "Every scheduled job declares a unique ID, time zone, how missed triggers are handled, and whether overlapping runs are allowed, and is tested across daylight saving time transitions"
+    level: hard
+    check: semi
+    how: Schedule configuration is validated by a schema requiring these four fields; for jobs in time zones with daylight saving time, write tests for the transition days
+    applies: [kind:service]
+    why: Without a time zone, jobs run at the wrong time after the server's time zone changes; without an overlap policy, the next run starts before the previous one finishes and work is processed twice.
+    detail: |
+      - In multi-instance deployments, only one instance may trigger a given scheduled job at a given moment (use the scheduler's built-in cluster mode or a database lock).
+      - Scheduled jobs themselves must also be idempotent; catch-up runs and duplicate triggers must not cause errors.
+  - id: MID-025
+    title: "Only introduce a durable workflow engine for long-running processes that wait across days, wait for human approval or external callbacks, or need compensation; not for simple scheduling or single-step async tasks"
+    level: soft
+    check: manual
+    how: The decision record states the process's wait durations, number of steps, and compensation needs
+    applies: [kind:service]
+    why: An engine like Temporal is itself a distributed system that must be operated; introducing it for a few cron jobs is not worth it.
+  - id: MID-026
+    title: "When using Temporal, Workflow code must be deterministic; external operations such as network, database, and LLM calls go into Activities, and Activities must themselves be idempotent"
+    level: hard
+    check: auto
+    how: "CI runs the Temporal SDK's replay tests (replaying Workflows from event history) with the SDK's determinism checks enabled"
+    applies: [kind:service]
+    why: Temporal recovers processes by replaying event history; random numbers, the current time, or direct I/O in a Workflow will make replay fail.
+    detail: Changing the logic of in-flight Workflows requires the SDK's versioning mechanism; do not just change the code and let old instances fail on replay.
+    sources: [S09]
+  - id: MID-027
+    title: "Do not write your own \"stateful workflow framework\" that survives restarts; for simple processes use a database state machine plus a task queue, for complex ones use a mature workflow engine"
+    level: soft
+    check: manual
+    how: During review, identify home-grown process engines, timers, and compensation frameworks
+    applies: [kind:service]
+    why: State replay, compensation, upgrade compatibility, and timer races are all hard to get right, and maintenance costs far exceed expectations.
+  # ── Distributed locks ──
+  - id: MID-028
+    title: "Business uniqueness such as preventing duplicate creation or duplicate execution relies on database unique constraints and conditional state updates, not only on in-memory or Redis locks"
+    level: hard
+    check: semi
+    how: Check that the corresponding fields in the data model have unique constraints; a concurrency test submits twice at the same time and only one succeeds
+    applies: [kind:service]
+    why: Locks expire and clients stall; after expiry, two instances both believe they hold the lock.
+    see: ["17"]
+  - id: MID-029
+    title: "Strong cross-system mutual exclusion must use a fencing token, with downstream rejecting writes carrying stale tokens; do not claim Redlock guarantees external consistency"
+    level: hard
+    check: semi
+    how: "Experiment: pause the lock holder until its lease expires; after another instance obtains a new lock, writes from the old holder when it resumes must be rejected"
+    applies: [kind:service]
+    why: Process pauses and network delays can let an expired holder keep writing; only a downstream token check can stop it.
+    detail: |
+      - For mutual exclusion that fits within a single database, prefer row locks or transaction-level advisory locks (see 17).
+      - When an independent coordination service is needed, etcd leases and revision numbers can serve as fencing tokens.
+      - Valkey/Redis locks with expiry are only for "soft mutual exclusion" (cases where a duplicate does no serious harm); on release, verify that the lock is your own.
+    sources: [S14, S11]
+    see: ["17"]
+  # ── Rate limiting ──
+  - id: MID-030
+    title: "Global rate limiting in multi-replica deployments must use a shared quota source (a gateway or atomic counters in shared storage); per-replica counters must not be treated as the global quota"
+    level: hard
+    check: auto
+    how: "Load test: put multiple replicas under load simultaneously and verify the total number of allowed requests does not exceed the quota"
+    applies: [kind:service]
+    why: If each replica counts on its own, N replicas let through N times the traffic.
+  - id: MID-031
+    title: "Rate limit read, check, and write must be one atomic operation; when the limit is exceeded, return an explicit response and metrics, and document whether to allow or deny when the rate-limit store is unavailable"
+    level: hard
+    check: semi
+    how: "Concurrency tests verify accurate counts for the same key; code review confirms there is no separate \"read → increment → write back\"; review the failure policy in the configuration"
+    applies: [kind:service]
+    why: Non-atomic counting lets too much through under concurrency; whether to allow or deny on failure must be decided in advance, and for cost- or security-sensitive cases the usual choice is deny.
+    detail: |
+      - First decide the dimension to limit by (IP, user, tenant, key, endpoint, business operation), the algorithm (token bucket, sliding window), and the burst limit.
+      - Distinguish between "request rate" limits and "concurrency" limits.
+      - When the limit is exceeded, return 429 with `Retry-After`; for the format see 16.
+    sources: [S15]
+    see: ["16"]
+  # ── Search ──
+  - id: MID-032
+    title: "Search indexes are derived data: they must be fully rebuildable from authoritative data, with a rebuild runbook that has been rehearsed"
+    level: hard
+    check: semi
+    how: Periodically flush the index in the test environment and do a full rebuild following the runbook, recording the duration and results
+    applies: [kind:service]
+    why: Indexes get corrupted and analyzer upgrades require rebuilds; if you can't rebuild, you have effectively put the truth in the index.
+    detail: |
+      - Index documents carry the source ID, tenant, and source version number, used for reconciliation and to prevent stale data from overwriting newer data.
+      - Incremental updates go through an outbox, CDC, or reliable batch sync; switch between old and new indexes via aliases to support rollback.
+      - Monitor index lag and missing records.
+  - id: MID-033
+    title: "Search queries must enforce tenant and permission filtering at the retrieval layer, with negative tests that \"documents you have no access to are not found\""
+    level: hard
+    check: auto
+    how: "Integration tests search for a known existing document as an unauthorized user; it must not appear in the results, including counts, highlights, and suggestions"
+    applies: [kind:service]
+    why: Search results, suggestions, and counts can all leak other people's data.
+    see: ["19"]
+  - id: MID-034
+    title: "Before choosing a Chinese search solution or upgrading an analyzer, evaluate recall and ranking with a real query set from your own business, covering short terms, proper nouns, mixed Chinese/English/digits, synonyms, and permission negatives"
+    level: soft
+    check: semi
+    how: "Maintain a query set with labeled answers; during evaluation measure top-10 recall (Recall@10), ranking quality (NDCG@10), and query latency, and attach the results to the decision record"
+    applies: [kind:service]
+    why: "\"Supports Chinese\" does not mean accurate search; PostgreSQL's `pg_trgm` splits text into trigrams and can perform poorly on short queries of one or two Chinese characters."
+    detail: |
+      - Don't use full-text search for business IDs or exact matches; use ordinary indexes or prefix indexes.
+      - Chinese substring matching can use `pg_bigm` (bigram splitting); when word segmentation is needed, evaluate extensions such as zhparser, or the Chinese analyzers of dedicated engines.
+      - Query set examples: "invoice" (short term), "after-sales ticket" (business term), "model A320B" (mixed Chinese/English/digits), "refund/return" (synonyms).
+      - For domestic Chinese or PostgreSQL-compatible databases, test whether each extension works one by one (see 17).
+    ref_value: "There is no standard size for the query set; a reference value is at least several dozen queries per category and one to two hundred in total to start, with thresholds confirmed by the business owner."
+    sources: [S16, S17]
+    see: ["17"]
+  # ── Upgrades and migration ──
+  - id: MID-035
+    title: "Take snapshots before middleware upgrades and migrations, and document rollback or roll-forward; during migration run old and new in parallel and decommission the old system only after reconciliation passes"
+    level: soft
+    check: manual
+    how: The upgrade plan includes snapshots, rollback steps, and reconciliation criteria; rehearse in the staging environment
+    applies: [kind:service]
+    why: Upgrades of index formats, persistence formats, and workflow state are often irreversible; if a direct cutover goes wrong there is no going back.
+    detail: |
+      - Shadow reads or shadow consumption must not trigger external side effects.
+      - Caches can usually just be dropped; search can be rebuilt from authoritative data; for high-value messages, define the replay starting point; for in-flight long-running processes, the old platform's state cannot simply be discarded.
+      - Don't switch middleware just because it "performs better"; benchmark and compare with business data first.
+    see: ["26"]
+  # ── Object storage ──
+  - id: MID-036
+    title: "Business code accesses object storage through the S3-compatible API and does not depend on any implementation's proprietary interfaces; for self-hosted object storage choose a project that is still maintained"
+    level: soft
+    check: semi
+    how: Dependency checks look for implementation-specific proprietary SDKs and admin API calls; the selection review confirms the project is still releasing security fixes
+    applies: [kind:service, kind:onprem]
+    why: The MinIO community edition repository is archived and no longer receives vulnerability fixes; once you are locked into one implementation it is hard to migrate away.
+    sources: [S04]
+choices:
+  - category: Cache
+    pick: "Valkey; without a clear benefit, don't add a cache, query the database directly"
+    alternatives:
+      - { name: Redis Open Source, when: "You need features specific to Redis 8 and later, and have chosen one of the three licenses based on how you deliver" }
+      - { name: In-process cache, when: "Single instance, small data volume, and brief inconsistency between replicas is acceptable" }
+    avoid:
+      - { name: Dragonfly, why: "Source-available license (DSAL); production use above 100 vCPU in total requires a commercial license, and it may not be redistributed as a standalone database product; consider only when measured benefits are clear and the license has been reviewed" }
+      - { name: Using the cache as the authoritative store, why: It will lose data }
+    license: "Valkey is BSD-3-Clause; from Redis 8 on, a choice of AGPLv3 / SSPLv1 / RSALv2, 7.2 and earlier BSD-3-Clause, 7.4 up to (but not including) 8 RSALv2 / SSPLv1; Dragonfly is DSAL"
+    notes: "Valkey is a community project under the Linux Foundation and is protocol-compatible with Redis, but compatibility of specific commands and modules still needs testing."
+    sources: [S01, S02, S03]
+  - category: PostgreSQL-based task queues (by language)
+    pick: "River for Go; pg-boss or Graphile Worker for Node; Procrastinate for Python; Oban for Elixir; db-scheduler or JobRunr for Java"
+    when: "Tasks and business data are in the same PostgreSQL, and throughput has not reached the point where the database can't handle it"
+    alternatives:
+      - { name: "Mature Redis-based queue libraries such as Celery / RQ (Python), BullMQ (Node), Asynq (Go)", when: "You already have Valkey/Redis and don't need to write tasks in the same transaction as business data; for per-language details see 10–15" }
+      - { name: RabbitMQ or NATS JetStream, when: "Cross-service or cross-team consumption, or database load is clearly tied to the queue" }
+    avoid:
+      - { name: Writing your own task table plus polling, why: "Claiming, leases, retries, dead-lettering, and cleanup all have to be added yourself, and things get missed" }
+      - { name: Hand-writing a queue on Redis List, why: "Acknowledgment, retries, leases, and observability all have to be added yourself; mature Redis queue libraries are not included in this" }
+      - { name: Starting out with Kafka or Pulsar, why: Paying operational costs for requirements you don't have }
+    license: "River is MPL-2.0; pg-boss, Graphile Worker, and Procrastinate are MIT; Oban and db-scheduler are Apache-2.0; JobRunr see open questions"
+    sources: [S10, S24, S25, S26, S27, S28, S29]
+  - category: "Work queues (each task processed once, acknowledged, retried, routed)"
+    pick: RabbitMQ (with quorum queues)
+    alternatives:
+      - { name: NATS JetStream, when: "The team already knows NATS, or also needs lightweight pub/sub and request-reply" }
+      - { name: Database task queue library, when: Tasks share the database and transaction with business data }
+    avoid:
+      - { name: Core NATS, why: "Not durable; messages are lost when subscribers are offline" }
+      - { name: Using ordinary RabbitMQ queues as a long-term replay log, why: "Messages are deleted once consumed, so they are unsuitable for replay; use streams when replay is needed" }
+    license: "RabbitMQ is MPL-2.0 (per the official repository; see open questions); NATS is Apache-2.0"
+    sources: [S12, S13, S07, S06]
+  - category: "Event streaming (replayable, multiple consumer groups, high throughput)"
+    pick: "Start with outbox plus NATS JetStream; use Apache Kafka when there is a real need for long-term replay, multiple independent consumer groups, and high-throughput partitioning"
+    alternatives:
+      - { name: Apache Pulsar, when: "Multi-tenancy, tiered storage, and geo-replication are hard requirements" }
+      - { name: Apache RocketMQ, when: "The team knows it and needs its business message types such as transactional and delayed messages" }
+      - { name: Redpanda, when: "You want Kafka API compatibility with lighter operations; review the license first" }
+    avoid:
+      - { name: "Adopting Kafka just because of \"high concurrency\"", why: First determine whether you need a work queue or a replayable log }
+      - { name: "Treating middleware exactly-once as external side effects happening only once", why: It does not cover external systems }
+    license: "Kafka, Pulsar, RocketMQ, and NATS are Apache-2.0; the Redpanda community edition is BSL, and enterprise features require a separate license"
+    notes: "In 2025 the company maintaining NATS tried to move it out of the CNCF and change its license; in the end NATS stayed in the CNCF under Apache-2.0."
+    sources: [S06, S07, S21]
+  - category: Scheduling
+    pick: "Platform-provided scheduled triggers (Kubernetes CronJob, systemd timer) or the scheduling feature built into the task queue library"
+    alternatives:
+      - { name: "Quartz (JDBC store in cluster mode)", when: Java services need in-application clustered scheduling }
+      - { name: PowerJob or XXL-JOB, when: "Java teams need distributed scheduling with an admin UI; XXL-JOB is GPL-3.0, review per 27 before distributing it with the product" }
+      - { name: Apache Airflow, when: "Data pipelines, batch DAGs" }
+    avoid:
+      - { name: Using Airflow for online business such as order timeouts, why: "It is a data orchestration tool, not an online business engine" }
+      - { name: Multiple instances each running the same cron, why: Duplicate execution }
+    license: "Quartz, PowerJob, and Airflow are Apache-2.0; XXL-JOB is GPL-3.0"
+    sources: [S22, S30, S31]
+  - category: Durable workflows
+    pick: Temporal (when there really are long-running processes)
+    alternatives:
+      - { name: DBOS, when: "Already on PostgreSQL and want durable execution inside the application as a library, without deploying a separate service" }
+      - { name: Hatchet, when: "Mainly background tasks with some simple workflows; verify server maturity yourself first" }
+      - { name: Flowable, when: "BPMN process modeling is needed and business users take part in process design (Java)" }
+    avoid:
+      - { name: Deploying Temporal for a few scheduled jobs, why: Operational cost far exceeds the benefit }
+      - { name: Writing your own restart-surviving workflow framework, why: "Replay, compensation, and upgrade compatibility are hard to get right" }
+      - { name: Self-hosted Inngest as the default, why: "The server is SSPL with delayed conversion to Apache-2.0; licensing and on-premises boundaries need a separate review" }
+    license: "Temporal, DBOS, and Hatchet are MIT; Flowable is Apache-2.0"
+    sources: [S08, S09, S32]
+  - category: Distributed locks and coordination
+    pick: "Database unique constraints plus conditional state updates; for mutual exclusion within the same database, row locks or transaction-level advisory locks"
+    alternatives:
+      - { name: etcd leases plus revision numbers for fencing, when: "Strong cross-system mutual exclusion that needs an independent coordination service" }
+      - { name: Valkey locks with expiry and holder verification, when: Soft mutual exclusion where duplicate execution does no serious harm }
+    avoid:
+      - { name: "SETNX locks without renewal and without holder verification on release", why: "After expiry they can delete someone else's lock" }
+      - { name: Claiming Redlock guarantees external consistency, why: Does not hold under process pauses and clock issues }
+    sources: [S11, S14]
+  - category: Rate limiting
+    pick: "Rate limiting built into the gateway or service mesh; when a global quota is needed inside the application, implement a token bucket with an atomic Valkey script"
+    alternatives:
+      - { name: In-process token bucket, when: "Single instance, or protecting only the local replica" }
+      - { name: Database counters, when: Very low request volume }
+    avoid:
+      - { name: Per-replica in-memory counts used as a global quota, why: Lets through N times the traffic }
+      - { name: "Separate read, increment, and write-back", why: Inaccurate counts under concurrency }
+    sources: [S15]
+  - category: In-app search
+    pick: "PostgreSQL full-text search plus pg_trgm; pg_bigm for short Chinese terms"
+    alternatives:
+      - { name: Chinese segmentation extensions such as zhparser, when: "Chinese word segmentation is needed and the extension can be compiled and deployed on the target database; review each license" }
+      - { name: ParadeDB pg_search, when: "You want BM25 ranking inside PostgreSQL; the community edition is AGPL-3.0" }
+    avoid:
+      - { name: Claiming PostgreSQL full-text search is good enough without evaluating with Chinese queries, why: Recall for short terms and proper nouns may be very poor }
+    license: "pg_trgm ships with PostgreSQL (PostgreSQL License); pg_bigm see open questions; the ParadeDB community edition is AGPL-3.0"
+    sources: [S16, S17, S23]
+  - category: Standalone search engine
+    pick: OpenSearch
+    alternatives:
+      - { name: Meilisearch Community Edition, when: "Small to medium scale, user-facing instant search and typo tolerance; features such as cluster high availability are in the Enterprise Edition, check the boundary first" }
+      - { name: Typesense, when: "Lightweight instant search; GPL-3.0, review per 27 before distributing it with the product" }
+      - { name: Elasticsearch, when: "The team already has experience or needs its commercial features; check the license against the distribution first" }
+    avoid:
+      - { name: Deploying a full search cluster in a small system just for fuzzy search, why: Use what the database provides first }
+      - { name: Treating the index as the only source of truth, why: Indexes must be rebuildable }
+    license: "OpenSearch is Apache-2.0; Elasticsearch source is available under a choice of AGPLv3 / SSPL 1.0 / ELv2, and the official default distribution is ELv2; Typesense is GPL-3.0; Meilisearch Community Edition is MIT, and the Enterprise Edition has a separate license (see open questions)"
+    notes: "For Chinese analysis you can use OpenSearch's CJK or ICU analyzers, or Elasticsearch's official smartcn plugin; the IK analysis plugin commonly used in China needs separate evaluation."
+    sources: [S05, S18, S19, S20]
+  - category: Self-hosted object storage
+    pick: "If S3-compatible object storage from a cloud provider or private cloud is available, use the managed service; when you must self-host, choose Ceph RGW or SeaweedFS"
+    alternatives:
+      - { name: Garage, when: "Small-scale, multi-region deployments; AGPL-3.0" }
+      - { name: Continuing with MinIO commercial edition, when: A commercial license has already been purchased }
+    avoid:
+      - { name: Choosing MinIO Community Edition for new projects, why: "Since 2025 only source code is released, it entered maintenance mode at the end of 2025, and the repository is archived with no more security fixes" }
+    license: "SeaweedFS is Apache-2.0; Garage is AGPL-3.0; Ceph see open questions; MinIO Community Edition is AGPL-3.0 (archived)"
+    sources: [S04, S33, S34]
+antipatterns:
+  - { bad: Using a Redis SETNX lock to prevent duplicate orders, instead: "Database unique constraints or conditional updates; fencing tokens for strong cross-system mutual exclusion" }
+  - { bad: Publishing a message directly after committing the transaction, instead: Transactional outbox or CDC }
+  - { bad: "\"Kafka is exactly-once, so the payment is only charged once\"", instead: Business idempotency records plus downstream idempotency keys }
+  - { bad: Carrying must-not-lose tasks over Core NATS, instead: "JetStream, RabbitMQ durable queues, or a database task queue library" }
+  - { bad: Writing your own task table and polling code, instead: Use the PostgreSQL task queue library for your language }
+  - { bad: Checking the cache before every database query, instead: Decide whether to cache based on actual latency and database bottlenecks }
+  - { bad: Giving every key the same fixed expiry, instead: "Add random jitter to expiry, and rebuild hot keys with singleflight" }
+  - { bad: Claiming PostgreSQL full-text search handles Chinese word segmentation well, instead: "Evaluate with real Chinese queries, and use pg_bigm, a segmentation extension, or a dedicated engine where necessary" }
+  - { bad: Deploying Temporal or Airflow for a few scheduled jobs, instead: Cron or the task queue library's scheduling feature }
+  - { bad: Pulling latest images directly inside the customer's intranet, instead: "Pin image digests and prepare offline materials in advance" }
+  - { bad: Drawing conclusions from the source repository's LICENSE alone, instead: "Check against the distribution, version, and deployment method actually used" }
+  - { bad: Consumers tested only on the happy path, instead: "Test duplicates, out-of-order delivery, crash recovery, and middleware disconnects" }
+sources:
+  - { id: S01, title: Redis Licenses, url: "https://redis.io/legal/licenses/", publisher: Redis, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Valkey (GitHub repository)", url: "https://github.com/valkey-io/valkey", publisher: "Valkey (LF Projects)", date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Dragonfly Source-Available License (DSAL)", url: "https://github.com/dragonflydb/dragonfly/blob/main/LICENSE.md", publisher: DragonflyDB, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "MinIO (GitHub repository, archived)", url: "https://github.com/minio/minio", publisher: MinIO, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: Elastic Licensing FAQ, url: "https://www.elastic.co/pricing/faq/licensing", publisher: Elastic, date: 2024-08-29, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: Protecting NATS and the integrity of open source, url: "https://www.cncf.io/blog/2025/04/24/protecting-nats-and-the-integrity-of-open-source/", publisher: CNCF, date: 2025-04-24, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "NATS: JetStream", url: "https://docs.nats.io/nats-concepts/jetstream", publisher: NATS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Temporal (GitHub repository)", url: "https://github.com/temporalio/temporal", publisher: Temporal, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "Temporal: Workflows", url: "https://docs.temporal.io/workflows", publisher: Temporal, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "PostgreSQL: SELECT (The Locking Clause / SKIP LOCKED)", url: "https://www.postgresql.org/docs/current/sql-select.html", publisher: PostgreSQL, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "PostgreSQL: Explicit Locking", url: "https://www.postgresql.org/docs/current/explicit-locking.html", publisher: PostgreSQL, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "RabbitMQ: Consumer Acknowledgements and Publisher Confirms", url: "https://www.rabbitmq.com/docs/confirms", publisher: RabbitMQ, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "RabbitMQ: Quorum Queues", url: "https://www.rabbitmq.com/docs/quorum-queues", publisher: RabbitMQ, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "Redis: Distributed Locks", url: "https://redis.io/docs/latest/develop/use/patterns/distributed-locks/", publisher: Redis, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "Redis: Rate limiter", url: "https://redis.io/docs/latest/develop/use-cases/rate-limiter/", publisher: Redis, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "PostgreSQL: pg_trgm", url: "https://www.postgresql.org/docs/current/pgtrgm.html", publisher: PostgreSQL, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "pg_bigm (GitHub repository)", url: "https://github.com/pgbigm/pg_bigm", publisher: pg_bigm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "OpenSearch: CJK analyzer", url: "https://docs.opensearch.org/latest/analyzers/language-analyzers/cjk/", publisher: OpenSearch, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "Meilisearch Open Source (CE and EE)", url: "https://www.meilisearch.com/open-source", publisher: Meilisearch, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Typesense (GitHub repository)", url: "https://github.com/typesense/typesense", publisher: Typesense, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "Redpanda: Licensing overview", url: "https://docs.redpanda.com/streaming/current/get-started/licensing/overview/", publisher: Redpanda, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "XXL-JOB (GitHub repository)", url: "https://github.com/xuxueli/xxl-job", publisher: XXL-JOB, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "ParadeDB (GitHub repository)", url: "https://github.com/paradedb/paradedb", publisher: ParadeDB, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: "River (PostgreSQL task queue for Go)", url: "https://github.com/riverqueue/river", publisher: River, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S25, title: "pg-boss (PostgreSQL task queue for Node)", url: "https://github.com/timgit/pg-boss", publisher: pg-boss, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: "Graphile Worker (PostgreSQL task queue for Node)", url: "https://github.com/graphile/worker", publisher: Graphile, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: "Procrastinate (PostgreSQL task queue for Python)", url: "https://github.com/procrastinate-org/procrastinate", publisher: Procrastinate, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "Oban (PostgreSQL task queue for Elixir)", url: "https://github.com/oban-bg/oban", publisher: Oban, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: "db-scheduler (database task scheduler for Java)", url: "https://github.com/kagkarlsson/db-scheduler", publisher: db-scheduler, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: "Quartz Scheduler (GitHub repository)", url: "https://github.com/quartz-scheduler/quartz", publisher: Quartz, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S31, title: "PowerJob (GitHub repository)", url: "https://github.com/PowerJob/PowerJob", publisher: PowerJob, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: "DBOS Transact (GitHub repository)", url: "https://github.com/dbos-inc/dbos-transact-py", publisher: DBOS, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: "SeaweedFS (GitHub repository)", url: "https://github.com/seaweedfs/seaweedfs", publisher: SeaweedFS, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: "Garage (Git repository mirror)", url: "https://github.com/deuxfleurs-org/garage", publisher: Deuxfleurs, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - "Exact date the MinIO community edition repository was archived: various sources say it entered maintenance mode in 2025-12, was first archived in 2026-02, and archived again in 2026-04; GitHub currently shows it as archived, and the specific dates should follow MinIO's official statement. Whether the mc client has also been archived has not been verified."
+  - "Dragonfly: the DSAL text has been verified (100 vCPU total production cap, no redistribution as a standalone product), but the version boundary of \"switched to DSAL from 2.1\" and the scope of the older BSL have not been verified; whether there is usage reporting has also not been verified."
+  - "Redpanda's main GitHub repository shows as archived, possibly due to a repository move or a change in open-source strategy; the current status and license of the community edition need verification."
+  - "The following licenses are carried over from the original research or based only on GitHub's detection, without reading each official LICENSE: RabbitMQ (MPL-2.0), the Meilisearch Community/Enterprise Edition boundary, pg_bigm, Ceph (LGPL combination), JobRunr (open-source edition LGPL-3.0, Pro edition commercial), Inngest (SSPL with delayed conversion to Apache-2.0), Kafka/Pulsar/RocketMQ/Airflow (Apache-2.0), and the community/commercial boundary of the Hatchet server."
+  - "Whether self-hosted production use of Camunda 8 requires a commercial license needs verification; if it does, Flowable is the default for BPMN scenarios in Java."
+  - "Research to add: the applicable boundaries of Redis Streams and RabbitMQ Streams as lightweight event streams."
+  - "Research to add: maturity of Rust PostgreSQL task queue libraries (e.g. apalis); comparison of Quartz, PowerJob, and DolphinScheduler on the JVM; selection between Camunda and Flowable."
+  - "Research to add: gateway products for rate limiting (Envoy global rate limiting, NGINX, APISIX, etc.) and rate-limiting libraries for each language."
+  - "Research to add: requirements for using etcd and ZooKeeper as lock and coordination services."
+  - "Research to add: maintenance status and licenses (including the SCWS dictionary) of the IK analysis plugin, pg_jieba, and zhparser for Chinese search, and their compatibility with domestic Chinese databases; there is no measured comparison of Chinese search quality across engines."
+  - "Research to add: maturity, operational cost, and migration plans for self-hosted object storage (Ceph RGW, SeaweedFS, Garage, etc.)."
+  - "Research to add: quantitative signals for when a database task queue should be replaced by a dedicated queue (the \"over 20% of the task time limit\" and \"3 observation windows\" given in the original research have no source and were not adopted)."

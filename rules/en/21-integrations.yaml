@@ -1,0 +1,578 @@
+id: "21"
+slug: integrations
+title: Notifications and Third-Party Integrations
+summary: The side of the system that talks to external services — receiving third-party callbacks, sending notifications via email, SMS, push and enterprise IM, managing notification preferences and unsubscribes, connecting users' third-party accounts via OAuth, and handling rate limits, quotas and sandboxes when calling third-party APIs.
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - "Receiving third-party callbacks (webhook receivers): signature verification, replay protection, persist first then process asynchronously, idempotency"
+    - "Notification channels: email, SMS, mobile push (server side), enterprise IM (Feishu, DingTalk, WeCom, Slack, Teams)"
+    - Notification preferences, frequency control and unsubscribes
+    - Notification templates and localization
+    - "Connecting third-party accounts as an OAuth client: token storage, refresh, revocation"
+    - "Issues specific to calling third-party APIs: rate-limit headers, quotas, unknown outcomes, sandbox environments"
+  excludes:
+    - { what: "General principles for timeouts, retries and backoff", see: "02" }
+    - { what: "Publishing webhooks and signature formats, idempotency-key semantics, error formats", see: "16" }
+    - { what: "Outbox tables, idempotency tables, transactions", see: "17" }
+    - { what: "Queues, job retries and dead letters, global rate limiting", see: "18" }
+    - { what: "Our own users' login, sessions and verification-code validation rules", see: "19" }
+    - { what: "Copywriting and internationalization behavior", see: "09" }
+    - { what: "Secret management and scanning, SSRF protection, log redaction", see: "25" }
+    - { what: "Observability and alerting", see: "26" }
+    - { what: "SMS and marketing regulations, personal information and cross-border data transfer, open-source license policy", see: "27" }
+    - { what: "Overall push architecture, Chinese vendor push channels, client permissions and display", see: "28" }
+    - { what: "Using object storage", see: "17" }
+overview: |
+  1. **Business code calls only your own adapter layer.** Provider SDKs and endpoints appear only in the adapter layer; the adapter layer documents what each provider does and does not support, and callers degrade by capability instead of assuming every provider behaves the same.
+  2. **A timeout is not a failure.** When a request with side effects (sending an SMS, charging a payment) times out, mark it as "outcome unknown" and query status or reconcile first instead of resending; use the provider's idempotency key when available.
+  3. **Respect the other side's rate limits.** On 429/503 wait per `Retry-After`, and do not stack retries across layers; set caps and alerts on quotas and spend.
+  4. **Callbacks: verify the signature, then persist, then process.** Verify against the raw request bytes; after verification write to an inbox table for deduplication, then return 2xx and process the business logic asynchronously. "Decrypts successfully" does not mean "signature verified".
+  5. **Payment outcomes are settled by order queries and reconciliation.** Neither callbacks nor client-side success pages are the final truth.
+  6. **Commit important notifications together with the business write (outbox).** Distinguish delivery states — "accepted by provider", "delivered", "read"; without a receipt the state is unknown — and never fabricate delivery rates.
+  7. **The email trio.** Configure SPF, DKIM and DMARC on sending domains; marketing and subscription email carries one-click unsubscribe (RFC 8058) honored within two days; bounces and complaints go into a suppression list.
+  8. **Prevent SMS pumping fraud.** Apply multi-dimensional server-side rate limits and spend caps; keep verification codes and phone numbers out of logs. For SMS in mainland China use only approved sender signatures and templates; for regulations see 27.
+  9. **Use current push APIs.** APNs uses token-based auth over long-lived HTTP/2 connections; FCM uses HTTP v1, the legacy APIs have been shut down. Deactivate invalid device tokens promptly.
+  10. **Tier IM bots.** Group custom bots can usually only send and cannot receive callbacks; for interaction use an app bot and verify signatures. Teams' legacy Office 365 Connectors have been retired.
+  11. **Connect third-party accounts with authorization code + PKCE.** Encrypt tokens at rest, allow only one concurrent refresh, and revoke when the user disconnects.
+  12. **CI never sends for real.** Tests use fakes or provider sandboxes, with sandbox and production credentials kept separate.
+rules:
+  # ── Calling third-party APIs ──
+  - id: INT-001
+    title: Business code calls only its own notification or integration adapter layer; provider SDKs and provider endpoints appear only inside the adapter layer
+    level: soft
+    check: auto
+    how: Use dependency-boundary lint (e.g. dependency-cruiser, import-linter, ArchUnit) to forbid modules outside the adapter layer from referencing provider SDK packages and provider domains
+    applies: [kind:service]
+    why: With provider SDKs scattered through business code, switching providers, adding test doubles, or unifying timeout and logging handling all require edits across the whole repository.
+    detail: |
+      - For a small system, an adapter layer within the same process is enough; there is no need to split out a service for it. Consider a standalone notification service once multi-tenancy, preferences or receipts are required.
+      - The adapter layer also declares capabilities: which message types it supports, whether it can query status, whether it receives receipts, whether it supports idempotency keys. Callers degrade by capability instead of assuming every provider behaves the same.
+    see: ["01"]
+  - id: INT-002
+    title: Respect the other side's rate limits when calling third parties — on 429 or 503 wait per `Retry-After`, otherwise back off with jitter; apply client-side rate limiting per the provider's published quotas, and do not stack retries across layers
+    level: hard
+    check: semi
+    how: Have a mock service return 429/503 (with and without `Retry-After`) and use a fake clock to check wait times and total attempts; in review, check whether the SDK, gateway and job queue each have their own retries enabled
+    applies: [kind:service]
+    why: Ignoring rate limits gets your account banned by the provider; if the SDK, gateway and queue each retry three times, the stacked result is dozens of times the requests.
+    detail: |
+      - `Retry-After` can be a number of seconds or an HTTP date; parse both.
+      - Providers often have their own rate-limit response headers (remaining quota, reset time); the adapter layer reads them for client-side rate limiting.
+      - When multiple replicas share a quota, use a shared counter; see 18.
+      - For general timeout and retry principles see COD-033 and COD-034.
+    sources: [S02]
+    see: ["COD-033", "COD-034", "MID-030"]
+  - id: INT-003
+    title: When an external request with side effects (sending, charging, provisioning) times out or disconnects after being sent, mark the outcome as "unknown" and query status or reconcile before deciding; do not treat it as a failure and resend
+    level: hard
+    check: semi
+    how: "Fault-injection test: make the mock service succeed but return no response, and check that the system enters the \"unknown\" state and goes through query or reconciliation without sending a duplicate"
+    applies: [kind:service]
+    why: The request may already have succeeded on the other side; blind resending causes duplicate charges and duplicate SMS messages.
+    detail: |
+      - If the provider offers a status query API, query automatically; if not, decide whether to handle manually based on the cost of the side effect.
+      - If the outcome remains unknown for a long time, keep it "unknown" and hand it to a human; do not automatically change it to failed or succeeded.
+      - Failures before a connection is established (e.g. DNS failure, connection refused) can be retried normally.
+    sources: [S01]
+  - id: INT-004
+    title: External write requests that may be retried carry a persisted deduplication key; when the provider supports idempotency keys, you must send one
+    level: hard
+    check: auto
+    how: Test calling the same business operation twice in a row and check that the provider side (mock service) produces only one side effect; the deduplication key has a local unique constraint
+    applies: [kind:service]
+    why: Network retries and job replays both cause the same request to be sent multiple times; only a deduplication key lets the other side recognize it as the same operation.
+    detail: Generate and persist the deduplication key before sending the request, and reuse the same key on retries; never regenerate it on each retry. For idempotency-key semantics see API-019; for the idempotency table structure see DB-028.
+    sources: [S01]
+    see: ["API-019", "DB-028"]
+  - id: INT-005
+    title: Handle third-party responses by error category — do not retry parameter errors or business rejections; pause the connection and alert on authentication failures; record unsubscribes, blocks and permanent bounces in a suppression list
+    level: soft
+    check: semi
+    how: Adapter contract tests return each error category in turn and check whether it retries, pauses, or writes to the suppression list
+    applies: [kind:service]
+    why: Handling every error with a uniform "retry three times" means hammering an invalid key with requests and repeatedly sending to users who have unsubscribed.
+    detail: |
+      - Do not switch providers and resend to get around a recipient's rejection, blocklist or compliance block.
+      - During a full provider outage you may degrade (e.g. send an in-app message instead); before switching to a backup provider confirm it has the same qualifications and capabilities, and never send verification codes over an unapproved new channel.
+  - id: INT-006
+    title: Tests and CI must not send real messages or incur charges — use fakes or provider sandboxes; keep sandbox, staging and production credentials and push environments separate
+    level: hard
+    check: auto
+    how: CI blocks outbound network by default (or allows only sandbox domains), and the count of real outbound sends must be 0; check per-environment secret naming and configuration so production credentials never appear in non-production environments
+    applies: [kind:service]
+    why: Sending SMS to real phone numbers or charging with production credentials in tests is both an incident and a cost. Sandbox and production environments of services like APNs must not be mixed.
+    detail: |
+      - For email tests, capture with Mailpit or GreenMail; do not send to real mailboxes.
+      - Provider sandboxes do not behave exactly like production (rate limits, receipts, payment methods); still do a low-traffic verification in production before launch.
+    sources: [S14, S16]
+  - id: INT-007
+    title: Each adapter has contract tests covering success, 4xx, 5xx, 429, timeouts, disconnects, out-of-order receipts and missing fields
+    level: soft
+    check: auto
+    how: Run the same contract test suite against every adapter in CI, using a mock service to return each case
+    applies: [kind:service]
+    why: An integration that only tests the success path breaks the first time it hits a rate limit or timeout in production.
+    see: ["04"]
+  - id: INT-008
+    title: Treat webhook URLs, bot URLs and presigned links as credentials — store them encrypted and keep them out of logs, error messages and group chats
+    level: hard
+    check: auto
+    how: Log-redaction tests; run secret scanning over logs and configuration with rules that include common bot URL formats
+    applies: [kind:service]
+    why: Webhook URLs for Slack, Feishu, DingTalk and others carry send permission in themselves; if leaked, anyone can post to the group.
+    sources: [S19]
+    see: ["25"]
+  - id: INT-009
+    title: If you claim support for air-gapped deployment, you must run an air-gapped acceptance test; in air-gapped mode the system must not silently fall back to calling public internet services
+    level: hard
+    check: auto
+    how: Start the system and run core flows in an environment with outbound network blocked, while recording DNS lookups and outbound connections, which must be 0
+    applies: [kind:onprem]
+    why: An adapter layer that can be deployed on an internal network does not mean public services like APNs, FCM, cloud SMS or Slack are usable there; silently falling back to the public internet violates the customer's network requirements.
+    detail: '"The service can start air-gapped" and "messages can reach their targets" are two separate things; document each. When air-gapped, only targets such as an internal mail server, internal IM and in-app messages remain reachable.'
+  - id: INT-010
+    title: For usage-billed external services such as SMS, push and maps, set budget caps and anomaly alerts per project and per tenant
+    level: soft
+    check: semi
+    how: Check that budget configuration exists; use simulated traffic to verify that exceeding the limit triggers an alert and stops sending
+    applies: [kind:service]
+    why: One night of SMS pumping can cost more than a year of normal usage.
+  # ── Receiving third-party callbacks ──
+  - id: INT-011
+    title: When receiving a third-party callback, first verify the signature over the raw request bytes using the provider's algorithm, and only after it passes parse and use its fields
+    level: hard
+    check: auto
+    how: Write tests using the provider's official test vectors or official verification library — a correct signature passes; altering any one of the body, timestamp or signature fails; the tests catch code that parses JSON and re-serializes it before verifying
+    applies: [kind:service]
+    why: Without signature verification anyone can forge callbacks; parsing and re-serializing changes the bytes, causing verification to fail, after which someone simply turns verification off.
+    detail: |
+      - Prefer the provider's official SDK for verification rather than your own implementation; if you must implement it yourself, cover it with the official test vectors.
+      - Use constant-time comparison for signatures.
+      - If the provider does not support signatures, use a dedicated random callback URL plus network restrictions, record it as an accepted risk, and do not label it "signature verified". An IP allowlist alone is not enough.
+    sources: [S03, S04]
+  - id: INT-012
+    title: When a provider signs per Standard Webhooks, verify with the official library — check that `webhook-timestamp` is within the tolerance window and try each signature in `webhook-signature`; any match passes
+    level: hard
+    check: auto
+    how: Use the official library's tests — expired timestamps and timestamps too far in the future are rejected; during rotation, with two signatures present, both old and new keys pass; tampering with `webhook-id` fails
+    applies: [kind:service]
+    why: The timestamp window blocks replays; the signature header may contain multiple signatures at once (during key rotation), and taking only the first causes false rejections.
+    detail: The signed content is "`webhook-id`.`webhook-timestamp`.raw request body". `webhook-id` stays the same across retries and is used as the deduplication key. For publisher-side rules see API-028.
+    ref_value: A tolerance window of 5 minutes is common; this is a reference value, the spec does not mandate a specific value.
+    sources: [S03]
+    see: ["API-028"]
+  - id: INT-013
+    title: When callback content is both signed and encrypted, verify the signature first and then decrypt; "decrypts successfully" must not be treated as "signature verified"
+    level: hard
+    check: auto
+    how: Test that a callback with an invalid signature that still decrypts correctly is rejected
+    applies: [kind:service]
+    why: The decryption key and the verification key are not the same thing; being able to decrypt only shows the sender knows the encryption key, not that the message came from the provider. The official WeChat Pay APIv3 documentation specifically calls out this mistake.
+    sources: [S05]
+  - id: INT-014
+    title: After signature verification passes, first write the callback into an inbox table (unique by provider and event ID), then return 2xx; business processing goes into an asynchronous job
+    level: hard
+    check: auto
+    how: Test that when the same event is delivered concurrently multiple times, the inbox has only one row and the business logic runs only once; inject an exception into the processing logic and check that events already acknowledged with 2xx are still processed afterwards
+    applies: [kind:service]
+    why: Running all downstream work synchronously within the callback request easily times out and makes the sender redeliver; returning 2xx without persisting means the event is lost if the process crashes.
+    detail: |
+      - If the provider has no event ID, deduplicate using the field combination its documentation specifies, not a hash of the whole JSON.
+      - For the inbox table and job processing see 17 and 18.
+    sources: [S03]
+    see: ["17", "18"]
+  - id: INT-015
+    title: Design callback handling for at-least-once delivery — tolerate duplicates, reordering and late arrivals; state may only advance in the defined direction, and a late older state never overwrites a newer one
+    level: hard
+    check: auto
+    how: Test by delivering a set of callbacks out of order (e.g. "bounced" before "accepted") and check that the final state is correct; use update statements conditioned on the old state, or optimistic locking, to prevent regression
+    applies: [kind:service]
+    why: Providers generally guarantee only at-least-once delivery with no ordering guarantee; a late "accepted" overwriting "bounced" makes the system keep sending to an invalid address.
+    see: ["MID-017"]
+  - id: INT-016
+    title: Payment and other monetary outcomes are settled by "server-side verified callback + active order query + periodic reconciliation", never by a client-side success page before fulfilling; amounts are integers in the smallest currency unit
+    level: hard
+    check: auto
+    how: Test that nothing is fulfilled when there is only client-side success and no callback; run the reconciliation job against statement samples with discrepancies, and discrepancies go into a manual handling queue; type checks on amount fields disallow floating point
+    applies: [kind:service]
+    why: Callbacks can be lost or forged, and clients can be tampered with; only line-by-line matching against the channel's statements reveals missing and incorrect orders.
+    detail: |
+      - Model refunds, partial refunds, closures and expirations separately.
+      - Do not collect or store card numbers yourself; use the payment provider's hosted checkout or tokenization.
+      - Taking WeChat Pay as an example, download the transaction and fund statements daily, verify the file hash, then match line by line.
+    sources: [S05, S06]
+    see: ["27"]
+  # ── Notifications ──
+  - id: INT-017
+    title: The send intent of an important notification is committed in the same transaction as the business write (outbox); business code does not call the send API directly
+    level: hard
+    check: semi
+    how: Test that no notification is sent when the business transaction rolls back, and that a notification is always sent after commit; in review, look for direct calls to send APIs inside business transactions
+    applies: [kind:service]
+    why: With direct sending, the message may already be out when the business transaction rolls back, or never sent when the transaction commits and the process then crashes.
+    detail: Third-party calls are not placed inside database transactions. For the outbox table structure and relay see DB-026 and MID-013.
+    see: ["DB-026", "MID-013"]
+  - id: INT-018
+    title: Distinguish delivery states — "accepted by provider", "delivered", "read"; without a corresponding receipt the state stays "unknown" or "unsupported", and a successful API response is never treated as delivered
+    level: soft
+    check: auto
+    how: State-machine tests — only an explicit receipt can move to "delivered" or "read"; reports distinguish each state
+    applies: [kind:service]
+    why: An API response of 200 only means the provider accepted the message; treating it as delivered produces inflated delivery rates and hides the real problems.
+    detail: |
+      - For email, "delivered" usually only means the recipient's mail server accepted it, not that it reached the inbox.
+      - Record the source (API response, receipt, query, manual) and time of each state.
+    sources: [S11]
+  - id: INT-019
+    title: Notifications carry two fields, purpose (transactional, security, marketing, alert) and urgency; a marketing unsubscribe does not affect transactional and security notifications, and categories that are force-sent must be approved by product and compliance
+    level: soft
+    check: semi
+    how: Check that all notification definitions carry a purpose field; test that transactional notifications still send after unsubscribing from marketing; the list of force-sent categories has a review record
+    applies: [kind:service]
+    why: Labeling marketing as "high priority" too bypasses users' unsubscribe and quiet settings; conversely, an unsubscribe that wrongly hits transactional notifications means users miss order information.
+  - id: INT-020
+    title: Store notification preferences per "category × channel"; compute quiet hours in the user's time zone; unsubscribes record their source and time and take effect immediately
+    level: soft
+    check: auto
+    how: Use a fake clock to test quiet hours across time zones and daylight saving time; test that after an unsubscribe the next marketing notification is not sent
+    applies: [kind:service]
+    why: With preferences reduced to a single master switch, users either get everything or nothing; computing quiet hours in the server's time zone disturbs users in the middle of the night.
+    detail: Keep preferences, templates and localization in your own system, not in a third-party SDK's configuration. For regulatory requirements on marketing consent and unsubscribes see 27.
+    see: ["27"]
+  - id: INT-021
+    title: Layered frequency control — first merge the same event, then rate-limit separately per user, per number or device, per tenant and per provider; alerts escalate step by step by default rather than blasting multiple channels at once
+    level: soft
+    check: auto
+    how: Verify each rate-limit layer with a fake clock and concurrency tests; alerts for the same incident are aggregated by incident ID
+    applies: [kind:service]
+    why: When one incident triggers hundreds of duplicate alerts, users turn off all notifications.
+  - id: INT-022
+    title: Notification template copy lives in resource files and is rendered in the recipient's language and time zone; templates carry a version number, and send records note which version was used
+    level: soft
+    check: auto
+    how: i18n checks cover email and notification templates; check the send-record fields
+    applies: [kind:service]
+    why: Email and push templates are the easiest place to miss translations; without template versions you cannot tell what the user actually saw.
+    detail: For copywriting, plurals and date formats see 09 (A11Y-037 and others).
+    see: ["A11Y-037", "09"]
+  # ── Email ──
+  - id: INT-023
+    title: Production sending domains must have SPF, DKIM and DMARC configured, with the `From` domain aligned with SPF or DKIM; valid reverse DNS and TLS for sending
+    level: hard
+    check: auto
+    how: Check the three records with DNS queries before launch and periodically; send a message to a test mailbox and check that SPF, DKIM and DMARC are all pass in the authentication results header
+    applies: [kind:service]
+    why: Gmail requires bulk senders to configure all three, and non-compliant mail is temporarily or permanently rejected; do not wait until volume grows to add them — configure them from the start.
+    ref_value: Gmail defines a bulk sender as one sending roughly 5,000 or more messages to personal Gmail accounts within 24 hours; the DMARC policy must be at least `p=none`, and the spam complaint rate must stay below 0.3%.
+    sources: [S07, S08, S10]
+  - id: INT-024
+    title: Marketing and subscription email must have a visible unsubscribe link and carry the RFC 8058 one-click unsubscribe headers (`List-Unsubscribe` and `List-Unsubscribe-Post`), with unsubscribes processed within two days
+    level: hard
+    check: auto
+    how: Email header tests check that both headers exist and are correctly formatted; an integration test POSTs to the unsubscribe URL and the address then appears in the unsubscribe list
+    applies: [kind:service]
+    why: Gmail mandates one-click unsubscribe for bulk senders; email that is hard to unsubscribe from gets marked as spam, dragging down transactional email from the same domain.
+    detail: Transactional email (verification codes, orders, invoices) does not need one-click unsubscribe, and must not be mistakenly sent as marketing email.
+    sources: [S07, S09]
+  - id: INT-025
+    title: Use different sending identities or subdomains for transactional, security and marketing email; addresses with hard bounces and complaints go into a suppression list and non-essential sending to them stops
+    level: soft
+    check: auto
+    how: Replay bounce and complaint receipts and check that the address enters the suppression list and the next send is blocked
+    applies: [kind:service]
+    why: Complaints about marketing email drag down verification-code email sharing the same sending identity; continuing to send to bounced addresses damages sender reputation.
+    detail: Do not share one system and sending identity between marketing campaigns and security email such as verification codes.
+    sources: [S11]
+  - id: INT-026
+    title: Variables in email templates must be HTML-escaped; every HTML email also provides a plain-text version
+    level: hard
+    check: auto
+    how: Put variables containing HTML and script into template snapshot tests and check the output is escaped; check that sent email has a text/plain part
+    applies: [kind:service]
+    why: Unescaped user input lets phishing links or forged content be injected into email sent from your domain.
+    detail: Generate email HTML with React Email or MJML; do not reuse web page CSS or hand-assemble HTML; preview in major clients (including Outlook, Gmail and mobile).
+    sources: [S25, S26]
+  # ── SMS ──
+  - id: INT-027
+    title: SMS-sending endpoints apply multi-dimensional server-side rate limits by number, account, device, IP and tenant, with a daily spend cap and alerts; do not rely only on a frontend countdown and the provider's default limits
+    level: hard
+    check: auto
+    how: Use simulated attack traffic (rotating numbers, rotating IPs) to test that rate limits and the spend circuit breaker take effect
+    applies: [kind:service]
+    why: SMS endpoints are a common target of pumping fraud, where attackers use large numbers of phone numbers to run up costs; the provider's limits only apply per "signature × number" and cannot stop rotating numbers.
+    detail: |
+      - Normalize numbers to E.164 format before counting.
+      - Suspicious number ranges or regions can be cut off automatically.
+      - For verification-code expiry, single use and attempt limits see 19.
+    sources: [S13]
+    see: ["19"]
+  - id: INT-028
+    title: Verification codes and full phone numbers are never written into logs, monitoring labels, queue error messages or group-chat alerts
+    level: hard
+    check: auto
+    how: Log-redaction tests; place known verification codes and numbers in test data and scan logs and alert output to confirm they do not appear
+    applies: [kind:service]
+    why: A verification code in a log is a usable login credential; a full phone number is personal information.
+    see: ["25", "27"]
+  - id: INT-029
+    title: SMS in mainland China uses only approved sender signatures and templates, with verification codes, notifications and marketing each using a template for that purpose; marketing SMS gets a regulatory check per 27 before launch
+    level: hard
+    check: manual
+    how: Before launch, verify the signature and template approval results in the provider console and match them against the template IDs used in code
+    applies: [kind:service]
+    why: Unapproved signatures and templates cannot be sent; switching to a template for a different purpose to improve deliverability violates provider rules.
+    sources: [S12]
+    see: ["27"]
+  # ── Mobile push (server side) ──
+  - id: INT-030
+    title: APNs uses token-based authentication (JWT signed with a .p8 key) over a reused long-lived HTTP/2 connection; refresh the JWT every 20 to 60 minutes, and do not open a new connection or sign a new token per message
+    level: hard
+    check: semi
+    how: Review the push client's connection and token caching logic; during load testing watch the connection count and whether `TooManyProviderTokenUpdates` appears
+    applies: [kind:service]
+    why: Apple requires that tokens not be refreshed more often than every 20 minutes and rejects tokens older than 1 hour; frequent token changes or new connections get throttled.
+    detail: When multiple servers share one key, issue tokens from a single place or stagger refresh times. APNs accepting a notification does not mean the device displayed it.
+    sources: [S14, S15]
+  - id: INT-031
+    title: FCM uses the HTTP v1 API with OAuth 2.0 access tokens from a service account (or the official Admin SDK); the shut-down legacy APIs and server keys must not be used
+    level: hard
+    check: auto
+    how: Scan code for the legacy endpoint `fcm.googleapis.com/fcm/send` and for server-key usage
+    applies: [kind:service]
+    why: The legacy FCM APIs were shut down in 2024, so code written from old tutorials cannot send.
+    detail: Most Android devices in mainland China cannot receive FCM; for Chinese vendor push channels see 28.
+    sources: [S16, S17]
+    see: ["28"]
+  - id: INT-032
+    title: Store device tokens separately by user, app, platform and environment; deactivate a token immediately when the provider reports it invalid, and delete it when the user logs out or unbinds
+    level: hard
+    check: auto
+    how: Test that after the mock service returns a token-invalid error the token is no longer used; test that the token is deleted after logout
+    applies: [kind:service]
+    why: Continuing to send to invalid tokens gets you throttled by the provider; pushing after logout may deliver someone else's notifications to an old device.
+    detail: Do not put sensitive content in push titles and bodies; when needed show a neutral prompt and fetch the details after the user opens the app.
+    sources: [S15, S17]
+  # ── Enterprise IM ──
+  - id: INT-033
+    title: IM adapters declare capabilities in three tiers — plain text, cards, interactive; when the target does not support interaction callbacks (e.g. group custom bots), do not send cards with action buttons
+    level: soft
+    check: auto
+    how: Each IM adapter has a capability declaration, and rendering tests check that messages to targets without interaction support contain no action buttons
+    applies: [kind:service]
+    why: Group custom bots in Feishu and similar platforms can only post messages to the group, and the server receives no callback when a card button is clicked; users think they clicked "Approve" when in fact nothing happened.
+    detail: |
+      - Plain text is the fallback format every target must have.
+      - Use a neutral internal message structure (title, paragraphs, fields, actions, fallback text) rendered by each adapter; do not treat Slack's or Feishu's card format as the universal format.
+      - Slack Incoming Webhooks cannot delete or edit sent messages; interaction requires a Slack app.
+    sources: [S18, S19, S20]
+  - id: INT-034
+    title: When receiving IM interaction callbacks, verify signatures as the platform requires; bind button actions to a business idempotency key and check that the clicker is authorized to perform the action
+    level: hard
+    check: auto
+    how: Test that interaction requests with forged signatures are rejected; clicking the same button twice executes only once; clicks by unauthorized users are rejected
+    applies: [kind:service]
+    why: Not everyone in a group is authorized to approve; repeated button clicks or replayed callbacks execute business actions more than once.
+    sources: [S20]
+  - id: INT-035
+    title: New Microsoft Teams integrations must not use the retired Office 365 Connectors (legacy Incoming Webhooks); use Workflows or a Teams bot instead
+    level: hard
+    check: auto
+    how: Scan code and configuration for the legacy connector URL format (`webhook.office.com/webhookb2/`)
+    applies: [kind:service]
+    why: Microsoft completed the retirement of the legacy connectors in May 2026, so messages from integrations built per old tutorials cannot be sent.
+    detail: Workflows depends on Power Automate; before launch confirm licensing and who owns the flow.
+    sources: [S21]
+  # ── Connecting third-party accounts via OAuth ──
+  - id: INT-036
+    title: When connecting a user's third-party account, use the authorization code flow with PKCE and `state`, and request only the scopes the current feature needs
+    level: hard
+    check: semi
+    how: Review the authorization request parameters (`code_challenge`, `state`, `scope`); test that a callback with a mismatched `state` is rejected
+    applies: [kind:service]
+    why: The OAuth security best current practice (RFC 9700) requires authorization code with PKCE and no implicit flow; `state` prevents an attacker from binding their own account to the victim.
+    detail: Redirect URIs must match exactly, without wildcards. For our own users' login see 19.
+    sources: [S30, S31]
+    see: ["19"]
+  - id: INT-037
+    title: Third-party access tokens and refresh tokens are stored encrypted, used only on the server, never sent to the frontend and never written to logs
+    level: hard
+    check: auto
+    how: Check that the database fields are encrypted at rest; log-redaction tests; scan API responses to confirm they contain no tokens
+    applies: [kind:service]
+    why: Refresh tokens are long-lived; once leaked, an attacker can keep accessing the user's third-party account as that user.
+    detail: For encryption key management and rotation see 25.
+    sources: [S30]
+    see: ["25"]
+  - id: INT-038
+    title: When refreshing tokens, allow only one refresh in flight per connection and save the new refresh token returned by the provider; when a refresh is rejected (e.g. `invalid_grant`), mark the connection invalid and prompt the user to reauthorize instead of retrying repeatedly
+    level: soft
+    check: auto
+    how: Concurrency test with multiple requests hitting token expiry at once, verifying only one refresh happens; test that after a rejected refresh the connection state becomes invalid
+    applies: [kind:service]
+    why: Many providers rotate refresh tokens; with concurrent refreshes, later requests use an already-invalidated old token, which can invalidate the whole connection.
+    sources: [S30]
+  - id: INT-039
+    title: When a user disconnects a third-party connection or deletes their account, call the provider's revocation endpoint where supported (RFC 7009) and delete the locally stored tokens
+    level: hard
+    check: semi
+    how: Test that after disconnecting, local tokens are deleted and the revocation endpoint is called; review each connection's revocation implementation
+    applies: [kind:service]
+    why: If only the local record is deleted, the token remains valid at the provider and any leaked copy still works; users also believe they have disconnected.
+    sources: [S32]
+    see: ["27"]
+choices:
+  - category: Notification orchestration and in-app messages
+    pick: A lightweight in-project notification module (outbox + adapter layer), reusing existing data and permissions
+    when: Few notification types, and no need for operations staff to edit templates or for multi-step orchestration
+    alternatives:
+      - { name: Novu, when: "You need a user preference center, multi-step workflows and an embeddable inbox, and the team can operate it" }
+      - { name: Commercial notification platform, when: "On-premises deployment is not required and you want less operational work" }
+    avoid:
+      - { name: Adopting a full notification platform just to send two kinds of alerts, why: "Operational and licensing costs far outweigh the benefit" }
+    license: Novu's core is MIT, while directories such as `enterprise/` are under a commercial license (enterprise features); before self-hosting, confirm which part the features you need belong to
+    sources: [S22]
+  - category: Lightweight multi-target notifications
+    pick: Apprise
+    when: Operations alerts and internal tools, sending to many IM platforms and email from one configuration
+    avoid:
+      - { name: Letting untrusted users fill in Apprise URL configurations, why: "The URLs carry credentials and can also be used to reach the internal network" }
+    license: BSD-2-Clause
+    notes: Apprise is only a sending client; it has no preferences, in-app messages or delivery status.
+    sources: [S23]
+  - category: Transactional email sending
+    pick: A cloud email service API (e.g. Amazon SES, Postmark, Resend; in China, e.g. Alibaba Cloud or Tencent Cloud email push), or the customer's existing SMTP relay
+    alternatives:
+      - { name: Postal, when: "You must self-host the sending platform, and someone is responsible for IP reputation, reverse DNS and complaint handling" }
+    avoid:
+      - { name: Writing or self-hosting a public SMTP server and expecting high deliverability, why: "The hard part is domain and IP reputation and anti-spam operations, not the software" }
+    license: Postal is MIT
+    sources: [S11, S24]
+  - category: Email templates
+    pick: React Email (React/TypeScript projects)
+    alternatives:
+      - { name: MJML, when: "Cross-language or non-React projects" }
+    avoid:
+      - { name: Hand-assembling HTML or reusing web page CSS, why: "Poor email client compatibility and easy to miss escaping" }
+    license: Both are MIT
+    sources: [S25, S26]
+  - category: Marketing and subscription email
+    pick: listmonk
+    when: You genuinely need subscription lists and bulk sending
+    alternatives:
+      - { name: Commercial email marketing platform, when: "On-premises deployment is not required" }
+    avoid:
+      - { name: Sending verification codes and other security email through the marketing system, why: "Unsubscribe, reputation and timeliness requirements all differ" }
+    license: AGPL-3.0; the requirements differ between running it as a standalone service and integrating it into a distributed product — for the policy see 27
+    sources: [S27]
+  - category: Email testing
+    pick: Mailpit
+    alternatives:
+      - { name: GreenMail, when: "Java projects that need an embedded SMTP/IMAP server in tests" }
+    avoid:
+      - { name: Sending directly to real mailboxes from test environments, why: "Mail goes to customers by mistake and results are not reproducible" }
+    license: Mailpit is MIT; GreenMail is Apache-2.0
+    sources: [S28, S29]
+  - category: SMS in mainland China
+    pick: Alibaba Cloud SMS or Tencent Cloud SMS
+    alternatives:
+      - { name: A properly licensed SMS aggregator, when: "You need multi-channel disaster recovery" }
+    avoid:
+      - { name: Using international SMS channels for domestic business, why: "Violates carrier rules and delivery is unreliable" }
+    notes: Commercial services; not usable air-gapped. For regulatory requirements see 27.
+    sources: [S12, S33]
+  - category: Callback signature verification
+    pick: The verification function of the provider's official SDK; for providers using Standard Webhooks, the official Standard Webhooks library
+    alternatives:
+      - { name: Implementing verification yourself, when: "No official library exists for your language; must be covered by the official test vectors" }
+    avoid:
+      - { name: Parsing JSON and re-serializing it before verification, why: "The bytes change so the signature will never match" }
+      - { name: Relying only on an IP allowlist, why: "Addresses change and it cannot block other tenants on the same cloud" }
+    sources: [S03, S04]
+  - category: iOS push (server side)
+    pick: Connect directly to the APNs HTTP/2 API with token-based authentication, using a mature APNs client library in your language
+    avoid:
+      - { name: Certificate-based authentication for new integrations, why: "Certificates expire yearly and must be replaced, while one token-auth key works for multiple apps" }
+    sources: [S14, S15]
+  - category: Android push (server side, outside China)
+    pick: Firebase Admin SDK (built on FCM HTTP v1)
+    alternatives:
+      - { name: Calling FCM HTTP v1 directly, when: "No Admin SDK exists for your language" }
+    avoid:
+      - { name: Legacy FCM APIs, why: "Shut down" }
+    sources: [S16, S17]
+  - category: Enterprise IM notifications
+    pick: Use group bots or Incoming Webhooks for push-only notifications; use an app bot when you need interaction, user information or direct messages
+    avoid:
+      - { name: Approval buttons on group custom bots, why: "Click callbacks are never received" }
+      - { name: Teams legacy Office 365 Connectors, why: "Retired; use Workflows or a Teams bot instead" }
+    sources: [S18, S19, S21]
+  - category: Connecting third-party accounts (OAuth client)
+    pick: The provider's official SDK or a mature OAuth 2.0 client library in your language, with PKCE enabled
+    avoid:
+      - { name: Hand-building authorization and token-exchange requests, why: "Easy to miss `state`, PKCE and token-rotation handling" }
+      - { name: Implicit grant flow, why: "No longer recommended by RFC 9700" }
+    sources: [S30, S31]
+antipatterns:
+  - { bad: "Calling SMS and email sending directly from the order service", instead: "Write the notification intent to the outbox together with the business data, and let a background job send it" }
+  - { bad: "Hurrying to send another one when a request times out", instead: "Mark the outcome unknown and confirm via idempotency key, status query or reconciliation" }
+  - { bad: "Recording \"delivered\" as soon as the provider API returns 200", instead: "Record \"accepted\" and advance the state only when a receipt arrives" }
+  - { bad: "Retrying every error three times uniformly", instead: "Decide by error category whether to retry, pause or add to the suppression list" }
+  - { bad: "Parsing callback JSON into an object and re-serializing it to verify the signature", instead: "Keep the raw request bytes for verification" }
+  - { bad: "Treating a callback as genuine because it decrypts correctly", instead: "Verify the signature first, then decrypt" }
+  - { bad: "Fulfilling as soon as the user sees a payment success page on the client", instead: "Rely on verified callbacks, active order queries and reconciliation" }
+  - { bad: "Pasting webhook bot URLs into docs, logs or tickets", instead: "Keep them as secrets and reset them immediately if leaked" }
+  - { bad: "Using card buttons on a group custom bot for approvals", instead: "Use an app bot, verify signatures and check the clicker's permissions" }
+  - { bad: "Following an old tutorial to connect Teams via an Office 365 Connector", instead: "Use Workflows or a Teams bot" }
+  - { bad: "Relying only on a 60-second frontend countdown to prevent SMS pumping", instead: "Multi-dimensional server-side rate limits plus a spend cap" }
+  - { bad: "Sending verification codes through the marketing system", instead: "Separate sending identities and systems for transactional, security and marketing" }
+  - { bad: "Storing third-party refresh tokens in plaintext and letting multiple requests refresh at once", instead: "Encrypt at rest and allow only one refresh per connection" }
+  - { bad: "Claiming every notification channel works offline just because it is deployed on-premises", instead: "Document \"the service can start air-gapped\" and \"where messages can be delivered\" separately, and run an air-gapped acceptance test" }
+sources:
+  - { id: S01, title: "Making retries safe with idempotent APIs", url: "https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/", publisher: Amazon Web Services, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S02, title: "RFC 9110: HTTP Semantics", url: "https://www.rfc-editor.org/rfc/rfc9110.html", publisher: IETF, date: 2022-06, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: Standard Webhooks Specification, url: "https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md", publisher: Standard Webhooks, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: "stripe-node: Webhook signing", url: "https://github.com/stripe/stripe-node/blob/master/README.md", publisher: Stripe, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "WeChat Pay APIv3: common pitfalls in signature verification and decryption", url: "https://pay.wechatpay.cn/doc/v3/merchant/4054257711", publisher: WeChat Pay, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "WeChat Pay: statement download developer guide", url: "https://pay.wechatpay.cn/doc/v3/merchant/4013071218", publisher: WeChat Pay, date: 2026-10-13, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Gmail: Email sender guidelines", url: "https://support.google.com/mail/answer/81126?hl=en", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "Gmail: Email sender guidelines FAQ", url: "https://support.google.com/mail/answer/14229414", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "RFC 8058: Signaling One-Click Functionality for List Email Headers", url: "https://datatracker.ietf.org/doc/rfc8058/", publisher: IETF, date: 2017-01, kind: standard, checked: 2026-11-13 }
+  - { id: S10, title: "RFC 7489: DMARC", url: "https://datatracker.ietf.org/doc/rfc7489/", publisher: IETF, date: 2015-03, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: "Amazon SES: Monitoring using event publishing", url: "https://docs.aws.amazon.com/ses/latest/dg/monitor-using-event-publishing.html", publisher: Amazon Web Services, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "Alibaba Cloud SMS: applying for message templates", url: "https://help.aliyun.com/zh/sms/user-guide/create-message-templates-1", publisher: Alibaba Cloud, date: 2026-10-15, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "Alibaba Cloud SMS: sending rules", url: "https://help.aliyun.com/zh/sms/user-guide/message-rules", publisher: Alibaba Cloud, date: 2026-09-20, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "Establishing a token-based connection to APNs", url: "https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: "Establishing a connection to APNs", url: "https://developer.apple.com/documentation/usernotifications/establishing-a-connection-to-apns", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Migrate from legacy FCM APIs to HTTP v1", url: "https://firebase.google.com/docs/cloud-messaging/migrate-v1", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: "FCM: Send messages using the HTTP v1 API", url: "https://firebase.google.com/docs/cloud-messaging/send/v1-api", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Feishu custom bot usage guide", url: "https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot", publisher: Feishu Open Platform, date: 2025-03-27, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "Slack: Sending messages using incoming webhooks", url: "https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks", publisher: Slack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Slack: Creating interactive messages", url: "https://docs.slack.dev/messaging/creating-interactive-messages/", publisher: Slack, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "Retirement of Office 365 connectors within Microsoft Teams", url: "https://devblogs.microsoft.com/microsoft365dev/retirement-of-office-365-connectors-within-microsoft-teams/", publisher: Microsoft, date: 2024-07-03, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: "Novu", url: "https://github.com/novuhq/novu", publisher: Novu, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "Apprise", url: "https://github.com/caronc/apprise", publisher: Apprise, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Postal", url: "https://github.com/postalserver/postal", publisher: Postal, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "React Email", url: "https://github.com/resend/react-email", publisher: Resend, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "MJML", url: "https://github.com/mjmlio/mjml", publisher: MJML, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "listmonk", url: "https://github.com/knadh/listmonk", publisher: listmonk, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: "Mailpit", url: "https://github.com/axllent/mailpit", publisher: Mailpit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: "GreenMail", url: "https://github.com/greenmail-mail-test/greenmail", publisher: GreenMail, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "RFC 9700: Best Current Practice for OAuth 2.0 Security", url: "https://www.rfc-editor.org/rfc/rfc9700.html", publisher: IETF, date: 2025-01, kind: standard, checked: 2026-11-14 }
+  - { id: S31, title: "RFC 7636: Proof Key for Code Exchange (PKCE)", url: "https://www.rfc-editor.org/rfc/rfc7636.html", publisher: IETF, date: 2015-09, kind: standard, checked: 2026-11-14 }
+  - { id: S32, title: "RFC 7009: OAuth 2.0 Token Revocation", url: "https://www.rfc-editor.org/rfc/rfc7009.html", publisher: IETF, date: 2013-08, kind: standard, checked: 2026-11-14 }
+  - { id: S33, title: "Tencent Cloud SMS: signature review standards", url: "https://cloud.tencent.com/document/product/382/39022", publisher: Tencent Cloud, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "Research pending: connecting third-party accounts as an OAuth client (not covered by the original report). INT-036 to INT-039 were compiled from RFC 9700, 7636 and 7009; S30–S32 record only the compilation date and the original texts were not checked online clause by clause; recommended OAuth client libraries per language are undecided."
+  - Yahoo's requirements for bulk senders (whether they match Gmail's, and the thresholds) have not been verified separately; Outlook.com's requirements for high-volume senders have not been researched.
+  - Gmail's one-click unsubscribe "processed within two days" and "roughly 5,000 messages per 24 hours" come from Google's sender guidelines and were verified this time via search results; sources disagree on whether transactional email counts toward the threshold.
+  - "Standard Webhooks timestamp tolerance window: 16 records that the spec gives no value, while secondary sources claim the spec recommends 300 seconds; this needs checking against the spec text."
+  - Novu's license split (core MIT, enterprise directory under a commercial license) was verified this time only from secondary sources and should be confirmed against the LICENSE files in the official repository; the licenses of Apprise, Postal, React Email, MJML, listmonk, Mailpit and GreenMail have not been verified online.
+  - The exact shutdown date of the legacy FCM APIs (sources range from June to July 2024) should follow the official Firebase page.
+  - Whether the OWASP Webhook Security Cheat Sheet cited in the original report exists has not been verified, and it is no longer used as a source.
+  - "Research pending: the specific capabilities (cards, callbacks, message recall) and rate limits of DingTalk and WeCom bots; the specific signature verification method for Feishu app bot callbacks."
+  - "Research pending: selection of international SMS providers; push from Chinese vendors such as Xiaomi, OPPO and vivo (belongs to 28)."
+  - "Research pending: implementation approaches for in-app messages (notification center); tiering notifications by level of intrusiveness (the same gap as in 09)."
+  - The original report's content on maps (coordinate systems, Nominatim usage policy) and object storage integration was not included in this topic; ownership of map services is undecided, and for object storage see 17.

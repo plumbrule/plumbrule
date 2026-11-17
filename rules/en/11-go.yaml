@@ -1,0 +1,571 @@
+id: "11"
+slug: go
+title: Go
+summary: How to handle the toolchain and modules, formatting and lint, error handling, context, concurrency, testing, logging, HTTP server timeouts, database access patterns, migration tools, and vulnerability scanning in Go projects.
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - go.mod, go.sum, and the toolchain version policy
+    - gofmt, goimports, golangci-lint, and recommended linters
+    - Error wrapping and inspection (%w, errors.Is/As)
+    - Context propagation, goroutine lifecycle, race detection
+    - How to write tests, fuzz tests, and mocks in Go
+    - Logging with log/slog
+    - Timeouts and limits for HTTP servers and clients
+    - Transactions and queries with database/sql and pgx; choosing a migration tool
+    - Tools for checking package dependency direction
+    - How to use govulncheck
+  excludes:
+    - { what: "General principles of formatting and lint; cross-language conventions for errors and logging", see: "02" }
+    - { what: "Test layering, connecting integration tests to real components, coverage definitions", see: "04" }
+    - { what: "Principles of module boundaries and dependency direction", see: "01" }
+    - { what: "API style, OpenAPI, idempotency semantics, error response format", see: "16" }
+    - { what: "Migration principles, transaction isolation, optimistic locking, leases, outbox", see: "17" }
+    - { what: "Choosing task queues, workflows, caches, and message queues", see: "18" }
+    - { what: "Overall choice of security scanning tools, SBOM, secrets management", see: "25" }
+    - { what: "Images, health checks, shutdown orchestration, observability", see: "26" }
+    - { what: "Open-source license policy and license scanning", see: "27" }
+overview: |
+  1. **Versions follow the official support window.** Go officially supports the two most recent major releases; outside that window you get no security fixes. The `go` line in `go.mod` states the minimum language version; the toolchain used for builds is pinned separately.
+  2. **Commit both go.mod and go.sum.** CI runs in read-only mode and checks that `go mod tidy` produces no diff; release builds never use `@latest`.
+  3. **Formatting is not up for debate.** gofmt + goimports, enforced uniformly by golangci-lint v2; the config uses the v2 format, is committed, and CI verifies the config before running.
+  4. **Errors are never lost, swallowed, or compared as strings.** Wrap with `%w`; inspect with `errors.Is` / `errors.As`.
+  5. **context is the first parameter and is passed all the way down.** Do not store it in structs, and do not swap it for `context.Background()` on the request path.
+  6. **Every goroutine knows how it stops.** Use errgroup for bounded concurrency; enable `-race` in tests and check for leaks on the shutdown path with goleak.
+  7. **HTTP defaults are not safe.** Set every timeout on `http.Server` yourself, do not use `http.DefaultClient` (which has no timeout) as a client, and limit request body size.
+  8. **Database: pgx + sqlc.** Parameterized queries; transactions take a ctx, defer rollback, and check the commit error; close rows and check `rows.Err()`. Default migration tool is goose.
+  9. **Log with log/slog.** Sensitive types implement `LogValuer` to redact themselves.
+  10. **govulncheck runs in CI.** It uses the call graph to decide whether a vulnerability can actually be triggered, so it produces fewer false positives than checking dependency versions alone.
+rules:
+  # ── Toolchain and modules ──
+  - id: GO-001
+    title: The Go version used to build and run must be within the official support window (the two most recent major releases), and promptly upgraded to the latest patch release
+    level: hard
+    check: auto
+    how: CI prints `go version` and compares it against the official release list; fails when outside the support window
+    applies: [lang:go]
+    why: Each major release is supported only until two newer major releases ship; security issues after that are not fixed.
+    sources: [S01]
+  - id: GO-002
+    title: The `go` line in go.mod states the minimum language version the project needs; the build toolchain is pinned to a patch release via the `toolchain` line or the build image, identical in CI and production
+    level: soft
+    check: auto
+    how: CI checks that the Go version in the build image matches the `toolchain` line or the version file
+    applies: [lang:go]
+    why: 'The `go` line is a language requirement, not a build version; with only a major version written, different machines build with different patch releases and get different results.'
+    detail: |
+      - Libraries state only the minimum `go` version they truly need; do not raise it just because you upgraded, or you force callers to upgrade.
+      - In offline or controlled build environments set `GOTOOLCHAIN=local` to forbid automatic toolchain downloads during builds; preinstall the required version in the image.
+    sources: [S02]
+  - id: GO-003
+    title: go.mod and go.sum must be committed; CI builds with `-mod=readonly` and checks that there is no diff after `go mod tidy`
+    level: hard
+    check: auto
+    how: CI sets `GOFLAGS=-mod=readonly`, runs `go mod tidy -diff` or tidy followed by `git diff --exit-code go.mod go.sum`, then runs `go mod verify`
+    applies: [lang:go]
+    why: go.sum records the checksum of every dependency; without it, or if CI is allowed to rewrite it, there is no guarantee every build uses the same code.
+    sources: [S03]
+  - id: GO-004
+    title: Release builds and CI must not use `go install …@latest` or `go get …@latest`; development tools are pinned to versions
+    level: hard
+    check: auto
+    how: CI scans scripts and Makefiles for `@latest`; tools are installed via the `tool` directive in go.mod or with hard-coded versions
+    applies: [lang:go]
+    why: '`@latest` may resolve to a different version each time, so the same commit builds differently today and tomorrow.'
+    sources: [S03]
+  - id: GO-005
+    title: Scope private modules to specific domains or paths with `GOPRIVATE` (or `GONOSUMDB`); do not disable the checksum database organization-wide (`GOSUMDB=off`)
+    level: hard
+    check: semi
+    how: Review CI environment variables and developer templates; require a justification whenever `GOSUMDB=off` appears
+    applies: [lang:go]
+    why: With the checksum database disabled, tampering with public modules goes undetected.
+    sources: [S03]
+  - id: GO-006
+    title: Go projects that must be delivered offline must use an internal module proxy or a vendor directory, rebuild once in an environment without internet access, and keep a record of it
+    level: hard
+    check: auto
+    how: In network-isolated CI set `GOPROXY=off` (vendor) or point it to the internal proxy, set `GOTOOLCHAIN=local`, and run the build and tests
+    applies: [lang:go, kind:onprem]
+    why: Compiling locally does not mean it can be rebuilt on an isolated network; modules, toolchains, and generators may all quietly reach the public internet.
+    sources: [S03]
+    see: ["04", "26"]
+  # ── Formatting and lint ──
+  - id: GO-007
+    title: All Go code is formatted with gofmt and imports organized with goimports; CI checks there is no formatting diff
+    level: hard
+    check: auto
+    how: CI runs `golangci-lint fmt --diff` and fails on any output; or fails if `gofmt -l .` output is non-empty
+    applies: [lang:go]
+    why: gofmt is the Go community's common format, so reviews no longer need to discuss whitespace and import order.
+    sources: [S04, S06]
+    see: ["COD-038"]
+  - id: GO-008
+    title: The golangci-lint config file is committed and uses the tool's current config format; CI verifies the config (`golangci-lint config verify`) before running
+    level: hard
+    check: auto
+    how: CI runs `golangci-lint config verify` and then `golangci-lint run ./...`; convert v1 configs first with `golangci-lint migrate`
+    applies: [lang:go]
+    why: v2 accepts only the v2 format; without config verification, misspelled keys are silently ignored and checks you think are enabled are not.
+    detail: |
+      - Set `linters.default` to one of `standard`, `all`, `none`, `fast`, then adjust with `enable` / `disable`.
+      - gofmt, goimports, and gofumpt belong under `formatters` and can no longer be listed in `linters.enable`.
+    sources: [S05, S06]
+  - id: GO-009
+    title: 'Explicitly enable a recommended set of linters on top of the defaults; do not use `default: all` and then disable large swaths'
+    level: soft
+    check: semi
+    how: Review `.golangci.yml`; check that the recommended set is enabled and that each disabled linter has a stated reason
+    applies: [lang:go]
+    why: Enabling everything produces a flood of false positives that end up suppressed with blanket `nolint`, burying the real problems.
+    detail: |
+      Recommended starter set: `govet`, `staticcheck`, `errcheck`, `errorlint`, `ineffassign`, `unused`, `bodyclose`, `noctx`, `contextcheck`, `containedctx`, `rowserrcheck`, `sqlclosecheck`, `gosec`, `revive`, `nolintlint`, `misspell`.
+      Add `depguard` when imports need constraining; evaluate `gocritic` check by check before enabling it.
+    sources: [S05]
+  - id: GO-010
+    title: '`//nolint` must name the specific linter and give a reason; enforce with nolintlint'
+    level: hard
+    check: auto
+    how: 'Enable nolintlint with `require-specific: true` and `require-explanation: true`'
+    applies: [lang:go]
+    why: A nolint that names no linter also silences any checks added later, and nobody knows why it was disabled.
+    sources: [S05]
+    see: ["COD-039"]
+  - id: GO-011
+    title: CI must run `go vet ./...` with no reports
+    level: hard
+    check: auto
+    how: CI runs `go vet ./...` on its own, or enables govet in golangci-lint
+    applies: [lang:go]
+    why: go vet finds code that compiles but is almost certainly wrong, such as mismatched format string arguments, copied locks, or a lost cancel.
+    sources: [S07]
+  # ── Error handling ──
+  - id: GO-012
+    title: Do not discard errors returned by functions; where one can genuinely be ignored, write `_ =` explicitly with a comment explaining why
+    level: hard
+    check: auto
+    how: Enable errcheck
+    applies: [lang:go]
+    why: In Go an error is just a return value; not checking it is as if nothing happened, and the failure surfaces far away.
+    see: ["COD-010"]
+  - id: GO-013
+    title: 'Wrap with `fmt.Errorf("…: %w", err)` when adding context; inspect errors with `errors.Is` / `errors.As`, never compare wrapped errors with `==` or match on error message text'
+    level: hard
+    check: auto
+    how: Enable errorlint (checks `%w`, comparisons, and type assertions)
+    applies: [lang:go]
+    why: After wrapping, the original error stays on the error chain so callers can inspect it reliably; `==` and string matching break as soon as wrapping is involved.
+    detail: |
+      Use `errors.Join` to return multiple errors together. Context should name the operation and the object, e.g. `fmt.Errorf("load order %s: %w", id, err)`; do not stack messages starting with "failed to".
+    sources: [S08, S09]
+    see: ["COD-011", "COD-014"]
+  - id: GO-014
+    title: Public libraries use `%w` only for errors they are willing to commit to long-term for callers; for errors from internal dependencies they do not want to expose, use `%v` and export sentinel errors or error types for inspection
+    level: soft
+    check: manual
+    how: Review error returns in public packages; check whether underlying errors wrapped with `%w` have become part of the API
+    applies: [lang:go, kind:library]
+    why: Once wrapped with `%w`, callers can `errors.Is` down to the underlying error, so swapping out the underlying implementation later breaks callers.
+    sources: [S08]
+  - id: GO-015
+    title: Do not use panic for expected errors, and do not let panics cross package boundaries; do not perform external I/O such as network or file access in `init`
+    level: soft
+    check: manual
+    how: In review, check `panic`, `log.Fatal`, and `init` functions in non-test code
+    applies: [lang:go]
+    why: panic bypasses the caller's error handling; I/O in init means merely importing a package can fail or slow down, and it is hard to test.
+    detail: An invalid configuration at program startup may exit directly in `main`; library code always returns an error.
+    sources: [S10]
+  # ── context ──
+  - id: GO-016
+    title: Functions that perform I/O or may block take `ctx context.Context` as the first parameter and pass it downstream, calling Context-aware APIs (such as `QueryContext`, `http.NewRequestWithContext`)
+    level: hard
+    check: semi
+    how: Enable noctx (HTTP requests or SQL executed without ctx) and contextcheck (upstream ctx not propagated); review signatures of newly added public functions
+    applies: [lang:go]
+    why: Only when ctx is passed all the way down do downstream queries and calls stop promptly and release connections when the request is canceled or times out.
+    sources: [S11, S12]
+    see: ["COD-033"]
+  - id: GO-017
+    title: Do not store context in struct fields; on the request handling path do not use `context.Background()` or `context.TODO()` in place of the incoming ctx
+    level: hard
+    check: semi
+    how: Enable containedctx and contextcheck; any `context.Background()` appearing in review must explain why the upstream ctx is not used
+    applies: [lang:go]
+    why: A ctx stored in a struct is decoupled from the real request lifecycle; after swapping in Background, cancellation and deadlines no longer work.
+    detail: |
+      For work that must continue after the request ends (such as audit writes or cleanup), use `context.WithoutCancel(ctx)` to keep the values without inheriting cancellation, and set a separate timeout; hand genuine background jobs to a task queue (see 18) instead of just firing off `go func()` in the request.
+    sources: [S11]
+  - id: GO-018
+    title: 'The cancel returned by `context.WithCancel` / `WithTimeout` / `WithDeadline` must be called, usually with `defer cancel()` on the very next line'
+    level: hard
+    check: auto
+    how: The lostcancel check in go vet
+    applies: [lang:go]
+    why: If cancel is not called, the child context and its timer are not released until the parent context ends, leaking resources.
+    sources: [S11, S07]
+  - id: GO-019
+    title: context carries only request-scoped values (trace IDs, authentication info, etc.), not optional parameters or dependencies; keys use a package-private type
+    level: soft
+    check: manual
+    how: Review calls to `context.WithValue`
+    applies: [lang:go]
+    why: Parameters stuffed into context are invisible in the signature and the compiler cannot detect when they are missing; string keys easily collide with other packages.
+    sources: [S11]
+  # ── Concurrency ──
+  - id: GO-020
+    title: Every goroutine states at its launch site who stops it and when it exits; all goroutines can finish when the service stops
+    level: hard
+    check: semi
+    how: Review the exit condition of every `go` statement; check for leaks with goleak in shutdown tests and tests of key components
+    applies: [lang:go]
+    why: A goroutine with no exit path holds on to memory, connections, and locks forever, and may lose data at shutdown.
+    see: ["COD-035"]
+    sources: [S13]
+  - id: GO-021
+    title: Concurrent fan-out uses `errgroup.WithContext` with `SetLimit` (or a semaphore) to bound concurrency; do not launch goroutines unboundedly per input item
+    level: soft
+    check: manual
+    how: Review `go` statements inside loops and WaitGroup usage
+    applies: [lang:go]
+    why: With large inputs, unbounded concurrency saturates downstream services and memory; errgroup can also cancel the remaining tasks on the first error.
+    sources: [S14]
+  - id: GO-022
+    title: CI runs tests with `go test -race` on supported platforms and fails when a race is detected
+    level: hard
+    check: auto
+    how: At least one CI job runs `go test -race ./...`
+    applies: [lang:go]
+    why: Data races are undefined behavior in Go and are hard to spot in review; the race detector only finds races that actually execute, so it must be enabled in tests.
+    sources: [S15]
+    see: ["COD-036"]
+  - id: GO-023
+    title: Critical background tasks are not carried by bare goroutines or `time.Ticker`; work that needs durability, retries, or scheduling goes to a task queue or scheduler
+    level: soft
+    check: manual
+    how: Review whether `go func()` and Tickers carry work that must not be lost when the process restarts
+    applies: [lang:go, kind:service]
+    why: When the process restarts, in-memory goroutines and timers are gone, and tasks are silently lost or duplicated.
+    see: ["18"]
+  # ── Testing ──
+  - id: GO-024
+    title: Unit tests use the standard library testing package with table-driven tests and subtests (`t.Run`); use go-cmp for comparing complex structures
+    level: soft
+    check: manual
+    how: Review how new tests are written
+    applies: [lang:go]
+    why: Table-driven tests let you add a case with one line of data; subtests can run individually and in parallel, and a failure shows exactly which case broke.
+    sources: [S16]
+    see: ["04"]
+  - id: GO-025
+    title: Prefer hand-written fakes as test doubles; when generated mocks are needed use go.uber.org/mock, and never introduce the archived golang/mock
+    level: hard
+    check: auto
+    how: depguard forbids importing `github.com/golang/mock`
+    applies: [lang:go]
+    why: golang/mock is archived and no longer maintained; Uber's fork is the officially recommended continuation.
+    sources: [S17, S18]
+  - id: GO-026
+    title: Code that parses external input (protocols, file formats, URLs, configs) has fuzz tests; PRs run only the seed corpus, long fuzzing runs go in a scheduled job
+    level: soft
+    check: semi
+    how: Review whether parsing packages have `FuzzXxx`; a scheduled job runs `go test -fuzz=… -fuzztime=…`
+    applies: [lang:go]
+    why: Fuzzing finds malformed inputs nobody thinks of; plain `go test` runs the seed corpus as unit tests, at very low cost.
+    detail: Failing inputs found by fuzzing are written to `testdata/fuzz/` and must be committed as regression cases.
+    sources: [S19]
+    see: ["TST-038"]
+  - id: GO-027
+    title: Integration tests use testcontainers-go to start the same databases and other dependencies as production, with images pinned by digest
+    level: soft
+    check: semi
+    how: Review how integration tests start their dependencies
+    applies: [lang:go]
+    why: Substituting an in-memory implementation or a different engine cannot exercise the real SQL dialect, locking, and constraint behavior.
+    sources: [S20]
+    see: ["TST-010"]
+  # ── Logging ──
+  - id: GO-028
+    title: New code logs with log/slog (JSONHandler in production), one setup for the whole project; do not add new `log.Printf` calls or a second logging library
+    level: soft
+    check: auto
+    how: depguard or forbidigo forbids the print functions of the `log` package and unapproved logging libraries in non-main packages
+    applies: [lang:go]
+    why: slog is the standard library's structured logger, and third-party logging libraries can plug in as its Handler; with two setups side by side, fields and levels do not line up.
+    detail: When handling requests use ctx-aware methods such as `InfoContext(ctx, …)` so the Handler can extract the trace ID. For field conventions see 02.
+    sources: [S21]
+    see: ["02"]
+  - id: GO-029
+    title: Types containing passwords, tokens, or personal information implement `slog.LogValuer` (or `String()`) to return a redacted value
+    level: soft
+    check: semi
+    how: Review sensitive type definitions; logging tests assert the raw value does not appear in output
+    applies: [lang:go]
+    why: Redacting at the type level is more reliable than remembering to redact at every logging call site.
+    sources: [S21]
+    see: ["COD-019"]
+  # ── HTTP ──
+  - id: GO-030
+    title: 'An externally listening `http.Server` must explicitly set `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` (except for streaming endpoints), and `IdleTimeout`; do not use `http.ListenAndServe`, which has no timeouts'
+    level: hard
+    check: auto
+    how: gosec G112 (missing ReadHeaderTimeout) and G114 (use of the default ListenAndServe)
+    applies: [lang:go, kind:service]
+    why: All these timeouts default to 0, meaning unlimited; slow attacks can exhaust the service with very few connections.
+    detail: For streaming or long-lived connection endpoints (SSE, WebSocket) without a global WriteTimeout, set deadlines per request with `http.ResponseController`.
+    sources: [S22]
+    see: ["25"]
+  - id: GO-031
+    title: HTTP clients must have a timeout (`Client.Timeout` or a deadline on the request ctx); do not call external services with `http.Get` or the default `http.DefaultClient`; response bodies must be closed
+    level: hard
+    check: auto
+    how: Enable noctx and bodyclose; forbidigo forbids `http.Get`, `http.Post`, and `http.DefaultClient`
+    applies: [lang:go]
+    why: The default client has no timeout, so when a downstream service hangs, the caller's goroutines and connections pile up; not closing response bodies leaks connections.
+    sources: [S22]
+    see: ["COD-033"]
+  - id: GO-032
+    title: Limit the size with `http.MaxBytesReader` before reading the request body; do not call `io.ReadAll` directly on untrusted input
+    level: hard
+    check: semi
+    how: Review request body reads in handlers; boundary tests send oversized requests and assert a 413 response
+    applies: [lang:go, kind:service]
+    why: Without a size limit, a single large request can exhaust memory.
+    sources: [S22]
+    see: ["25"]
+  - id: GO-033
+    title: Shutdown receives signals with `signal.NotifyContext` and calls `http.Server.Shutdown` with a deadline; background workers finish the work in hand before exiting
+    level: soft
+    check: semi
+    how: An integration test sends SIGTERM and asserts that in-flight requests complete and the process exits within the deadline
+    applies: [lang:go, kind:service]
+    why: Calling `os.Exit` directly interrupts in-flight requests and transactions; Shutdown without a deadline may wait forever.
+    sources: [S22, S23]
+    see: ["26"]
+  # ── Database access ──
+  - id: GO-034
+    title: SQL parameters are always passed via placeholders, never written into SQL with `fmt.Sprintf` or string concatenation; dynamic identifiers such as table and column names may only be chosen from an allowlist
+    level: hard
+    check: auto
+    how: gosec G201 and G202; review the source of identifiers in dynamic SQL
+    applies: [lang:go]
+    why: Concatenated SQL is a direct source of injection vulnerabilities; placeholders can only carry values, not identifiers, so identifiers need separate restriction.
+    sources: [S24]
+    see: ["25"]
+  - id: GO-035
+    title: Transactions are started with a ctx-aware `BeginTx`, immediately followed by `defer tx.Rollback(…)`, and the error returned by `Commit` is checked; all statements in the transaction run through tx
+    level: hard
+    check: semi
+    how: Review transaction code; integration tests cover rollback on mid-transaction errors and ctx cancellation
+    applies: [lang:go]
+    why: On an early return or panic, the deferred rollback ensures the connection does not go back to the pool with an unfinished transaction; if a commit failure is not checked, data that was never written is treated as written.
+    detail: |
+      - Calling Rollback after a successful commit is a no-op, so it is safe to defer. pgx's Rollback requires a ctx; when the request ctx is already canceled, use an independent ctx with a short timeout for cleanup.
+      - Executing a statement with `db` instead of `tx` inside a transaction lands on a different connection, outside the transaction.
+      - For how to draw transaction boundaries, isolation levels, and which errors can be retried as a whole, see 17.
+    sources: [S25]
+    see: ["17"]
+  - id: GO-036
+    title: Query result rows must be closed, and `rows.Err()` checked after iteration
+    level: hard
+    check: auto
+    how: Enable sqlclosecheck and rowserrcheck
+    applies: [lang:go]
+    why: Not closing holds the connection; network errors during iteration show up only in `rows.Err()`, so without the check a partial result is treated as complete.
+    sources: [S25]
+  - id: GO-037
+    title: Generated code (sqlc, OpenAPI, protobuf, mocks) is never edited by hand; after CI regenerates it, `git diff --exit-code` must show no diff
+    level: hard
+    check: auto
+    how: CI runs `go generate ./...` or `sqlc generate` with pinned generator versions, then `git diff --exit-code`
+    applies: [lang:go]
+    why: Hand edits are overwritten on the next generation; when generated output and sources disagree, what reviewers see is not the code that actually runs.
+    detail: Generated files must have `// Code generated … DO NOT EDIT.` in the header; linters use it to skip them.
+    sources: [S26]
+    see: ["COD-009"]
+  # ── Architecture and security ──
+  - id: GO-038
+    title: Write the dependency direction between packages into a go-arch-lint config and check it in CI; use depguard for specific packages that must not be imported; use `internal/` to control visibility
+    level: soft
+    check: auto
+    how: CI runs `go-arch-lint check`; enable depguard in golangci-lint
+    applies: [lang:go]
+    why: Dependency direction written only in docs erodes over time; only tool checks can block violations in the PR.
+    detail: Do not copy the "standard project layout" circulating in the community; it is not an official specification. Start with a simple structure following the official module layout guide.
+    sources: [S27, S28]
+    see: ["01"]
+  - id: GO-039
+    title: CI must run `govulncheck ./...` and fail when there are known vulnerabilities actually called by the code; run it again on the final commit before release
+    level: hard
+    check: auto
+    how: CI runs govulncheck and fails on non-zero exit; offline environments use an internally mirrored vulnerability database and record its update date
+    applies: [lang:go]
+    why: govulncheck uses the call graph to decide whether a vulnerability is reachable, producing fewer false positives than checking version numbers alone, so its result can serve directly as a gate.
+    detail: Vulnerabilities that appear only in dependencies and are not called by the code are listed separately and do not block, but upgrades must be scheduled. For scanning container images and system packages see 25.
+    sources: [S29]
+    see: ["25"]
+choices:
+  - category: Toolchain version
+    pick: The `go` and `toolchain` lines in go.mod + a build image pinned to a patch release
+    alternatives:
+      - { name: mise or asdf, when: One machine needs to manage versions for multiple languages }
+    avoid:
+      - { name: "Different versions in development, CI, and production", why: "Results are not reproducible, and patch releases include behavior fixes" }
+    sources: [S01, S02]
+  - category: Formatting
+    pick: gofmt + goimports (run via golangci-lint formatters)
+    alternatives:
+      - { name: gofumpt, when: "The team wants stricter uniform formatting and switches the whole repo at once" }
+    avoid:
+      - { name: Mixing different formatters in the same repository, why: "Formatting flips back and forth, producing meaningless diffs" }
+    license: gofmt ships with Go (BSD-3-Clause); gofumpt is BSD-3-Clause
+    sources: [S04, S30]
+  - category: lint
+    pick: golangci-lint v2, with the recommended set from GO-009
+    alternatives:
+      - { name: Running staticcheck and others individually, when: "Only a few checks are needed and you do not want an aggregator tool" }
+    avoid:
+      - { name: '`default: all` plus lots of nolint', why: False positives bury real problems }
+    license: golangci-lint and depguard are GPL-3.0; used as standalone tools run in CI, not linked into the product (policy in 27)
+    sources: [S05, S31]
+  - category: Vulnerability scanning
+    pick: govulncheck
+    alternatives:
+      - { name: "General-purpose scanners such as Trivy and Grype", when: "Container images and system packages also need scanning (see 25)" }
+    license: BSD-3-Clause
+    sources: [S29]
+  - category: HTTP routing
+    pick: ServeMux from the standard library net/http (supports methods and path parameters)
+    alternatives:
+      - { name: chi, when: "Route groups, subrouters, and many middlewares are needed; compatible with the standard `http.Handler`" }
+      - { name: Huma, when: "You want to generate OpenAPI from code and validate requests (API conventions in 16)" }
+    avoid:
+      - { name: Introducing a full-stack framework for a simple service, why: "An extra layer of abstraction and dependencies for little benefit" }
+    license: chi and Huma are both MIT
+    sources: [S32]
+  - category: PostgreSQL driver
+    pick: pgx/v5 + pgxpool
+    alternatives:
+      - { name: database/sql + the pgx stdlib adapter, when: "Working with libraries or ORMs that only support database/sql, or keeping the driver swappable" }
+    license: MIT
+    sources: [S33]
+  - category: SQL code generation
+    pick: 'sqlc (configured with `sql_package: "pgx/v5"`)'
+    when: Projects where SQL is the source of truth and queries are mostly fixed
+    alternatives:
+      - { name: Hand-written queries directly with pgx, when: "Very few queries, or lots of dynamic SQL" }
+      - { name: "ORMs such as GORM, Bun, Ent", when: "Mostly CRUD and the team already knows it; pay extra attention to the generated SQL" }
+    avoid:
+      - { name: "Layering sqlc, a large ORM, and a home-grown query wrapper", why: "Three styles coexist, each with different transaction and error handling" }
+    license: sqlc is MIT (the CLI runs only at development time, and generated code carries no runtime dependency)
+    sources: [S34, S35]
+  - category: Database migration tool
+    pick: goose
+    when: "For migration principles (fix forward, controlled release steps, not run at every instance startup) see 17"
+    alternatives:
+      - { name: golang-migrate, when: "The team already uses it, or only needs a lean command-line tool" }
+      - { name: Atlas, when: "You want declarative schema diffing and migration lint; first confirm which edition includes the features you need" }
+    avoid:
+      - { name: Hand-written DDL in application startup code, why: "Executed concurrently by multiple replicas, unrecorded, and unreviewable" }
+    license: goose and golang-migrate are MIT. The Atlas source repository is Apache-2.0, and the Community Edition is built from it, including diff, apply, and status for versioned migrations; the official Standard Edition binary is licensed under the Atlas MSA, and migrate down, checkpoints, migration lint, objects such as views and triggers, and some drivers and integrations are available only in the Standard Edition or the paid Pro
+    sources: [S36, S37, S38]
+  - category: Testing
+    pick: Standard library testing + go-cmp; testcontainers-go for integration tests
+    alternatives:
+      - { name: testify, when: "The team prefers an assertion library; use require rather than assert so failures stop immediately" }
+      - { name: go.uber.org/mock, when: "Interfaces have many methods and hand-written fakes are costly" }
+    avoid:
+      - { name: golang/mock, why: Archived }
+    license: go-cmp is BSD-3-Clause; testcontainers-go is MIT; go.uber.org/mock is Apache-2.0
+    sources: [S16, S17, S18, S20]
+  - category: Goroutine leak detection
+    pick: go.uber.org/goleak
+    license: MIT
+    sources: [S13]
+  - category: Bounded concurrency
+    pick: golang.org/x/sync/errgroup
+    alternatives:
+      - { name: golang.org/x/sync/semaphore, when: Weighted rate limiting is needed }
+    sources: [S14]
+  - category: Logging
+    pick: log/slog
+    alternatives:
+      - { name: zap, when: "Existing projects already use it; new code can use the slog interface with zap as the Handler" }
+    avoid:
+      - { name: Printf from the standard library log, why: "Unstructured, no levels" }
+    sources: [S21]
+  - category: Dependency injection
+    pick: Hand-written constructors in main or the composition root
+    alternatives:
+      - { name: Uber Fx, when: "Many components with complex startup and shutdown order" }
+    avoid:
+      - { name: google/wire, why: Archived }
+    license: Fx is MIT
+    sources: [S39]
+  - category: Architecture checks
+    pick: go-arch-lint
+    alternatives:
+      - { name: arch-go, when: "Besides dependency direction, rules on function size, naming, package contents, etc. also need checking" }
+      - { name: depguard, when: Only a few specific packages need to be forbidden from import }
+    license: go-arch-lint and arch-go are both MIT
+    sources: [S27, S40]
+antipatterns:
+  - { bad: 'go.mod states only `go 1.xx`, and CI builds with the `golang:latest` image', instead: Pin the toolchain patch release and the image digest }
+  - { bad: '`if err.Error() == "not found"`', instead: '`errors.Is(err, ErrNotFound)`' }
+  - { bad: 'Firing `go func() { … }()` in a handler to send email or write audit logs, still using the request ctx', instead: 'Enqueue it on a task queue; if it must run in-process, use `context.WithoutCancel` plus a timeout' }
+  - { bad: 'Shipping `http.ListenAndServe(":8080", mux)` straight to production', instead: 'Build your own `http.Server` with every timeout set' }
+  - { bad: "Logging the same error at every layer: Repository, Service, and Handler", instead: "Middle layers wrap with `%w` and pass it up; log once at the boundary" }
+  - { bad: "After upgrading from v1 to golangci-lint v2, keeping the old config and assuming all checks run because there are no errors", instead: "Run `golangci-lint migrate` first, then `config verify`" }
+  - { bad: Automatically running migrations at every service instance startup, instead: Run migrations as a separate release step (see 17) }
+sources:
+  - { id: S01, title: Go Release History (including the release support policy), url: "https://go.dev/doc/devel/release", publisher: Go, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: Go Toolchains, url: "https://go.dev/doc/toolchain", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: Go Modules Reference, url: "https://go.dev/ref/mod", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S04, title: "cmd/gofmt", url: "https://pkg.go.dev/cmd/gofmt", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "golangci-lint: Configuration File", url: "https://golangci-lint.run/docs/configuration/file/", publisher: golangci-lint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "golangci-lint: Command-Line Options", url: "https://golangci-lint.run/docs/configuration/cli/", publisher: golangci-lint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "cmd/vet", url: "https://pkg.go.dev/cmd/vet", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: Working with Errors in Go 1.13, url: "https://go.dev/blog/go1.13-errors", publisher: Go, date: 2019-10-17, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: errors package, url: "https://pkg.go.dev/errors", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: Go Code Review Comments, url: "https://go.dev/wiki/CodeReviewComments", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: context package, url: "https://pkg.go.dev/context", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Canceling in-progress database operations, url: "https://go.dev/doc/database/cancel-operations", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: uber-go/goleak, url: "https://github.com/uber-go/goleak", publisher: Uber, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S14, title: "golang.org/x/sync/errgroup", url: "https://pkg.go.dev/golang.org/x/sync/errgroup", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Data Race Detector, url: "https://go.dev/doc/articles/race_detector", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: google/go-cmp, url: "https://github.com/google/go-cmp", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: golang/mock (archived), url: "https://github.com/golang/mock", publisher: Go, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: uber-go/mock, url: "https://github.com/uber-go/mock", publisher: Uber, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S19, title: Go Fuzzing, url: "https://go.dev/doc/security/fuzz/", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: testcontainers-go, url: "https://github.com/testcontainers/testcontainers-go", publisher: Testcontainers, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "log/slog", url: "https://pkg.go.dev/log/slog", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "net/http", url: "https://pkg.go.dev/net/http", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "os/signal: NotifyContext", url: "https://pkg.go.dev/os/signal#NotifyContext", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "gosec: Go security checker", url: "https://github.com/securego/gosec", publisher: securego, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S25, title: Executing transactions, url: "https://go.dev/doc/database/execute-transactions", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "go command: Generate Go files by processing source", url: "https://pkg.go.dev/cmd/go#hdr-Generate_Go_files_by_processing_source", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: go-arch-lint, url: "https://github.com/fe3dback/go-arch-lint", publisher: fe3dback, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S28, title: Organizing a Go module, url: "https://go.dev/doc/modules/layout", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: Go Vulnerability Management, url: "https://go.dev/doc/security/vuln/", publisher: Go, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: mvdan/gofumpt, url: "https://github.com/mvdan/gofumpt", publisher: mvdan, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S31, title: golangci/golangci-lint (LICENSE), url: "https://github.com/golangci/golangci-lint", publisher: golangci, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: go-chi/chi, url: "https://github.com/go-chi/chi", publisher: go-chi, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: jackc/pgx, url: "https://github.com/jackc/pgx", publisher: jackc, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: "sqlc: Using Go and pgx", url: "https://docs.sqlc.dev/en/latest/guides/using-go-and-pgx.html", publisher: sqlc, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: sqlc-dev/sqlc (LICENSE), url: "https://github.com/sqlc-dev/sqlc", publisher: sqlc, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: pressly/goose, url: "https://github.com/pressly/goose", publisher: pressly, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: golang-migrate/migrate, url: "https://github.com/golang-migrate/migrate", publisher: golang-migrate, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S38, title: "Atlas: Community Edition", url: "https://atlasgo.io/community-edition", publisher: Ariga, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S39, title: uber-go/fx, url: "https://github.com/uber-go/fx", publisher: Uber, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S40, title: arch-go, url: "https://github.com/arch-go/arch-go", publisher: arch-go, date: null, kind: community, checked: 2026-11-14 }
+open_questions:
+  - "The specific terms of the Atlas MSA (redistribution, commercial use, whether an online login is required) have not been read in the original; confirm before using the Standard Edition in an offline environment"
+  - "Licenses and maintenance status of GORM, Bun, Ent, testify, and zap have not been verified in this topic"
+  - "google/wire was archived (around 2025-08); confirmed only from the repository's archived flag, the archive announcement was not checked"
+  - "The original report's claims about new Go version features (generic methods, encoding/json/v2, the goroutineleak profile becoming stable) have only one source, are unverified, and were not written into rules"
+  - "gosec rule IDs (G112, G114, G201, G202) follow the gosec repository and have not been rechecked one by one"
+  - "Research to add: availability of Go module proxies (such as goproxy.cn) on networks in mainland China, and private mirror options"
+  - "Research to add: dependency and release practices for CLIs (flag and cobra) and reusable SDKs"
+  - "Research to add: actual compatibility of \"PostgreSQL-compatible\" databases such as openGauss with pgx, sqlc, and goose"

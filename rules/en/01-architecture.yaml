@@ -1,0 +1,595 @@
+id: "01"
+slug: architecture
+title: Architecture and Design Principles
+summary: "How to choose a structure that is just enough for each type of project: the default starting point, when to split out services, module boundaries and dependency direction, data consistency and failure handling, extension points, multi-tenancy and on-premises delivery, and which architectural decisions need to be written down."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Choosing an architectural starting point by project type (CLI, backend service, web, client, data job)
+    - Modular monoliths and deciding when to split into services
+    - Module boundaries, dependency direction, and data ownership
+    - Design principles for transactions, outbox, idempotency, retries, timeouts, and concurrency conflicts
+    - Trade-offs of CQRS, event sourcing, Saga, and plugins
+    - Multi-tenancy models and architectural requirements for on-premises and offline delivery
+    - When an architecture decision record (ADR) is needed and what architecture diagrams should convey
+  excludes:
+    - { what: "How to write ADRs and architecture diagrams: templates, directories, and diagramming tools", see: "05" }
+    - { what: "Specific configuration of architecture checking tools for each language", see: "10-14" }
+    - { what: "API semantics of idempotency keys, error formats, event formats, and versioning", see: "16" }
+    - { what: "Database details of outbox tables, optimistic locking, transaction isolation levels, migrations, and row-level security", see: "17" }
+    - { what: "Selection of message queues, job schedulers, and workflow engines", see: "18" }
+    - { what: "Authorization models, tenant context, and the identity side of multi-tenant isolation", see: "19" }
+    - { what: "Security details for untrusted code execution and least-privilege credentials", see: "25" }
+    - { what: "SLOs, observability, backup and restore drills, offline installation and upgrades", see: "26" }
+    - { what: "Regulations such as cross-border data transfer and MLPS (Multi-Level Protection Scheme)", see: "27" }
+    - { what: "Cross-platform mobile architecture and offline sync", see: "28" }
+overview: |
+  1. **Choose the simplest structure that is sufficient; don't fix on one style.** A small CLI only needs clear modules and explicit inputs and outputs; a business backend of moderate complexity starts as a **modular monolith** by default; split into services only when you can show evidence of independent deployment, fault isolation, distinct resource curves, or compliance isolation. The modular monolith is the default candidate, not a law.
+  2. **Treat the three kinds of boundaries separately.** Business module boundaries, deployment boundaries, and trust and failure boundaries are three different things. Running a separate process to isolate untrusted code is a legitimate reason, but it does not mean splitting the business into microservices.
+  3. **Divide modules by business capability.** Don't slice the whole repository horizontally into controller/service/repository. A module exposes only its public interface; there are no cycles between modules; nobody imports another module's internals; only the module that owns a piece of data may change it. These are checked by tools in CI.
+  4. **Use a single-database transaction whenever you can.** When a database write and sending a message must be atomic, use a transactional outbox; design consumers for at-least-once delivery, and make them idempotent. An outbox is not end-to-end exactly-once, and it is not event sourcing.
+  5. **Network calls fail.** Every cross-process call has a timeout; a timeout is not a failure (the operation may have succeeded); retries are only for transient failures, with a cap, backoff, and jitter; non-idempotent external side effects are not retried automatically.
+  6. **Put checks where the write actually happens.** Authorization, tenant, business state, and expected version are validated at the write boundary; pre-checks, the UI, and prompts cannot replace this.
+  7. **Add patterns as needed.** CQRS starts with "separate read and write code in the same database"; event sourcing is only for subdomains where the events themselves are the facts; for a Saga, first write down the end states and compensations; don't build a plugin framework until there is a second real implementation.
+  8. **Multi-tenancy is a spectrum.** Choose shared tables, a database per tenant, or a separate deployment according to isolation requirements; with a shared instance, every layer (database, cache, index, files, jobs, exports) must be isolated and have cross-tenant negative tests. For on-premises customers, consider one deployment per customer first.
+  9. **Write an ADR for decisions that are hard to reverse.** New architectural patterns, service boundaries, message middleware, plugin systems, and similar need an ADR; small changes don't. See 05 for how to write one.
+  10. **Tools don't catch everything.** Static dependency checks can't see reflection, dynamic loading, cross-table SQL, or runtime message cycles; checkers need negative self-tests, and blind spots are covered by tests and review.
+rules:
+  # ── Choosing a structure ──
+  - id: ARC-001
+    title: State in the repository docs the project type, the architectural style adopted, the main modules and their owners, and which architecture rules do not apply and why
+    level: soft
+    check: manual
+    how: "During review, check that the architecture description exists and matches the code structure; any format is fine (a Markdown section, a YAML list)"
+    applies: [all]
+    why: Rules must be selected by project type; if the type and exceptions aren't written down, people and agents can only apply the web-service playbook to a CLI.
+    detail: |
+      - No specific file name or format is required; a section in `docs/architecture.md` is enough.
+      - If the team chooses a machine-readable list (for example, listing module paths and public paths), pair it with a validation that actually runs; otherwise it is just another document that will go stale.
+      - For a small tool, one or two sentences are enough; there is no need to fill out a directory structure for it.
+  - id: ARC-002
+    title: "Choose a starting point by project type: a small CLI uses clear modules with explicit inputs and outputs; a business backend of moderate complexity starts as a modular monolith by default"
+    level: soft
+    check: manual
+    how: During design review, check that it was compared against a simpler alternative
+    applies: [all]
+    why: Distribution brings network failures, contract compatibility, data consistency, and operational costs; without a clear benefit, those costs are paid for nothing.
+    detail: |
+      | Project type | Default starting point | When to add more complexity | Not needed by default |
+      |---|---|---|---|
+      | Small CLI / one-off tool | Clear packaging + explicit input/output boundaries | Multiple commands share complex business logic | Full DDD, event bus, Saga |
+      | Backend service / API | Modular monolith divided by business module, with simplified layering inside each module | Multiple teams releasing independently, isolation requirements, different scaling curves | Splitting into a dozen services from day one |
+      | Web application | Frontend and backend each divided into modules by feature | Separate frontend and backend teams, complex asynchronous flows | Global event-driven architecture, event sourcing |
+      | Mobile / desktop client | Feature modules + state + platform adaptation layer | Reuse across platforms, complex offline sync | Backend-style microservices (cross-platform details in 28) |
+      | Data processing job | Boundaries by stage + versioned inputs and outputs + re-runnable | Large data volumes, incremental processing, distributed execution | One service per transformation step |
+      | Agent runner | Control plane isolated from untrusted execution + state machine + persisted state | Long-running task recovery, multi-tenant resource isolation | One microservice per tool |
+    sources: [S01, S03]
+    see: ["28"]
+  - id: ARC-003
+    title: Before splitting out a separate service, write down the specific problem it solves and show that it can be deployed, rolled back, and scaled independently, with a data migration and cutback plan
+    level: soft
+    check: manual
+    how: The ADR or PR for the split answers the six questions below one by one; reviewers verify them
+    applies: [kind:service]
+    why: A service that can't be deployed and rolled back independently is just a "distributed monolith" — it has the coupling of a monolith plus the failures of a distributed system.
+    detail: |
+      1. **Problem**: What is the specific SLO, failure domain, regulatory isolation, independent release need, or resource-curve data? If you can't answer, keep refactoring modules inside the monolith.
+      2. **Stable boundary**: Are the owner, public interface or events, and data ownership clear? If not, refactor the boundary first.
+      3. **Truly independent**: Can it be deployed, rolled back, and scaled on its own? How is the downstream compatibility window maintained?
+      4. **Data migration**: How is write ownership transferred, how is dual writing avoided, and how are backfill and rollback done?
+      5. **Operational readiness**: Are distributed tracing, logging, timeouts, retries, and alert owners in place?
+      6. **Reversible**: Are there feature flags, canary traffic, failure cutback, and recovery drills?
+
+      Recommended path: clarify modules first → stabilize boundaries into public interfaces → split out a separate process or worker first → split into a service once the benefit is clear. For existing large systems, replace incrementally rather than doing a one-shot rewrite.
+      There is no universal threshold like "split once you exceed N lines of code or N people"; fixed numbers can only serve as reminders to re-evaluate.
+    sources: [S02, S03]
+  - id: ARC-004
+    title: Judge business module boundaries, deployment boundaries, and trust and failure boundaries separately; don't split the business into microservices just to isolate some piece of code
+    level: soft
+    check: manual
+    how: During design review, check that the architecture diagram marks the three kinds of boundaries separately
+    applies: [all]
+    why: Mixing the three leads to breaking up the whole business to isolate one sandbox, or conversely to assuming that splitting into services makes things secure.
+    detail: |
+      A system can simultaneously be "modular monolith + hexagonal inside modules + lightweight single-database CQRS + a few outbox events + a separate sandbox process"; these do not conflict.
+      A separate process is not a sandbox either: the isolation level (process, container, virtual machine), permission scope, and network and file restrictions must be designed separately; see 25 and 32.
+    see: ["25", "32"]
+
+  # ── Module boundaries and dependency direction ──
+  - id: ARC-005
+    title: Divide modules by business capability and reason for change, not by technical layers such as controller, service, and repository sliced across the whole repository
+    level: soft
+    check: manual
+    how: When reviewing a new module, check that it corresponds to one business capability and has a counterexample stating which requirement would prove the split wrong
+    applies: [all]
+    why: When slicing by technical layer, one business change touches every layer, and business boundaries are hidden by the directory structure.
+    detail: |
+      How to find boundaries:
+      1. List the core business actions (such as "place order" and "refund"), not `insertOrder`.
+      2. For each action, list the rules that must hold within the same transaction; these usually determine the transaction boundaries inside a module.
+      3. Assign which module is responsible for modifying each kind of data.
+      4. Look at reasons for change: things that always change together go together; things that change independently are separated.
+      5. Draw the module dependency graph and confirm there are no cycles.
+
+      A module can be layered internally. Illustration (not a mandatory cross-language structure):
+      ```text
+      src/
+        orders/
+          api/             # other modules may only use this
+          application/     # use cases, authorization and state checks, transaction coordination
+          domain/          # business rules, no dependency on the database or HTTP
+          infrastructure/  # adapters for the database and external systems
+        billing/
+          ...
+        main/              # program entry point and dependency wiring
+      ```
+    sources: [S04]
+  - id: ARC-006
+    title: In multi-module projects, compile-time dependencies between business modules must be acyclic, enforced in CI with a dependency checking tool
+    level: hard
+    check: auto
+    how: Use the architecture checking tool for your language (see the "Architecture boundary checks" choice) to detect module dependency cycles in CI; newly introduced cycles block merging
+    applies: [all]
+    why: Modules with cycles can't be understood, tested, or replaced on their own; a change in one place spreads along the cycle.
+    detail: |
+      - For existing projects, first record current violations as a baseline, block only new ones, and set a cleanup deadline for the baseline.
+      - Business cycles formed between modules via events are not in compile-time dependencies; handle them separately with state machines and protection against loops and replays.
+    sources: [S05]
+    see: ["10", "11", "12", "13", "14"]
+  - id: ARC-007
+    title: In multi-module projects, cross-module references may only use the other module's public interface and must not import its internal implementation
+    level: hard
+    check: auto
+    how: Register each module's public paths in the architecture checking tool; CI blocks references from other modules to non-public paths
+    applies: [all]
+    why: Importing internals creates invisible tight coupling; any refactoring by the other module can break you.
+    detail: Stable base types shared across modules (such as a user ID type) can go into a very small shared module; it must have an owner and must not become a "common utilities" dumping ground.
+    sources: [S05]
+    see: ["10", "11", "12", "13", "14"]
+  - id: ARC-008
+    title: Each business module states its owner, its public interface, and the data it owns
+    level: soft
+    check: semi
+    how: CODEOWNERS covers every module directory; during review, check that the module description lists its public interface and data
+    applies: [kind:service]
+    why: Without an owner and data ownership, boundaries rely on verbal agreements and will sooner or later be bypassed.
+    sources: [S03]
+  - id: ARC-009
+    title: A module's data is modified only by that module; other modules that need to change it go through its public entry point, and exceptions must be registered and approved
+    level: hard
+    check: semi
+    how: Partition database table access permissions or code-level data access groups by module, and scan for code that writes directly to another module's tables; exceptions are confirmed as registered during review
+    applies: [kind:service]
+    why: When multiple modules can change the same table directly, nobody can guarantee the business rules, and it can no longer be split apart.
+    detail: Multiple modules in the same monolith may share one physical database, but not "every module can change every table". Cross-module queries use the interface or read-only model provided by the other module.
+    sources: [S02, S03]
+    see: ["17"]
+  - id: ARC-010
+    title: Code declared as the core domain does not depend directly on HTTP, the database, UI frameworks, or external SDKs; these are connected through interfaces and adapters
+    level: soft
+    check: auto
+    how: In the architecture checking tool, forbid the core domain directories from importing these packages
+    applies: [all]
+    why: Once core business rules are separated from I/O, they can be tested without starting a database, and swapping external dependencies doesn't require changing the rules.
+    detail: Do this only for domains with complex rules that need long-term evolution. Simple CRUD can use the data access layer directly; there's no need to wrap every query in three to five layers of forwarding.
+    sources: [S04]
+  - id: ARC-011
+    title: "Architecture checkers need negative self-tests: deliberately violating samples must make the check fail, and path aliases, generated code, conditional compilation, and lazy imports must not be silently missed"
+    level: soft
+    check: auto
+    how: Keep a directory of violating samples in the repository; CI asserts that the checker reports errors on it and returns a non-zero exit code
+    applies: [all]
+    why: A misconfigured checker is always green, which is worse than no check, because everyone believes they are protected.
+    see: ["04"]
+  - id: ARC-012
+    title: Cover what static dependency checks can't reach (reflection, dynamic loading, cross-module table access in SQL, runtime message cycles) with negative tests, database permissions, and review
+    level: soft
+    check: semi
+    how: During review, list the dynamic mechanisms used in this project and confirm that each has a corresponding test or permission control
+    applies: [all]
+    why: Green CI only means the parts the checker can see are fine; it doesn't prove the architecture or permissions are correct.
+  - id: ARC-013
+    title: Exemptions from architecture rules must be registered with an ID, reason, owner, scope of impact, and expiry date; checkers must not be disabled or loosened to make CI pass
+    level: hard
+    check: semi
+    how: Put checker configuration files under CODEOWNERS; CI checks the format of the exemption list and reports errors on expired entries
+    applies: [all]
+    why: Turning off checks to turn CI green quietly abolishes the rule; exemptions without an expiry date stay forever.
+    detail: The person who modifies an exemption cannot also approve it; exemptions proposed by an agent must be approved by a human (see AGT-011). General principles for exemptions are in 02.
+    see: ["02", "AGT-011"]
+
+  # ── Consistency and failure handling ──
+  - id: ARC-014
+    title: Business rules that must hold together are validated and committed in the same transaction; where one transaction can't span the work, design an explicit compensation flow
+    level: hard
+    check: semi
+    how: Verify invariants with integration tests for concurrency and transaction rollback; during review, check that cross-store flows document their compensation
+    applies: [kind:service]
+    why: If you validate first and commit later without being in one transaction, the rule will be broken under concurrency.
+    sources: [S06, S13]
+    see: ["17"]
+  - id: ARC-015
+    title: "When a database write and sending a message must be atomic, use a transactional outbox: the business change and the pending record are committed in the same transaction; don't send the message directly after commit"
+    level: hard
+    check: semi
+    how: During review, look for code that "calls the message client directly after committing the transaction"; use fault injection to test a process crash after commit
+    applies: [kind:service]
+    why: With a direct dual write, a crash between the two writes loses events or emits events for rolled-back changes.
+    detail: |
+      - The outbox only needs to cover events that explicitly require reliable publishing, not every row change.
+      - The outbox doesn't guarantee exactly-once on the consumer side, nor global ordering; ordering is a requirement per business entity, which must be designed separately and tested for out-of-order delivery.
+      - The outbox is not event sourcing.
+      - For stores that support change data capture (CDC), it can be used instead of an outbox table.
+      - Table structure and relay implementation are in 17; messaging components are in 18.
+    sources: [S06]
+    see: ["17", "18"]
+  - id: ARC-016
+    title: "At-least-once consumers must be idempotent: deduplication is persisted, and the deduplication record is committed in the same transaction as the local side effects"
+    level: hard
+    check: semi
+    how: Test with duplicate delivery and replay to verify that processing the same message twice gives the same result
+    applies: [kind:service]
+    why: Messaging systems and outbox relays both redeliver; non-idempotent consumers will charge twice or ship twice.
+    detail: |
+      - The criterion for successful consumption is "the side effect is persisted and the deduplication record is written", not receiving HTTP 200.
+      - When the side effect is a third-party API, the other side must also support idempotency keys, or there must be business reconciliation.
+      - API-level idempotency key semantics (how to report an error for the same key with a different request body) are in 16.
+    sources: [S06]
+    see: ["16", "18"]
+  - id: ARC-017
+    title: "Cross-process calls must set a timeout and document the failure semantics: after a timeout the result is unknown (it may have succeeded), and whether it can be retried"
+    level: hard
+    check: semi
+    how: Review whether all call wrappers have timeouts; use fault tests to simulate the case where the other side actually succeeded after a timeout
+    applies: [kind:service]
+    why: Without timeouts, threads and connections are exhausted; treating a timeout as a failure and redoing the work repeats operations that already succeeded.
+    sources: [S02]
+  - id: ARC-018
+    title: Automatic retries are only for transient failures and must have a retry cap, exponential backoff, and random jitter; external side effects without an idempotency guarantee or a reconciliation mechanism are not retried automatically
+    level: hard
+    check: semi
+    how: Check that all retry configurations have caps and backoff; during review, confirm that the retried operation is idempotent
+    applies: [kind:service]
+    why: Unbounded retries amplify traffic during an outage and cause cascading failures; retrying non-idempotent operations produces duplicate side effects.
+    detail: After retries are exhausted, move to quarantine or manual handling; don't drop silently (see ARC-022). The specific count and intervals depend on the dependency's recovery time and your own SLO; there is no universal value.
+    see: ["02", "18"]
+  - id: ARC-019
+    title: Concurrent modification of shared state must use version numbers, locks, or an equivalent mechanism; on conflict, return a recognizable error rather than silently overwriting
+    level: hard
+    check: semi
+    how: Use concurrent update tests to verify that when two modifications happen at once, one side receives a conflict error
+    applies: [kind:service]
+    why: A later write overwriting an earlier one silently discards someone else's change, which is hard to notice afterward.
+    detail: Pay special attention when people and automated programs (including agents) change the same object at the same time. Database details of optimistic locking and isolation levels are in 17.
+    see: ["17"]
+  - id: ARC-020
+    title: Authorization, tenant scope, business state, and expected version are validated where the data is actually written; pre-checks, the UI, HTTP middleware, or prompts cannot replace this
+    level: hard
+    check: semi
+    how: Write negative tests that bypass the frontend and middleware and directly call background jobs, message consumers, or internal interfaces, and confirm they are rejected
+    applies: [kind:service]
+    why: State may have changed between approval and commit; if you only intercept at the entry point, background jobs and internal calls become bypasses.
+    detail: |
+      - "Making the decision" (who can do what) can be centralized, but "enforcing the check" must happen on every path that actually writes: APIs, background jobs, workers, batch processing, agent tools.
+      - Results of pre-checks don't stay valid for long; re-check the necessary rules and versions when committing the transaction.
+      - For things like budgets and quotas that are reserved first and settled later, define end states for reservation, settlement, refund, and timeout, and make them idempotent.
+      - The authorization model is in 19.
+    see: ["19"]
+  - id: ARC-021
+    title: A unified command or authorization entry point is responsible only for decisions and common records; business state transitions are still executed by the owning module, and it must not become a central service through which every database write passes
+    level: soft
+    check: manual
+    how: During review, check whether the unified entry point operates directly on other modules' tables
+    applies: [kind:service]
+    why: When all reads and writes go through one center, it becomes a throughput bottleneck and business knowledge leaks into it.
+    detail: What is unified is the log fields, evidence format, and authorization contract, not the write implementation of every business. Routine database maintenance, bulk fixes, and read-only queries also don't need to go through the same command flow.
+  - id: ARC-022
+    title: "Event processing failures must be visible: they go to a dead-letter or failure queue, are monitored, and can be replayed or fixed manually; they must not be silently dropped"
+    level: hard
+    check: semi
+    how: Rehearse a consumer failure and confirm that the message goes to the failure queue, triggers an alert, and can be replayed
+    applies: [kind:service]
+    why: Silently dropped events make downstream data quietly inconsistent, often discovered only much later.
+    detail: "Signals worth monitoring include: the age of the oldest unpublished record, outbox backlog, retry and failure rates, consumer lag, and unprocessed dead-letter volume. Thresholds are set by the project's SLO; there is no universal value."
+    sources: [S06, S13]
+    see: ["18", "26"]
+  - id: ARC-023
+    title: "Failure paths on core flows have executable tests: lost response after commit, unknown result after timeout, duplicates, out-of-order delivery, process restart, replay"
+    level: soft
+    check: semi
+    how: During review, check the test cases for core flows against this list
+    applies: [kind:service]
+    why: If you only test the happy path, none of the distributed failures will have been seen before they hit.
+    see: ["04"]
+  - id: ARC-024
+    title: Distinguish business state, audit records, external integration events, and operational events, and set retention periods, access permissions, and evolution rules for each
+    level: soft
+    check: manual
+    how: During design review, check that the purpose and retention policy of each kind of event are documented
+    applies: [kind:service]
+    why: Calling everything an "event" and putting it in one table for indiscriminate replay ends up treating audit records as business facts, or exposing internal events as external contracts.
+    detail: Immutable audit or event sequences may conflict with data retention periods and with deletion and correction obligations; design for this in advance according to data classification (see 27). Event formats and versioning are in 16.
+    see: ["16", "27"]
+
+  # ── Pattern trade-offs ──
+  - id: ARC-025
+    title: "Start CQRS lightweight: first separate read and write code within the same database; adopt a separate read store and asynchronous projections only when measured data proves the need"
+    level: soft
+    check: manual
+    how: The ADR introducing a separate read store includes load or query performance data
+    applies: [kind:service]
+    why: Dual stores bring eventual consistency and projection maintenance costs, which aren't worth it for simple scenarios.
+    sources: [S07]
+  - id: ARC-026
+    title: Event sourcing is used only for subdomains where the event sequence itself is the source of truth, not adopted for auditing or activity logs
+    level: soft
+    check: manual
+    how: The ADR adopting event sourcing explains why a state table plus an audit log is not enough
+    applies: [kind:service]
+    why: Event sourcing is costly in format evolution, replay, snapshots, and privacy deletion; for auditing, a state table plus an audit log plus an outbox is enough.
+    sources: [S08]
+  - id: ARC-027
+    title: Before using a Saga for a long-running cross-service flow, write down each step's end state, timeout, compensation, non-compensable states, and manual recovery procedure
+    level: soft
+    check: manual
+    how: During review, check that the Saga design covers these five items
+    applies: [kind:service]
+    why: A Saga has no transaction isolation, and compensation is a new business operation rather than an undo (voiding an authorization and issuing a refund are different things); if these aren't written down, the flow gets stuck in intermediate states.
+    detail: First consider whether the participants can be narrowed down to a single transaction. Selection of orchestration frameworks and workflow engines is in 18; don't write your own.
+    sources: [S13]
+    see: ["18"]
+  - id: ARC-028
+    title: "Extension points grow incrementally as needed: with one implementation, call it directly; extract an interface and adapters once there is a second real implementation; build an isolated plugin mechanism only when there is a real third-party ecosystem"
+    level: soft
+    check: manual
+    how: When adding an extension point or plugin mechanism, confirm during review that a second implementation or a clear third-party need already exists
+    applies: [all]
+    why: A general plugin framework built in advance brings security, compatibility, and upgrade burdens, and the anticipated changes often never come.
+    detail: |
+      Before building a plugin mechanism, answer: Who will actually replace it? Which resources can plugins touch, and who reviews permissions? Can a failing plugin crash the main process? How are plugins distributed and revoked in offline environments? How is the interface versioned?
+      When two modules merely have similar names but different semantics, don't force them into one big interface for the sake of reuse.
+    sources: [S04]
+  - id: ARC-029
+    title: "Untrusted code and third-party plugins don't share permissions with core services: run them in an isolated process or sandbox and give them only minimally scoped, time-limited credentials"
+    level: hard
+    check: semi
+    how: Review the permission configuration of the execution environment; use privilege escalation and escape tests to verify that plugins can't obtain core services' credentials and data
+    applies: [all]
+    why: With shared permissions, a single malicious or vulnerable plugin can take over the whole system.
+    see: ["25", "32"]
+
+  # ── Multi-tenancy and on-premises ──
+  - id: ARC-030
+    title: Choose the tenancy model (shared tables, schema per tenant, database per tenant, separate deployment per tenant, or hybrid) according to isolation requirements and record it in an ADR; for on-premises intranet customers, evaluate one deployment per customer first
+    level: soft
+    check: manual
+    how: Review whether the tenancy model ADR compares isolation strength, cost, and operational overhead
+    applies: [kind:service, kind:onprem]
+    why: Isolation is a spectrum and no single model suits every customer; forcing SaaS multi-tenancy onto on-premises customers is buying complexity you can't use.
+    detail: A separate deployment per customer doesn't make the customer's internal department and project permission issues disappear; these must still be modeled separately (see 19).
+    sources: [S09]
+    see: ["19"]
+  - id: ARC-031
+    title: In shared-instance multi-tenant systems, the tenant identifier must come from a trusted identity context, isolation must cover the database, cache keys, search indexes, object storage, job payloads, events, and exports, and there must be cross-tenant negative tests
+    level: hard
+    check: semi
+    how: "Cross-tenant matrix tests: use tenant A's identity to access tenant B's data, covering APIs, background jobs, caches, and exports; all must fail"
+    applies: [kind:service]
+    why: If you only filter by tenant_id at the API layer, a gap anywhere in caches, indexes, or background jobs leaks data across tenants, resulting in a data breach.
+    detail: |
+      Database row-level security (RLS) is only one line of defense: in PostgreSQL, superusers and roles with the BYPASSRLS attribute can always bypass it, and table owners bypass it by default (you can use `FORCE ROW LEVEL SECURITY` to make owners subject to it too); with connection pool reuse, tenant context may linger. Specific practices are in 17 and 19.
+    sources: [S09, S10]
+    see: ["17", "19"]
+  - id: ARC-032
+    title: Products promising offline or intranet delivery must complete installation, startup, core functionality, and upgrade/rollback tests in an environment without internet access; at runtime they must not depend on online CDNs, online license verification, or online downloads
+    level: hard
+    check: auto
+    how: In CI or the release process, run smoke tests in a disconnected environment (such as a network namespace without internet access) and record outbound requests
+    applies: [kind:onprem]
+    why: Hidden network dependencies (fonts, icons, certificates, models, drivers) directly break functionality inside a customer's intranet.
+    detail: Remote telemetry is off by default; calling external models, APIs, or plugins requires administrator authorization. Being technically offline is not the same as legal compliance; regulations are in 27, and the offline installation and upgrade process is in 26.
+    see: ["26", "27"]
+  - id: ARC-033
+    title: When adding a dependency or extension point, state the real need, the license, and the impact on offline delivery
+    level: soft
+    check: semi
+    how: During review, look at changes to the dependency list; license scanning follows the criteria in 27
+    applies: [all]
+    why: Every dependency is a long-term maintenance, licensing, and delivery cost, and this is even more pronounced in on-premises scenarios.
+    see: ["27"]
+
+  # ── Decisions and communication ──
+  - id: ARC-034
+    title: Introducing a new architectural pattern, service boundary, message middleware, event store, plugin mechanism, or tenancy model requires an approved ADR; small changes that don't affect structure don't need one
+    level: hard
+    check: manual
+    how: During review, check whether the PR is one of the changes above; if so, it must link to an accepted ADR
+    applies: [all]
+    why: These decisions affect system structure or quality attributes and are hard to reverse; if the reasoning isn't recorded, later people can only guess or repeat the debate.
+    detail: |
+      - Write ADRs only for decisions that affect structure or key quality attributes, or are hard to reverse.
+      - Accepted ADRs are not rewritten; when a decision changes, write a new ADR that supersedes the old one, and link them to each other.
+      - Record the alternatives considered, the costs, the triggers for revisiting, and how confident the decision is.
+      - Templates, directories, and status transitions are in 05.
+    sources: [S12]
+    see: ["05"]
+  - id: ARC-035
+    title: "Set design depth for architecture changes by risk: R0–R1 just do it; R2 writes a brief plan; R3 writes an ADR reviewed by someone other than the author"
+    level: soft
+    check: manual
+    how: Mark the risk level in the PR; spot-check during review
+    applies: [all]
+    why: Putting every change through a heavy process slows down small changes, while writing no plan for any change lets large changes get out of control.
+    detail: |
+      R3 examples: splitting or merging services, changing data ownership, introducing message middleware or a workflow engine, changing the tenancy model, irreversible data migrations, changing trust boundaries.
+      R2 examples: adding a module, adding a cross-module interface, adding an asynchronous event.
+      Level definitions and testing requirements are in 04; a change author may only raise the level, and when unsure, use the higher one.
+    see: ["04", "AGT-017"]
+  - id: ARC-036
+    title: Maintain at least a system context diagram and a container diagram, with diagram sources in version control, showing dependency direction, sync or async, and trust boundaries
+    level: soft
+    check: semi
+    how: CI validates the syntax of text diagram sources; during review, check the diagrams against the module list for staleness
+    applies: [kind:service]
+    why: For most teams, a context diagram plus a container diagram is enough; hand-edited images drift from the code and then nobody trusts them.
+    detail: |
+      - A "container" here is a separately runnable or deployable unit in C4, not a Docker container.
+      - Component diagrams are needed only inside complex containers; sequence diagrams are drawn only for critical flows such as high-risk commands, long-running cross-process tasks, commits, and compensation.
+      - Don't mix dependency direction and data flow direction in one drawing; if you do, label it.
+      - Diagramming tools and conventions are in 05.
+    sources: [S11]
+    see: ["05"]
+  - id: ARC-037
+    title: Quality targets such as performance, availability, and recovery time are written as measurable metrics with owners, and continuously verified by tests or monitoring
+    level: soft
+    check: semi
+    how: During review, check that each quality target has a corresponding test or monitoring item
+    applies: [kind:service]
+    why: Quality targets that can't be measured can't be accepted, so they can't be used to judge whether the architecture is still fit.
+    detail: Use trends such as the number of release coordinations, cross-boundary change rate, and rollback cost to judge whether the architecture is degrading; don't score it by number of services or lines of code. How to set SLOs is in 26.
+    see: ["26"]
+  - id: ARC-038
+    title: When changing a module's public interface or event structure, run the affected downstream contract tests and state the compatibility window
+    level: soft
+    check: auto
+    how: CI identifies downstream modules from the changed paths and runs their contract tests
+    applies: [kind:service]
+    why: The value of module boundaries is that downstream isn't affected by internal changes; if the interface changes and downstream isn't tested, the boundary is meaningless.
+    see: ["04", "16"]
+  - id: ARC-039
+    title: Read the relevant ADRs and module public interfaces before changing code; when a change conflicts with an accepted ADR, or can't be verified with the required checks, stop and report
+    level: soft
+    check: manual
+    how: During review, check whether the agent's delivery notes cite the relevant ADRs and whether conflicts were reported
+    applies: [kind:agent]
+    why: If an agent picks its own interpretation and bypasses an existing decision, problems can't be traced back.
+    see: ["AGT-019"]
+  - id: ARC-040
+    title: Periodic architecture reviews (by people or tools) only produce reports or suggested PRs; they don't perform large-scale refactoring automatically
+    level: soft
+    check: manual
+    how: The review tool's permissions go no further than opening PRs; during review, check the scope of each individual PR
+    applies: [all]
+    why: Rules produce false positives and tools lack context; automated large changes easily cause widespread regressions.
+    detail: "Suggested process: propose → assess impact → human approval → change in small, reversible steps."
+    see: ["AGT-031"]
+
+choices:
+  - category: Project structure starting point
+    pick: For business backends, a modular monolith (divided by business module, with simplified layering inside each module)
+    when: Business systems of moderate complexity maintained by one or a few teams
+    alternatives:
+      - { name: "Simple modules + explicit input/output boundaries", when: "Small CLIs, scripts, one-off tools" }
+      - { name: "Modular monolith + a few separate workers or processes", when: "Background jobs with different resource curves, or a need to isolate untrusted code" }
+      - { name: "A small number of coarse-grained services", when: "You can show evidence of independent release, fault isolation, or compliance isolation (see ARC-003)" }
+    avoid:
+      - { name: "Starting with microservices from day one", why: "Paying distributed-system costs with no clear benefit" }
+      - { name: "One service per module", why: "Frequent calls and fake independence turn it into a distributed monolith" }
+    sources: [S01, S02, S03]
+  - category: Dependency direction within a module
+    pick: "For complex domains, hexagonal (ports and adapters): business rules don't depend on I/O"
+    when: Many rules, external dependencies that may be replaced, a need to test without starting a database
+    alternatives:
+      - { name: "Traditional layering + clear module boundaries", when: "CRUD with few rules" }
+    avoid:
+      - { name: "Extracting an interface for every function", why: "With only one implementation it just adds mapping code, with no isolation benefit" }
+    sources: [S04]
+  - category: Read/write model
+    pick: Single database, single model; when reads and writes differ greatly, separate read and write code within the same database (lightweight CQRS)
+    alternatives:
+      - { name: "Separate read store + asynchronous projections", when: "Measured data proves the single database can't cope" }
+    avoid:
+      - { name: "Adopting dual databases without metrics", why: "Paying eventual consistency and projection maintenance costs for nothing" }
+    sources: [S07]
+  - category: Reliable asynchronous integration
+    pick: Transactional outbox + idempotent consumers
+    alternatives:
+      - { name: "Change data capture (CDC)", when: "The store supports it natively and you don't want to maintain an outbox table" }
+      - { name: "Reliable job table within a single database", when: "Only for asynchronous jobs within the same process" }
+    avoid:
+      - { name: "Sending the message directly after committing the transaction", why: "A crash in between loses the event" }
+      - { name: "Writing your own message middleware or distributed transaction engine", why: "Persistence, retries, timing, and monitoring are easy to get wrong; see 18 for selection" }
+    sources: [S06]
+  - category: Long-running cross-service flows
+    pick: First narrow the boundary to fit in a single-database transaction; if that's not possible, use a state machine + Saga
+    notes: For orchestration frameworks and workflow engines see 18; don't write your own.
+    avoid:
+      - { name: "Assuming cross-service flows have single-database transaction guarantees", why: "There is no isolation, and intermediate states are externally visible" }
+    sources: [S13]
+  - category: Need to trace history
+    pick: State table + audit log + outbox
+    alternatives:
+      - { name: "Event sourcing", when: "Only for subdomains where the event sequence itself is the source of business truth" }
+    avoid:
+      - { name: "Treating a change log as event sourcing", why: "The source of truth and replay capability don't match" }
+    sources: [S08]
+  - category: Multi-tenancy model
+    pick: "Choose by isolation requirements: shared tables, schema per tenant, database per tenant, or separate deployment; these can be mixed"
+    alternatives:
+      - { name: "A separate deployment per customer", when: "On-premises intranet customers, strict regulatory isolation requirements" }
+    avoid:
+      - { name: "Relying only on tenant_id filtering at the API layer", why: "A gap in any layer — cache, index, jobs, exports — leaks data across tenants" }
+      - { name: "Pre-building a complex tenant control plane without offering SaaS", why: "Buying complexity you can't use" }
+    sources: [S09]
+  - category: Architecture boundary checks
+    pick: Pick an existing architecture checking tool for your language and check module dependency cycles and cross-module references in CI; specific tools and configuration are in 10–14
+    alternatives:
+      - { name: dependency-cruiser, when: "TypeScript / JavaScript (see 10)" }
+      - { name: go-arch-lint or arch-go, when: "Go (see 11; 11 picks one of the two)" }
+      - { name: Import Linter, when: "Python (see 12)" }
+      - { name: "Visibility control + cargo metadata + targeted tests", when: "Rust, no unified tool (see 13)" }
+      - { name: "ArchUnit; Spring Modulith for Spring projects", when: "Java / Kotlin (see 14)" }
+      - { name: Packwerk, when: Ruby / Rails }
+      - { name: Deptrac, when: PHP }
+      - { name: ArchUnitNET or hand-written architecture tests, when: "C# / .NET (current status not verified)" }
+    avoid:
+      - { name: "Writing your own script to parse imports", why: "Path aliases, generated code, and conditional compilation are easily missed; existing tools already handle them" }
+      - { name: "Relying only on verbal gatekeeping in review", why: "Boundaries get bypassed bit by bit when nobody is watching" }
+    notes: Tool versions, licenses, and configuration examples are maintained by each language topic.
+    sources: [S05]
+
+antipatterns:
+  - { bad: "Slicing the whole project into controller/service/repository, with all business logic sharing one service layer", instead: "Divide by business module first, then layer inside each module" }
+  - { bad: "A modular monolith means putting all code in one package that references itself freely", instead: "Public interfaces + internal implementation + acyclic dependencies + CI checks" }
+  - { bad: "Splitting into microservices to fix a team's lack of module discipline", instead: "First clarify data and code ownership inside the monolith" }
+  - { bad: "Each service has its own database, yet they write to each other's tables or run cross-database joins", instead: "The data owner provides an interface or read-only model" }
+  - { bad: "Sending a message immediately after the database commit succeeds, with no persistent coordination", instead: "Transactional outbox or CDC" }
+  - { bad: "Describing an outbox as exactly-once", instead: "Idempotent consumers, deduplication, retries, and reconciliation" }
+  - { bad: "Using dual-database CQRS + event sourcing + Saga for simple CRUD", instead: "Single-database reads and writes, with local read models" }
+  - { bad: "Building a universal plugin framework first", instead: "Extract an interface after there are two real implementations" }
+  - { bad: "Assuming isolation because the database has tenant_id or RLS is enabled", instead: "Multi-layer isolation + cross-tenant negative tests" }
+  - { bad: "Treating a timeout as a failure and redoing the operation immediately", instead: "Treat a timeout as an unknown result; confirm with an idempotency key or a query before acting" }
+  - { bad: "The architecture diagram is a single hand-edited screenshot", instead: "Text diagram sources in version control, cross-checked against dependency checks" }
+  - { bad: "Scoring the architecture by number of services, lines of code, or function length", instead: "Look at trends in change coupling, release coordination cost, failure domains, and rollback cost" }
+  - { bad: "Assuming permissions and architecture are fine because CI is green", instead: "Cover blind spots with negative tests, runtime verification, audits, and human review" }
+  - { bad: "Turning off the architecture checker to make CI pass", instead: "Register an exemption with an expiry date, approved by someone else" }
+
+sources:
+  - { id: S01, title: Monolith First, url: "https://martinfowler.com/bliki/MonolithFirst.html", publisher: Martin Fowler, date: 2015-06-03, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: Microservice Trade-Offs, url: "https://martinfowler.com/articles/microservice-trade-offs.html", publisher: Martin Fowler, date: 2015-07-01, kind: community, checked: 2026-11-13 }
+  - { id: S03, title: Microservices architecture style, url: "https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/microservices", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S04, title: Hexagonal architecture pattern, url: "https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/hexagonal-architecture.html", publisher: AWS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "Spring Modulith: Verifying application module structure", url: "https://docs.spring.io/spring-modulith/reference/verification.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: Transactional outbox pattern, url: "https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html", publisher: AWS, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: CQRS pattern, url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: Event Sourcing pattern, url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: Tenancy models for a multitenant solution, url: "https://learn.microsoft.com/en-us/azure/architecture/guide/multitenant/considerations/tenancy-models", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "PostgreSQL: Row Security Policies", url: "https://www.postgresql.org/docs/current/ddl-rowsecurity.html", publisher: PostgreSQL, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: C4 model diagrams, url: "https://c4model.com/diagrams", publisher: Simon Brown, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S12, title: Architecture decision record, url: "https://learn.microsoft.com/en-us/azure/well-architected/architect-role/architecture-decision-record", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: Saga patterns, url: "https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/saga-patterns.html", publisher: AWS, date: null, kind: official, checked: 2026-11-13 }
+
+open_questions:
+  - "The case cited in the report of \"a Swedish fintech company's monolith + 78 microservices technical debt\" (attributed to Journal of Systems and Software, 2026, vol. 237) could not be found online and is no longer used as a source for any rule; if it is to be cited, first confirm that the paper exists and what it concludes"
+  - "Retry backoff and jitter currently have no official source attached; a primary source is still needed (such as cloud providers' engineering articles on timeouts, retries, and backoff)"
+  - "The licenses and maintenance status of the architecture checking tools (dependency-cruiser, Import Linter, go-arch-lint, arch-go, ArchUnit, Spring Modulith, Packwerk, Deptrac) have not been verified in this topic; each of 10–14 verifies its own"
+  - "The maintenance status and repository state of ArchUnitNET have not been verified; there is currently no language topic covering .NET"
+  - "Research pending: a minimal boundary-check configuration example for each language (\"no imports outside public paths\", \"core domain may not import database packages\"), to be placed in 10–14"
+  - "Research pending: for Go, which of go-arch-lint and arch-go to choose and why (aligned with 11)"
+  - "Research pending: dependency rule tools for the frontend (feature-based boundary checks, such as ESLint boundary plugins and Nx module boundary rules), Kotlin, and Swift"
+  - "Research pending: criteria for choosing how modules communicate (synchronous calls, in-process events, persisted events)"
+  - "Research pending: the detailed architecture guidance for mobile and desktop clients, data processing jobs, and CLIs is currently only a one-line summary"
+  - "Research pending: primary sources on domain-driven design and architecture fitness functions (this part of the report cited only the AWS hexagonal guide)"
+  - "The report's content on mainland China cross-border data transfer and MLPS has been moved to 27; this topic keeps only the technical requirements verifiable offline"

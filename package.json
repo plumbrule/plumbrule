@@ -6,7 +6,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "check": "node tools/check.ts",
+    "check": "node tools/check.ts && node tools/check-i18n.ts",
     "gen:skill": "node tools/gen-skill.ts",
     "pack:cli": "pnpm gen:skill && rm -rf cli/skill && cp -r dist/skill cli/skill && cd cli && npm pack --pack-destination ../dist",
     "dev": "astro dev",

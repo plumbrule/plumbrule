@@ -1,0 +1,185 @@
+---
+// 安装页：三种安装方式（页签）+ 按项目情况生成 AGENTS.md 片段。
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { browserData, getLang, getSite } from '../lib/site.ts';
+import { config } from '../../tools/lib.ts';
+
+const lang = getLang(Astro.url.pathname);
+const site = getSite(lang);
+const data = browserData(lang);
+const scopes = Object.entries(site.vocab['适用范围'] as Record<string, string>).filter(([k]) => k !== 'all');
+const preset = new Set(['lang:go', 'kind:service', 'kind:agent']);
+const zip = `/downloads/plumbrule-skill-${config.version}.zip`;
+const c = lang === 'en' ? {
+  title: 'Install for your agent',
+  description: "Install Plumbrule as a skill for Claude Code, Codex, and other coding agents, and generate the rules for a project's AGENTS.md.",
+  lede: "Plumbrule is published as a skill (the open Agent Skills format). Once installed, the agent looks up the relevant topic when writing code; your project's own conventions take precedence.",
+  tabs: [{ id: 'quick', label: 'One command' }, { id: 'offline', label: 'Offline install' }, { id: 'manual', label: 'Manual copy' }],
+  quickNode: 'Requires Node.js 18 or later. By default it installs into the user directories for Claude Code and Codex:',
+  quickComment: '# Install only one: --agent claude or --agent codex; install into the current project: --project',
+  agent: 'Agent', userDir: 'User directory', projectDir: 'Project directory',
+  quickAfter: 'Restart the agent after installation. For other tools that support Agent Skills, copy the skill folder into their skills directory. Uninstall:',
+  offlineLead: 'For an intranet or air-gapped environment, download the package on a machine with internet access, copy it inside, and install without any network access.',
+  onlineMachine: '# Machine with internet access', offlineMachine: '# Machine without internet access',
+  offlineAlt: 'You can also download', offlineAltAfter: 'and extract it into the skills directory. Checksum:',
+  manualLead: "If you prefer not to use the command line, download", manualAfter: ', extract it, and put the',
+  manualAfter2: 'folder into any directory in the table above.',
+  genTitle: "Generate the rules for a project's AGENTS.md",
+  genLead: "Select the languages and platforms your project uses to generate an index of applicable topics. Copy it into the AGENTS.md at the repository root. Keep the entry file short; the agent will look up specific rules through the skill. Choose “List every rule” only when the rules really must be written into the repository one by one.",
+  project: 'Project profile', listEvery: 'List every hard constraint (long)', includeSoft: 'Also include soft guidance (marked “Recommended”)',
+  previewLabel: 'Generated AGENTS.md snippet', copy: 'Copy', copied: 'Copied', copyFailed: 'The browser blocked clipboard access. Select the text above and copy it manually.',
+  cli: 'Command-line equivalent:', status: '{topics} topics, {count} rules', ariaTabs: 'Installation methods', ariaProject: 'Project profile',
+} : {
+  title: '装到你的 Agent',
+  description: '把准绳作为技能装到 Claude Code、Codex 等编码 Agent，并为项目生成 AGENTS.md 里的规则。',
+  lede: '准绳以技能（Agent Skills 开放格式）发布。装好后，Agent 写代码时会按需查对应主题的规则；项目自己的规范优先。',
+  tabs: [{ id: 'quick', label: '一条命令' }, { id: 'offline', label: '离线安装' }, { id: 'manual', label: '手动复制' }],
+  quickNode: '需要 Node.js 18 或更新版本。默认装到 Claude Code 和 Codex 的用户目录：',
+  quickComment: '# 只装一个：--agent claude 或 --agent codex；装到当前项目：--project',
+  agent: 'Agent', userDir: '用户级目录', projectDir: '项目级目录',
+  quickAfter: '装完重启 Agent。其他支持 Agent Skills 的工具：把技能文件夹复制到它的技能目录即可。卸载：',
+  offlineLead: '内网或断网环境：在能联网的机器上下载安装包，拷进内网后安装，全程不访问网络。',
+  onlineMachine: '# 联网机器', offlineMachine: '# 内网机器',
+  offlineAlt: '也可以直接下载', offlineAltAfter: '，解压到技能目录。校验值：',
+  manualLead: '不想用命令行：下载', manualAfter: '，解压后把', manualAfter2: '文件夹放进上面表格里的任一目录。',
+  genTitle: '为项目生成 AGENTS.md 里的规则',
+  genLead: '选上项目用到的语言和端，生成一段适用主题的索引，复制后合并进仓库根目录的 AGENTS.md。入口文件要短，Agent 会通过技能按需查具体规则；确实要把规则逐条写进仓库时再选「逐条列出」。',
+  project: '项目情况', listEvery: '逐条列出硬约束（会很长）', includeSoft: '同时包含软指导（标「建议」）',
+  previewLabel: '生成的 AGENTS.md 片段', copy: '复制', copied: '已复制', copyFailed: '浏览器不允许写剪贴板，请手动选中上面的文字复制',
+  cli: '命令行等价：', status: '{topics} 个主题，{count} 条规则', ariaTabs: '安装方式', ariaProject: '项目情况',
+};
+---
+<StarlightPage frontmatter={{ title: c.title, description: c.description, template: 'splash' }}>
+  <p class="lede">{c.lede}</p>
+
+  <div class="not-content">
+    <div role="tablist" aria-label={c.ariaTabs} class="tabs" data-tabs>
+      {c.tabs.map((t, i) => (
+        <button type="button" role="tab" id={`tab-${t.id}`} aria-controls={`panel-${t.id}`} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1}>{t.label}</button>
+      ))}
+    </div>
+
+    <div role="tabpanel" id="panel-quick" aria-labelledby="tab-quick" class="panel">
+      <p>{c.quickNode}</p>
+      <div class="pr-code">
+        <div><span class="p">$ </span>npx plumbrule install</div>
+        <div class="c">{c.quickComment}</div>
+      </div>
+      <div class="pr-card dirs">
+        <table>
+          <thead><tr><th>{c.agent}</th><th>{c.userDir}</th><th>{c.projectDir}</th></tr></thead>
+          <tbody>
+            <tr><td>Claude Code</td><td class="pr-mono">~/.claude/skills/plumbrule</td><td class="pr-mono">.claude/skills/plumbrule</td></tr>
+            <tr><td>Codex</td><td class="pr-mono">~/.agents/skills/plumbrule</td><td class="pr-mono">.agents/skills/plumbrule</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="pr-muted small">{c.quickAfter} <span class="pr-mono">npx plumbrule uninstall</span>{lang === 'en' ? '.' : '。'}</p>
+    </div>
+
+    <div role="tabpanel" id="panel-offline" aria-labelledby="tab-offline" class="panel" hidden>
+      <p>{c.offlineLead}</p>
+      <div class="pr-code">
+        <div class="c">{c.onlineMachine}</div>
+        <div><span class="p">$ </span>npm pack plumbrule</div>
+        <div class="c">{c.offlineMachine}</div>
+        <div><span class="p">$ </span>npx ./plumbrule-{config.version}.tgz install</div>
+      </div>
+      <p class="small">{c.offlineAlt} <a href={zip}>plumbrule-skill-{config.version}.zip</a>{c.offlineAltAfter}<a href={`${zip}.sha256`}>SHA-256</a>{lang === 'en' ? '.' : '。'}</p>
+    </div>
+
+    <div role="tabpanel" id="panel-manual" aria-labelledby="tab-manual" class="panel" hidden>
+      <p>{c.manualLead} <a href={zip}>plumbrule-skill-{config.version}.zip</a>{c.manualAfter} <span class="pr-mono">plumbrule</span> {c.manualAfter2}</p>
+    </div>
+  </div>
+
+  <h2 id="agents-md">{c.genTitle}</h2>
+  <p>{c.genLead}</p>
+  <div class="not-content gen" data-gen data-ns={JSON.stringify({ lang, copied: c.copied, failed: c.copyFailed, status: c.status })}>
+    <fieldset class="pr-card tags">
+      <legend>{c.project}</legend>
+      {scopes.map(([k, v]) => <label><input type="checkbox" value={k} checked={preset.has(k)} data-tag /> {v}</label>)}
+      <label class="opt"><input type="checkbox" data-full /> {c.listEvery}</label>
+      <label class="opt"><input type="checkbox" data-soft /> {c.includeSoft}</label>
+    </fieldset>
+    <div class="out">
+      <pre class="pr-card preview" tabindex="0" aria-label={c.previewLabel} data-preview></pre>
+      <div class="row">
+        <button type="button" class="pr-btn" data-copy>{c.copy}</button>
+        <span class="pr-muted small" data-status aria-live="polite"></span>
+      </div>
+      <p class="pr-muted small">{c.cli}<span class="pr-mono" data-cli></span></p>
+    </div>
+  </div>
+  <script type="application/json" id="rules-data" set:html={JSON.stringify(data).replaceAll('<', '\\u003c')} />
+</StarlightPage>
+
+<script>
+  import { renderAgentsMd } from '../../tools/agents-md-core.mjs';
+
+  // 页签：点击或左右方向键切换。
+  const list = document.querySelector<HTMLElement>('[data-tabs]')!;
+  const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  const select = (t: HTMLButtonElement) => {
+    for (const x of tabs) {
+      const on = x === t;
+      x.setAttribute('aria-selected', String(on));
+      x.tabIndex = on ? 0 : -1;
+      document.getElementById(x.getAttribute('aria-controls')!)!.hidden = !on;
+    }
+  };
+  list.addEventListener('click', (e) => { const t = (e.target as HTMLElement).closest<HTMLButtonElement>('[role="tab"]'); if (t) select(t); });
+  list.addEventListener('keydown', (e) => {
+    const i = tabs.indexOf(document.activeElement as HTMLButtonElement);
+    if (i < 0 || (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft')) return;
+    const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    n.focus(); select(n); e.preventDefault();
+  });
+
+  // 生成器
+  const data = JSON.parse(document.getElementById('rules-data')!.textContent!);
+  const gen = document.querySelector<HTMLElement>('[data-gen]')!;
+  const ns = JSON.parse(gen.dataset.ns!);
+  const lang = ns.lang;
+  const render = () => {
+    const tags = new Set([...gen.querySelectorAll<HTMLInputElement>('[data-tag]')].filter((x) => x.checked).map((x) => x.value));
+    const soft = gen.querySelector<HTMLInputElement>('[data-soft]')!.checked;
+    const full = gen.querySelector<HTMLInputElement>('[data-full]')!.checked;
+    const { text, count, topics } = renderAgentsMd(data, tags, { soft, full, lang });
+    gen.querySelector('[data-preview]')!.textContent = text;
+    gen.querySelector('[data-status]')!.textContent = ns.status.replace('{topics}', String(topics)).replace('{count}', String(count));
+    gen.querySelector('[data-cli]')!.textContent = `npx plumbrule agents-md${tags.size ? ` --tags ${[...tags].join(',')}` : ''}${full ? ' --full' : ''}${soft ? ' --soft' : ''}`;
+    return text;
+  };
+  gen.addEventListener('change', render);
+  gen.querySelector('[data-copy]')!.addEventListener('click', async () => {
+    const s = gen.querySelector('[data-status]')!;
+    try { await navigator.clipboard.writeText(render()); s.textContent = ns.copied; }
+    catch { s.textContent = ns.failed; }
+  });
+  render();
+</script>
+
+<style>
+  .lede { color: var(--sl-color-gray-2); }
+  .tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 1.75rem; border-bottom: 1px solid var(--pr-line); }
+  .tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--sl-color-gray-2); font: inherit; padding: 0.5rem 0.875rem; cursor: pointer; min-height: 2.5rem; }
+  .tabs button[aria-selected='true'] { border-bottom-color: var(--sl-color-accent); color: var(--sl-color-accent); font-weight: 600; }
+  .panel { padding: 1.25rem 0; }
+  .panel > p { margin: 0 0 0.625rem; }
+  .dirs { margin-top: 1rem; overflow-x: auto; }
+  .dirs table { width: 100%; border-collapse: collapse; font-size: var(--sl-text-sm); }
+  .dirs th { text-align: start; background: var(--sl-color-gray-7); padding: 0.5rem 0.75rem; }
+  .dirs td { border-top: 1px solid var(--pr-line); padding: 0.5rem 0.75rem; white-space: nowrap; }
+  .small { font-size: var(--sl-text-sm); margin-top: 0.75rem; }
+  .gen { display: flex; flex-wrap: wrap; gap: 1.5rem; margin-top: 1rem; }
+  .tags { flex: 1 1 16rem; margin: 0; padding: 0.875rem 1.125rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.375rem 0.75rem; font-size: var(--sl-text-sm); align-content: start; }
+  .tags legend { font-weight: 600; padding: 0 0.25rem; }
+  .tags .opt { grid-column: 1 / -1; color: var(--sl-color-gray-2); }
+  .tags .opt:first-of-type { margin-top: 0.375rem; }
+  .out { flex: 2 1 26rem; min-width: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .preview { margin: 0; padding: 0.875rem 1.125rem; font-family: var(--sl-font-mono); font-size: 0.8125rem; line-height: 1.75; color: var(--sl-color-gray-1); white-space: pre-wrap; max-height: 28rem; overflow: auto; }
+  .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+  .out .small { margin: 0; word-break: break-all; }
+  @media (max-width: 30rem) { .tags { grid-template-columns: 1fr; } }
+</style>

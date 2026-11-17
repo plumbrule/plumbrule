@@ -1,0 +1,539 @@
+id: "32"
+slug: local-agent-runtime
+title: Running Coding Agents Safely on the Local Machine
+summary: "For people who run coding agents such as Claude Code and Codex on their own computers, servers, or in their data centers: how to isolate on each OS, how to cut off the network, how to keep secrets away from the agent, how to reap processes cleanly, how to protect local HTTP services, and which attack tests to run before going live."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - Choosing an isolation approach for running coding agents on macOS, Windows, and Linux
+    - WSL2 hardening
+    - Network off by default, plus an egress proxy
+    - Keeping credentials out of the agent's environment
+    - Reaping the whole group of child processes on cancellation or timeout
+    - Protecting local HTTP services (control interfaces, dev servers, local MCP servers)
+    - An attack-test checklist for isolation effectiveness
+  excludes:
+    - { what: "AGENTS.md, agent permission boundaries, delivery evidence, agents must not self-approve their work", see: "23" }
+    - { what: "General security provisions such as secret management and scanning, TLS, SSRF, SBOM, signing and provenance", see: "25" }
+    - { what: "Login, tokens, authorization models", see: "19" }
+    - { what: "Middleware selection such as dependency mirror registries and Vault", see: "18" }
+    - { what: "Service deployment, container image publishing, observability, alerting", see: "26" }
+    - { what: "Packaging, signing, auto-start, and updates for desktop applications", see: "31" }
+    - { what: "Compliance position on commercial licenses such as Docker Desktop and OrbStack", see: "27" }
+    - { what: "Model gateways, model access, and data classification", see: "24" }
+overview: |
+  1. **Run commands inside outer isolation.** When running unattended, skipping approvals, or handling repositories of unknown origin, put the agent and the commands it generates in a container or virtual machine; do not run them directly on the host.
+  2. **The built-in sandbox is only a second line of defense.** Claude Code's sandbox covers only shell commands; file tools, hooks, and MCP servers all run outside it, and on native Windows it does not sandbox at all. Codex uses Seatbelt on macOS, bubblewrap plus seccomp on Linux and WSL2, and prefers MXC on native Windows.
+  3. **Recommended approach per OS:** on Linux, use rootless containers (Podman); on macOS, use a Linux virtual machine (Lima) rather than relying solely on `sandbox-exec`, which already shows a deprecation warning; on Windows, use a dedicated WSL2 distribution with automatic mounting of Windows drives and Windows interop turned off.
+  4. **Network off by default; network access only through an egress proxy.** Setting only `HTTP_PROXY` or a domain allowlist is not isolation; direct IPs, IPv6, UDP, local loopback, the LAN, and cloud metadata addresses must all be verified as blocked by actual testing.
+  5. **Long-lived secrets never enter the agent's environment.** Do not mount the home directory, `~/.ssh`, the keychain, or `docker.sock`; inject model keys via a host-side proxy; grant no push permission by default.
+  6. **Cancellation must clean up completely.** Reap the entire container, virtual machine, cgroup, or Job Object, and confirm the process count is zero; killing only the parent process is not enough.
+  7. **Refuse to run when isolation is unavailable**; do not fall back to retrying on bare metal, and do not ask users to turn off antivirus software.
+  8. **Local HTTP services listen only on loopback, and must authenticate and validate Host and Origin.** Listening on loopback is not the same as having authentication.
+  9. **Prove the boundary with attack tests.** Run the checklist for each runtime mode before going live, and rerun it after OS, runtime, or agent upgrades.
+rules:
+  # ── General principles ──
+  - id: RUN-001
+    title: When running unattended, skipping per-command approval, or handling untrusted repositories, the agent and the commands it generates must run in a container or virtual machine, not directly on the host
+    level: hard
+    check: semi
+    how: The launch script checks that it is running inside a container or virtual machine (e.g. `systemd-detect-virt`, container runtime markers) and exits if the check fails; review verifies the launch method
+    applies: [kind:agent]
+    why: The agent's commands come from model output and can be manipulated by prompt injection; on the host, a single bad command can read secrets or delete the user's files.
+    detail: |
+      - For interactive use with per-command approval, running on the host with the engine's built-in sandbox enabled is acceptable, but be clear about what it covers (see RUN-002).
+      - Outer isolation means a container or virtual machine; a dedicated system user, or `child_process` plus `kill`, does not count as isolation.
+    sources: [S01, S03]
+    see: ["23"]
+  - id: RUN-002
+    title: Do not treat the engine's built-in sandbox as the only line of defense; add outer isolation according to what it actually covers
+    level: hard
+    check: manual
+    how: During review, check against the engine's official documentation and list, item by item, which tools the sandbox covers and which it does not (shell, file tools, hooks, MCP, network tools); uncovered parts must be backstopped by outer isolation or permission settings
+    applies: [kind:agent]
+    why: Claude Code officially states that its sandbox covers only shell commands; file read/write tools, network tools, hooks, and local MCP servers are all outside the sandbox, and on native Windows commands are not sandboxed at all.
+    detail: |
+      - Claude Code: Seatbelt on macOS, bubblewrap on Linux and WSL2 (WSL1 not supported); no sandbox support on native Windows. `denyRead` in the sandbox does not stop the Read tool, and `allowedDomains` does not govern WebFetch.
+      - Codex: `sandbox-exec` on macOS, bubblewrap plus seccomp by default on Linux and WSL2 (WSL1 not supported); on native Windows MXC is preferred, then elevated, then unelevated.
+      - These implementations change quickly; after upgrading, recheck the documentation and rerun the attack tests.
+    sources: [S01, S03, S04]
+  - id: RUN-003
+    title: Refuse to run when the sandbox, container runtime, or egress proxy is unavailable; do not automatically fall back to retrying on bare metal
+    level: hard
+    check: auto
+    how: "Fault-injection tests: stop the container runtime, disable user namespaces, stop the proxy, and assert that the task errors out instead of executing on the host; set `allowUnsandboxedCommands` to false in Claude Code"
+    applies: [kind:agent]
+    why: '"Run unisolated if isolation fails" is the same as no isolation; an attacker only needs to make isolation fail once to gain host privileges.'
+    detail: |
+      By default, Claude Code allows a command that fails inside the sandbox to be retried with `dangerouslyDisableSandbox`; this parameter is ignored only after `allowUnsandboxedCommands` is turned off. Commands in `excludedCommands` are not restricted by the sandbox and should be treated as having full privileges.
+    sources: [S01]
+  - id: RUN-004
+    title: Switches that skip permission approval (`--dangerously-skip-permissions`, `--yolo`, `danger-full-access`) may only be used in disposable isolated environments that are offline or have controlled egress
+    level: hard
+    check: auto
+    how: CI or the launch script scans the agent's launch arguments and configuration, and refuses to start if these switches appear in a non-isolated environment
+    applies: [kind:agent]
+    why: These switches remove both approval and the sandbox; one more flaw in the outer layer means full compromise of the host.
+    sources: [S01, S03]
+    see: ["23"]
+  - id: RUN-005
+    title: When running Codex non-interactively and it needs to write files, explicitly specify `--sandbox workspace-write` and keep the network off as by default
+    level: soft
+    check: auto
+    how: Scan launch script arguments; check whether `network_access` has been enabled in the configuration and whether there is a justification
+    applies: [kind:agent]
+    why: The official recommendation for non-interactive runs is workspace-write; this mode has no network access by default and only connects if enabled in configuration.
+    sources: [S03, S05]
+  - id: RUN-006
+    title: When handling external or untrusted repositories, do not automatically load agent configuration from the repository (e.g. `.claude/settings.json`, `.mcp.json`, `.codex/`, hooks)
+    level: hard
+    check: semi
+    how: Before launch, scan the workspace for agent configuration files and list them; in Codex, set the project to `trust_level = "untrusted"`; in Claude Code, do not confirm trust for the directory
+    applies: [kind:agent]
+    why: Hooks and MCP configuration in a repository execute commands automatically when the agent starts, which amounts to execute-on-clone.
+    sources: [S02, S03]
+    see: ["23", "25"]
+  # ── Files and mounts ──
+  - id: RUN-007
+    title: The isolated environment must not mount the host home directory, `~/.ssh`, SSH agent sockets, keychains or credential stores, cloud credential directories, browser profiles, or container management sockets (`docker.sock`, Podman sockets)
+    level: hard
+    check: auto
+    how: Before launch, inspect the mount list with `podman inspect` / `docker inspect` / the virtual machine configuration, and refuse if anything matches the deny list; place decoy files on the host and test that they cannot be read from inside the isolated environment
+    applies: [kind:agent]
+    why: Any secret mounted in can be read by the agent; access to a container management socket is essentially host root.
+    sources: [S16, S17]
+  - id: RUN-008
+    title: Use a separate workspace for each task, preferably cloning the repository inside the isolated environment; when sharing is required, mount only the single project directory approved by the user
+    level: soft
+    check: semi
+    how: The launch script records mount source paths; review checks that there is only one project directory
+    applies: [kind:agent]
+    why: Editing the user's working directory in place can destroy uncommitted changes along with it when things go wrong; the larger the shared directory, the more there is to read.
+    detail: Export results as patches, commits, or an artifact directory, then have a person or a host-side script merge them.
+  - id: RUN-009
+    title: Resolve real paths before mounting and exporting; reject `..`, absolute paths, symbolic links, hard links, and Windows junctions that escape the workspace
+    level: hard
+    check: auto
+    how: Run the export flow against test cases containing symbolic links, hard links, and junctions, and assert that files outside the workspace are unchanged
+    applies: [kind:agent]
+    why: Placing a symbolic link to `~/.ssh` in a repository is enough to turn a mount or export into reading and writing host files.
+  # ── Linux ──
+  - id: RUN-010
+    title: Linux containers must run rootless, not use `--privileged`, drop all capabilities, enable no-new-privileges, keep the default seccomp profile, and run as a non-root user
+    level: hard
+    check: auto
+    how: Use `podman inspect` / `docker inspect` to check Privileged, CapDrop, SecurityOpt, and User; probe capability and seccomp status from inside the container
+    applies: [kind:agent]
+    why: Containers share the kernel with the host; the more privileges granted, the larger the escape surface.
+    detail: |
+      Conceptual example (test against your actual versions before use):
+      `podman run --rm --network none --cap-drop=ALL --security-opt no-new-privileges --read-only --tmpfs /tmp --user 10001:10001 --mount type=bind,src=<task directory>,dst=/work <image pinned by digest>`
+    sources: [S16, S17]
+  - id: RUN-011
+    title: Set CPU, memory, process count, disk, and run-time limits for each task
+    level: hard
+    check: auto
+    how: Check the container or cgroup `pids.max`, `memory.max`, `cpu.max`, and timeout settings; run fork-bomb, memory-exhaustion, and disk-fill tests, and assert the host is unaffected
+    applies: [kind:agent]
+    why: Without limits, a single runaway build or fork bomb can bring down the whole machine.
+    ref_value: The example values of 256 processes, 6 GB of memory, and 4 cores are references; set them after measuring against task type and machine specs.
+    sources: [S21]
+  - id: RUN-012
+    title: bubblewrap, Landlock, and seccomp serve only as auxiliary layers, not as the sole boundary for high-risk tasks
+    level: soft
+    check: manual
+    how: When reviewing the isolation design, confirm there is also a container or virtual machine, an egress proxy, and resource limits
+    applies: [kind:agent]
+    why: These mechanisms cover only part of file access or system calls; they do not handle egress auditing, resource limits, or process reaping.
+    sources: [S18, S20]
+  - id: RUN-013
+    title: Do not run code from different trust domains (different customers, different organizations) in containers on the same host; use separate virtual machines or separate machines instead
+    level: soft
+    check: manual
+    how: During deployment review, list the projects hosted on each host and the organizations they belong to
+    applies: [kind:agent, kind:onprem]
+    why: Containers share the host kernel, so a kernel vulnerability can cross tasks; only virtual machines provide a separate kernel boundary.
+    sources: [S19]
+  - id: RUN-014
+    title: When running the agent as a Linux service, use a systemd user service on personal machines and a system service under a dedicated no-login account on servers, with service hardening options enabled
+    level: soft
+    check: auto
+    how: Check the score with `systemd-analyze security <service name>`; confirm `NoNewPrivileges`, `ProtectSystem`, `KillMode=control-group`, `TasksMax`, and `MemoryMax` are set
+    applies: [kind:agent, kind:onprem]
+    why: On a personal machine the user turns it on and off themselves, while a server runs unattended; the two differ in privileges and boot policy. Some hardening options do not take effect in user services and must be verified one by one.
+    detail: Service hardening and container isolation are two separate layers and cannot substitute for each other.
+    sources: [S22]
+  # ── macOS ──
+  - id: RUN-015
+    title: For unattended runs on macOS, use a Linux virtual machine (e.g. Lima) as the outer layer rather than relying solely on Seatbelt (`sandbox-exec`)
+    level: soft
+    check: manual
+    how: Review the runtime mode and confirm the agent's commands run inside the virtual machine
+    applies: [kind:agent]
+    why: '`sandbox-exec` prints a deprecation warning at runtime, and Apple has not published a removal date or replacement path; a virtual machine fully separates the agent from the host keychain, home directory, and desktop.'
+    detail: |
+      - `sandbox-exec` still works today, and both Claude Code and Codex use it as their inner sandbox on macOS; it is suitable as a second line of defense.
+      - On recent systems with Apple Silicon, you can try Apple's own `container` tool; test it on the target system first.
+    sources: [S06, S01, S03, S07]
+  - id: RUN-016
+    title: Virtual machines and desktop container tools must not share the entire home directory; check for and turn off default host directory sharing
+    level: hard
+    check: auto
+    how: Check `mounts` in the Lima instance configuration, the Docker Desktop file sharing list, and OrbStack's host integration settings; refuse to start if the home directory or `~/Library` is included
+    applies: [kind:agent]
+    why: Many tools share the home directory into the virtual machine by default, so the host's secrets and files are readable from inside the isolated environment.
+    sources: [S07, S10, S09]
+  # ── Windows ──
+  - id: RUN-017
+    title: On Windows, use a WSL2 distribution dedicated to the agent, disable automount and Windows interop in `/etc/wsl.conf`, and verify by testing that the settings take effect
+    level: hard
+    check: auto
+    how: Check `[automount] enabled=false`, `[interop] enabled=false`, `appendWindowsPath=false`; inside the distribution run `ls /mnt/c`, `cmd.exe`, and `powershell.exe`, and assert they all fail
+    applies: [kind:agent]
+    why: By default WSL2 can read and write the entire Windows drive and launch Windows programs directly; without hardening it is not isolation.
+    detail: Do not reuse the distribution the user works in day to day; run rootless containers inside the dedicated distribution as well. Also check `\\wsl$` access, 9P mounts, and loopback paths to the host.
+    sources: [S11, S13]
+  - id: RUN-018
+    title: Keep workspaces in WSL on the Linux file system (ext4), not under `/mnt/c`
+    level: soft
+    check: auto
+    how: The launch script checks that the workspace path does not start with `/mnt/`
+    applies: [kind:agent]
+    why: Microsoft states that cross-OS file access is significantly slower, with the biggest impact on node_modules, git, and file watching; keeping files on the Linux side also reduces exposure of the Windows drive.
+    sources: [S13]
+  - id: RUN-019
+    title: Use WSL mirrored networking, DNS tunneling, and auto proxy only to improve connectivity, not as isolation; implement egress restrictions separately inside WSL or at the proxy layer and verify them by testing
+    level: soft
+    check: semi
+    how: Run negative egress tests in both NAT and mirrored modes, with VPN on and off
+    applies: [kind:agent]
+    why: These options make it easier for WSL to reach the corporate network; they do not restrict where it can connect.
+    sources: [S12]
+  - id: RUN-020
+    title: When native Windows commands are needed, run Claude Code inside WSL2 instead; for Codex prefer MXC, then elevated, and do not treat unelevated as a network boundary
+    level: soft
+    check: manual
+    how: During review, confirm the engine and sandbox mode used on native Windows
+    applies: [kind:agent]
+    why: Claude Code does not sandbox native Windows commands; Codex officially states that unelevated only cuts off the network at the environment level and does not support denying read access to paths, so its isolation is weak; MXC's controlled network allows access to host loopback services, which must be tested separately.
+    sources: [S01, S04]
+  - id: RUN-021
+    title: Use Windows Sandbox only for short manual experiments, not as a persistent runtime environment; when using it, disable networking in the configuration file
+    level: soft
+    check: semi
+    how: Check the networking setting in the `.wsb` configuration
+    applies: [kind:agent]
+    why: Windows Sandbox loses its state when the window is closed, and it has network access by default.
+    sources: [S14]
+  # ── Network ──
+  - id: RUN-022
+    title: The isolated environment is offline by default; when network access is needed it must go only through a separate egress proxy, not rely solely on the `HTTP_PROXY` environment variable or a domain allowlist
+    level: hard
+    check: auto
+    how: From inside the isolated environment, connect to the internet in ways that bypass the proxy (raw sockets, tools that ignore proxy variables) and assert that the connections fail
+    applies: [kind:agent]
+    why: Programs can ignore proxy environment variables; the restriction is only real when the network layer is cut and the proxy is the only way out.
+    detail: "On Linux, use `--network none` or an internal network that reaches only the proxy; for virtual machines, use a virtual NIC plus host-side filtering. The Claude Code sandbox follows the same idea: on Linux, a separate network namespace where all connections go through a local proxy that checks them by domain."
+    sources: [S01, S03]
+    see: ["25"]
+  - id: RUN-023
+    title: The egress proxy must block direct IPs, IPv6, UDP and self-initiated DNS, local loopback, the LAN, cloud metadata addresses, DNS rebinding, and redirects to internal networks
+    level: hard
+    check: auto
+    how: All network items in the attack-test checklist (see RUN-033) assert blocked, and proxy logs are retained
+    applies: [kind:agent]
+    why: When allowing only by domain, these are all common bypasses; reaching a cloud metadata address yields cloud credentials directly.
+    see: ["25"]
+  - id: RUN-024
+    title: "Split dependency download and coding into two phases: the preparation phase connects only to internal mirror registries, and the coding phase is offline; install scripts also run inside the isolated environment"
+    level: soft
+    check: semi
+    how: Check the network configuration of both phases; run negative network tests during the coding phase
+    applies: [kind:agent, kind:onprem]
+    why: The less network during coding, the safer and more stable it is; install scripts such as `postinstall` are untrusted code too.
+    detail: For fully offline operation, prepare not only language dependencies but also images, models, certificates, toolchains, and code repositories.
+    see: ["18", "25"]
+  - id: RUN-025
+    title: Do not disable TLS verification to get a task working (e.g. `NODE_TLS_REJECT_UNAUTHORIZED=0`, `curl -k`, turning off git's sslVerify); provide enterprise root certificates to the isolated environment read-only
+    level: hard
+    check: auto
+    how: Statically scan scripts, configuration, and agent-generated commands, and reject anything matching these patterns
+    applies: [kind:agent]
+    why: With verification off, traffic can be tampered with by a man in the middle, and proxy configuration problems are masked.
+    sources: [S23]
+    see: ["25"]
+  - id: RUN-026
+    title: Before deploying on corporate computers or in a data center, self-check the proxy, private root certificates, virtualization availability, and offline mirrors; when blocked by policy, report "not supported" and do not ask users to disable antivirus or security software
+    level: soft
+    check: manual
+    how: The deployment checklist includes self-check steps and recorded results
+    applies: [kind:agent, kind:onprem]
+    why: Corporate environments often disable virtualization and perform TLS interception; without a self-check you only get failures with no clear cause.
+    sources: [S12, S23]
+  # ── Credentials ──
+  - id: RUN-027
+    title: Long-lived secrets (model API keys, code repository tokens, cloud credentials) never enter the agent's isolated environment, whether as environment variables, command-line arguments, or files
+    level: hard
+    check: auto
+    how: Place decoy tokens on the host side, and test that they cannot be found in `/proc/*/environ`, process arguments, mounts, or logs inside the isolated environment; run secret scanning on logs
+    applies: [kind:agent]
+    why: Secrets that enter the environment can be read and exfiltrated by the agent, and also show up in process lists and logs.
+    detail: When model requests need a key, a host-side proxy injects it; if a credential must be handed over, issue only short-lived, narrowly scoped tokens.
+    sources: [S24]
+    see: ["25", "19"]
+  - id: RUN-028
+    title: Grant the agent no push permission by default; when pushing is required, use a short-lived token scoped to specific repositories and branches, combined with branch protection
+    level: hard
+    check: semi
+    how: Check the permission scope of tokens given to the agent; branch protection forbids direct pushes to protected branches
+    applies: [kind:agent]
+    why: '"Short-lived" does not mean "low-privilege"; a write token for all repositories can push to sensitive branches and delete tags within its validity period.'
+    sources: [S25]
+    see: ["23", "03"]
+  - id: RUN-029
+    title: Store long-lived host-side credentials in the OS credential store (Keychain, Windows Credential Manager or DPAPI, Secret Service) or the data center's secret service, not in plaintext files such as `~/.env`
+    level: soft
+    check: semi
+    how: Secret scanning checks the home directory and project directories for plaintext credential files
+    applies: [kind:agent]
+    why: A plaintext file leaks as soon as it is mounted or read by another program.
+    sources: [S24]
+    see: ["25"]
+  - id: RUN-030
+    title: Control which files the agent can read; even without access to secrets, the agent can send sensitive files it reads to the model as prompt content
+    level: soft
+    check: manual
+    how: During review, list the readable directories in the isolated environment and confirm there is no sensitive data unrelated to the task
+    applies: [kind:agent]
+    why: The model channel itself is a legitimate egress path; only limiting what can be read closes it.
+    see: ["24", "25"]
+  # ── Processes and cleanup ──
+  - id: RUN-031
+    title: On cancellation or timeout, reap the entire isolation unit (container, virtual machine, cgroup, or Job Object) and confirm the process count is zero; killing only the parent process is not allowed
+    level: hard
+    check: auto
+    how: In tests, leave descendant processes behind using `setsid`, `nohup`, background child processes, a parent crash, and so on; after cancellation, assert that the container has been removed, the cgroup's `pids.current` is 0, or the Job Object is empty
+    applies: [kind:agent]
+    why: Background processes started by the agent keep running after the parent is killed, continuing to consume resources or even exfiltrate data.
+    detail: |
+      - Linux: remove the container, or use a cgroup / systemd scope (`KillMode=control-group`).
+      - Native Windows processes: Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, forbidding child processes from breaking away; Job Objects do not isolate files or network.
+      - macOS: terminate inside the virtual machine, and stop or destroy the virtual machine on timeout; process groups on the host are only for reaping the launcher.
+    sources: [S15, S21]
+  - id: RUN-032
+    title: Clean up the workspace, caches, and temporary files after a task ends; set size limits and retention periods for logs
+    level: soft
+    check: auto
+    how: After a task ends, check that workspace directories and disk usage have returned to baseline
+    applies: [kind:agent]
+    why: Personal computers have limited disk space, and leftover workspaces and caches may still hold sensitive data.
+  # ── Attack testing ──
+  - id: RUN-033
+    title: Run the attack-test checklist for each runtime mode before going live, and rerun it after OS, kernel, container runtime, or agent upgrades
+    level: hard
+    check: semi
+    how: Test with fake secrets, fake repositories, and fake internal services, asserting "blocked"; record OS version, kernel, runtime and agent versions, and expected versus actual results
+    applies: [kind:agent]
+    why: A correctly written isolation configuration is not proof that it takes effect; without evidence of blocking, you cannot claim it is isolated.
+    detail: |
+      Common items (every OS must pass):
+      - Read decoy files in the host's `~/.ssh` and home directory
+      - Look for decoy tokens in `/proc/*/environ` and process arguments
+      - Access public domains, direct public IPs, IPv6, UDP, DNS over HTTPS
+      - Access local loopback, the host gateway, other tasks' services, 169.254.169.254
+      - Proxy returning 302 to an internal network, DNS rebinding, IPv4/IPv6 fallback
+      - Escape the workspace via symbolic links, `..`, hard links, junctions
+      - Cancel after `setsid`, `nohup`, background child processes; reaping after a parent crash
+      - Dependency install scripts silently connecting to the network or reading secrets
+      - Access container management sockets, SSH agent
+      - Exhaust process count, memory, file handles, disk
+      - Agent modifying its own isolation configuration, egress rules, certificate files
+      - Whether hooks, MCP, and plugins still run inside isolation when they auto-run after an upgrade
+
+      macOS: from inside the virtual machine, read the host keychain, `~/.ssh`, clipboard, browser cookies; check for unintentionally shared home directories.
+
+      Windows: inside WSL, `ls /mnt/c`, `cmd.exe`, `powershell.exe`; egress under NAT and mirrored modes with VPN on and off; junctions and UNC paths; when enterprise policy disables WSL, report "not supported" rather than falling back to bare metal.
+
+      Linux: probes for capabilities, host PIDs, `/proc/1/root`, mount propagation; refuse to run when AppArmor/SELinux/seccomp is disabled or user namespaces are unavailable; `/run/user/<uid>` and host credential service sockets are not mounted in.
+  - id: RUN-034
+    title: The agent must not be able to modify its own isolation configuration, egress rules, images, or updater; these files are mounted read-only or kept outside the isolated environment
+    level: hard
+    check: auto
+    how: Test writing these files from inside the isolated environment, and assert that the writes fail and nothing changes on the host side
+    applies: [kind:agent]
+    why: An agent that can modify its own cage has no cage.
+    see: ["23"]
+  - id: RUN-035
+    title: Pin the isolated environment's image (by digest) and the agent version; pass compatibility and attack tests before upgrading
+    level: soft
+    check: auto
+    how: The launch script accepts only images specified by digest; check that the agent version is on the tested list
+    applies: [kind:agent]
+    why: Engine sandbox implementations and parameters change quickly; an untested new version may silently change the boundary.
+    see: ["25"]
+  - id: RUN-036
+    title: Tasks that need a GUI, GPU, Docker builds, or platform signing use a separate restricted configuration with manual approval, without raising the privileges of the default environment
+    level: soft
+    check: manual
+    how: List each special configuration and its approval record
+    applies: [kind:agent]
+    why: Once privileges opened up for a particular task make it into the default configuration, every task carries them.
+    detail: When `docker build` is needed, use a separate build environment rather than giving the agent the container management socket; resolve sandbox conflicts in browser tests with a separate configuration rather than disabling the sandbox for all environments.
+  - id: RUN-037
+    title: On personal computers, unattended runs must be explicitly enabled by the user, can be stopped at any time with one click, and do not resume automatically after a reboot or wake from sleep
+    level: soft
+    check: manual
+    how: After installation, check that the default state is off; after a reboot, check that execution has not started automatically
+    applies: [kind:agent]
+    why: The user's computer is under the user's control; unattended execution that silently resumes touches files and the network without the user's knowledge.
+  # ── Local HTTP services ──
+  - id: RUN-038
+    title: Local HTTP services (agent control interfaces, local MCP servers, dev servers) listen only on 127.0.0.1 or ::1, not 0.0.0.0
+    level: hard
+    check: auto
+    how: Check listening addresses with `ss -ltnp` (Linux), `lsof -iTCP -sTCP:LISTEN` (macOS), `netstat -ano` (Windows)
+    applies: [kind:agent, platform:desktop]
+    why: When listening on all interfaces, any machine on the same network can connect.
+    sources: [S26]
+    see: ["31"]
+  - id: RUN-039
+    title: Local HTTP control interfaces must authenticate with an unpredictable token and validate Host and Origin to prevent DNS rebinding and cross-site requests; do not use `Access-Control-Allow-Origin *`
+    level: hard
+    check: auto
+    how: Test that requests with no token, a wrong Host, an external Origin, and cross-origin preflights are all rejected
+    applies: [kind:agent, platform:desktop]
+    why: Listening only on loopback is not authentication; any web page can reach a local port through DNS rebinding or cross-site requests. The MCP specification requires local HTTP servers to validate Origin.
+    sources: [S26]
+    see: ["31", "19"]
+  - id: RUN-040
+    title: "Do not open a port if you can avoid it: prefer standard input/output, the framework's built-in inter-process communication, or Unix sockets; where a port is open, GET requests must have no side effects, and dangerous operations require user confirmation"
+    level: soft
+    check: semi
+    how: During review, list all listening ports and their justifications; test that GET requests do not change state
+    applies: [kind:agent, platform:desktop]
+    why: One fewer port is one less attack surface; when GET has side effects, a single image link can trigger an action.
+    sources: [S26]
+    see: ["31"]
+choices:
+  - category: Linux isolation
+    pick: rootless Podman containers
+    alternatives:
+      - { name: "Docker Engine rootless mode", when: "The team already uses the Docker toolchain" }
+      - { name: "gVisor", when: "Higher risk, need to reduce kernel exposure, and compatibility has been tested (browsers, ptrace, etc. may conflict)" }
+      - { name: "KVM virtual machines", when: "Running code from different trust domains that needs a separate kernel" }
+    avoid:
+      - { name: "Giving the agent the rootful Docker socket", why: "Control of the container runtime is essentially host root" }
+      - { name: "--privileged containers", why: "Removes almost all isolation" }
+    license: Podman and gVisor are Apache-2.0 (official LICENSE files not individually verified)
+    sources: [S16, S17, S19]
+  - category: Linux lightweight auxiliary sandbox
+    pick: bubblewrap, as a second layer inside the container or on the host
+    alternatives:
+      - { name: "Landlock + seccomp", when: "Only file access and system calls need to be restricted, and the kernel version supports it" }
+    avoid:
+      - { name: "Relying on bubblewrap alone as complete isolation", why: "Does not handle egress auditing, resource limits, or process reaping" }
+    sources: [S18, S20]
+  - category: macOS isolation
+    pick: Lima Linux virtual machine, with the repository cloned inside the virtual machine
+    alternatives:
+      - { name: "Apple container tool", when: "Apple Silicon with a recent OS, already tested on the target machine" }
+      - { name: "OrbStack", when: "Personal use; commercial use requires a purchased license; turn off unneeded host integrations" }
+      - { name: "Docker Desktop", when: "The company already has a subscription; organizations with more than 250 employees or more than USD 10 million in annual revenue need a paid subscription" }
+    avoid:
+      - { name: "Relying solely on sandbox-exec (Seatbelt)", why: "Shows a deprecation warning with no public replacement path; suitable only as a second line of defense" }
+      - { name: "Sharing the entire home directory into the virtual machine", why: "The host's secrets and files become readable inside the isolated environment" }
+    license: Lima is Apache-2.0 (official LICENSE not verified); OrbStack is closed source and paid for commercial use; Docker Desktop requires a subscription for large enterprises. See 27 for the compliance position.
+    notes: Do not use Docker Desktop or OrbStack as unattended services in a data center.
+    sources: [S07, S08, S09, S10, S06]
+  - category: Windows isolation
+    pick: Dedicated WSL2 distribution (automount and interop off) + rootless containers inside the distribution
+    alternatives:
+      - { name: "Dedicated Hyper-V virtual machine", when: "Enterprise policy does not allow WSL, or stronger isolation is required" }
+      - { name: "Codex native MXC sandbox", when: "A native Windows toolchain must be used and the OS version supports it" }
+      - { name: "Windows Sandbox", when: "Short manual experiments, with networking off" }
+    avoid:
+      - { name: "The user's everyday distribution with /mnt/c mounted by default", why: "Can read and write the entire Windows drive and launch Windows programs" }
+      - { name: "Codex unelevated mode as a network boundary", why: "Officially documented as only cutting off the network at the environment level; isolation is weak" }
+    license: The open-source parts of WSL are MIT (not verified); system components are under the Windows license
+    sources: [S11, S13, S04, S14]
+  - category: Network egress
+    pick: Network-layer cutoff (container `--network none`, an internal network that reaches only the proxy, or a virtual machine's virtual NIC) + a separate egress proxy
+    alternatives:
+      - { name: "Linux nftables with policy routing", when: "Fine-grained control by subnet or port is needed" }
+      - { name: "Anthropic sandbox-runtime", when: "As a reference implementation, or for the engine's inner sandbox" }
+    avoid:
+      - { name: "Setting only HTTP_PROXY", why: "Programs can ignore proxy variables and connect directly" }
+      - { name: "Only a domain allowlist", why: "Direct IPs, IPv6, DNS rebinding, and redirects can all bypass it" }
+    notes: Selection of specific proxy software awaits further research.
+    sources: [S01, S27]
+  - category: Process reaping
+    pick: On Linux, the container runtime or cgroup v2; for native Windows processes, Job Objects; on macOS, terminate the virtual machine
+    alternatives:
+      - { name: "POSIX process groups", when: "Only for reaping the launcher process on the host" }
+    avoid:
+      - { name: "Killing only the parent PID or only calling child.kill()", why: "Background and detached child processes keep running" }
+    sources: [S15, S21]
+  - category: Engine inner sandbox
+    pick: Claude Code with the sandbox enabled and allowUnsandboxedCommands set to false; Codex with workspace-write and the network off by default
+    avoid:
+      - { name: "Using --dangerously-skip-permissions or --yolo on the host", why: "Removes both approval and the sandbox" }
+    sources: [S01, S03]
+  - category: Host-side credential storage
+    pick: macOS Keychain; Windows Credential Manager or DPAPI; Secret Service on Linux desktops and a centralized secret service on servers (see 18, 25)
+    avoid:
+      - { name: "Long-lived secrets in plaintext files such as ~/.env", why: "Leaks as soon as it is mounted or read by another program" }
+    sources: [S24]
+antipatterns:
+  - { bad: "Using child_process.spawn plus kill(pid) as a sandbox", instead: "Isolate with a container, virtual machine, cgroup, or Job Object and reap the whole group" }
+  - { bad: "Creating a dedicated system user for the agent and considering it isolated", instead: "Beyond the dedicated user, add a container or virtual machine plus file and network restrictions" }
+  - { bad: "Assuming the agent cannot reach the network directly because HTTP_PROXY is configured", instead: "Cut the network layer, make the proxy the only way out, and verify by testing that direct connections are refused" }
+  - { bad: "Mounting docker.sock into the agent to support docker build", instead: "Use a separate build environment" }
+  - { bad: "Compiling under /mnt/c in WSL with Windows interop left on", instead: "Dedicated distribution, workspace on ext4, automount and interop off" }
+  - { bad: "Automatically retrying on the host when the sandbox fails to start", instead: "Error out and exit; fix isolation before running again" }
+  - { bad: "Asking users to disable antivirus or SELinux when isolation will not run on a corporate computer", instead: "Report not supported and hand it to the administrator" }
+  - { bad: "Skipping authentication on a local control interface because it only listens on 127.0.0.1", instead: "Token authentication plus Host and Origin validation" }
+  - { bad: "Caching only npm packages for \"fully offline\" operation", instead: "Also prepare internal sources for images, models, certificates, toolchains, and code repositories" }
+  - { bad: "Writing three OS sandboxes from scratch yourself", instead: "Reuse existing solutions such as Podman, Lima, and WSL2, and write only a thin adapter layer" }
+sources:
+  - { id: S01, title: "Claude Code: Sandboxing", url: "https://code.claude.com/docs/en/sandboxing", publisher: Anthropic, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Claude Code: Settings", url: "https://code.claude.com/docs/en/settings", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "Codex: Agent approvals & security", url: "https://learn.chatgpt.com/docs/agent-approvals-security", publisher: OpenAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Codex: Windows sandbox", url: "https://learn.chatgpt.com/docs/windows/windows-sandbox", publisher: OpenAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "Codex: Non-interactive mode", url: "https://learn.chatgpt.com/docs/non-interactive-mode", publisher: OpenAI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "apple/containerization issue #737: sandbox-exec deprecation", url: "https://github.com/apple/containerization/issues/737", publisher: GitHub community, date: 2026-05-12, kind: community, checked: 2026-11-14 }
+  - { id: S07, title: Lima, url: "https://github.com/lima-vm/lima", publisher: Lima, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: Apple container, url: "https://github.com/apple/container", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: OrbStack FAQ, url: "https://docs.orbstack.dev/faq", publisher: OrbStack, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: Docker pricing FAQ, url: "https://www.docker.com/pricing/faq/", publisher: Docker, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "WSL: Advanced settings configuration", url: "https://learn.microsoft.com/en-us/windows/wsl/wsl-config", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "WSL: Networking", url: "https://learn.microsoft.com/en-us/windows/wsl/networking", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "WSL: Working across file systems", url: "https://learn.microsoft.com/en-us/windows/wsl/filesystems", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: Windows Sandbox overview, url: "https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Job Objects, url: "https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: podman-run, url: "https://docs.podman.io/en/latest/markdown/podman-run.1.html", publisher: Podman, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Docker: Rootless mode", url: "https://docs.docker.com/engine/security/rootless/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: bubblewrap, url: "https://github.com/containers/bubblewrap", publisher: containers, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: gVisor, url: "https://github.com/google/gvisor", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Linux kernel: Landlock", url: "https://docs.kernel.org/userspace-api/landlock.html", publisher: Linux kernel, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "Linux kernel: Control Group v2", url: "https://docs.kernel.org/admin-guide/cgroup-v2.html", publisher: Linux kernel, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: systemd.exec, url: "https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html", publisher: systemd, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Claude Code: Enterprise network configuration", url: "https://code.claude.com/docs/en/network-config", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Microsoft: Handling passwords", url: "https://learn.microsoft.com/en-us/windows/win32/SecBP/handling-passwords", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "GitHub: About protected branches", url: "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "MCP: Transports — security warning", url: "https://modelcontextprotocol.io/specification/2025-06-18/basic/transports", publisher: Model Context Protocol, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S27, title: anthropics/sandbox-runtime, url: "https://github.com/anthropics/sandbox-runtime", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "macOS sandbox-exec: it prints a deprecation warning at runtime, but this is documented only in a community issue; Apple has no public removal date or replacement path, and Claude Code and Codex still use it. Recheck with each major macOS release."
+  - The claim that "WSL containers (wslc) are generally available" has only a release listing page as its source and is unverified; whether to adopt it as a Windows alternative remains to be validated.
+  - The OS and chip requirements of Apple's container tool (the report says Apple Silicon with macOS 26 or later only) are unverified.
+  - The licenses of Podman, gVisor, Lima, bubblewrap, sandbox-runtime, and WSL have not been individually verified against their official LICENSE files (the report says bubblewrap is LGPL-2.1+, to be checked).
+  - The current defaults of Lima sharing the home directory read-only into the virtual machine and of Docker Desktop's default shared directories have not been individually verified; the checks in RUN-016 need to be confirmed against current versions.
+  - Whether Claude Code's --bare skips the keychain and OAuth login, and the details of the trust mechanism for repository configuration, are unverified.
+  - "Further research needed: the network environment in China — domestic mirror sources, enterprise proxies and TLS interception, and model gateway access when access to overseas model services is restricted."
+  - "Further research needed: domestic platforms — whether rootless containers and user namespaces are available by default on Chinese operating systems such as Kylin and UOS and on domestic CPUs, and alternatives beyond WSL."
+  - "Further research needed: selection of specific egress proxy software (including licenses and offline deployment)."
+  - "Further research needed: egress restriction mechanisms on native Windows (WFP) and approaches with pf / Network Extension on macOS."
+  - "Further research needed: how to disable telemetry connections in Claude Code and Codex, and feature compatibility (tool calls, streaming output, authentication) when connecting to an internal compatible model gateway."
+  - There is no measured data on startup speed, file I/O, or compile performance for the isolation approaches; the performance thresholds in the report (warm start, cancellation time, compile slowdown ratio) are suggested values and have not been written into the rules.

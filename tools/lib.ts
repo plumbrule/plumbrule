@@ -12,6 +12,9 @@ export const root = existsSync(join(guess, 'rules/_词表.yaml')) ? guess : proc
 const rulesDir = join(root, 'rules');
 const load = (p: string) => parse(readFileSync(p, 'utf8'));
 
+export type Lang = 'zh' | 'en';
+const rulesDirFor = (lang: Lang = 'zh') => (lang === 'en' ? join(rulesDir, 'en') : rulesDir);
+
 export type Rule = {
   id: string; title: string; level: 'hard' | 'soft'; check: 'auto' | 'semi' | 'manual';
   how: string; applies: string[]; why: string; detail?: string; ref_value?: string;
@@ -34,34 +37,46 @@ export type Topic = {
 };
 
 export const config: { siteUrl: string; repoUrl: string; version: string } = JSON.parse(readFileSync(join(root, 'plumbrule.config.json'), 'utf8'));
-export const vocab = load(join(rulesDir, '_词表.yaml'));
 
-export function loadTopics(): Topic[] {
-  return readdirSync(rulesDir)
+const vocabCache = new Map<Lang, any>();
+export function loadVocab(lang: Lang = 'zh'): any {
+  if (!vocabCache.has(lang)) vocabCache.set(lang, load(join(rulesDirFor(lang), '_词表.yaml')));
+  return vocabCache.get(lang);
+}
+export const vocab = loadVocab();
+
+export function loadTopics(lang: Lang = 'zh'): Topic[] {
+  return readdirSync(rulesDirFor(lang))
     .filter((f) => /^\d{2}-[a-z0-9-]+\.yaml$/.test(f))
     .sort()
-    .map((f) => load(join(rulesDir, f)) as Topic);
+    .map((f) => load(join(rulesDirFor(lang), f)) as Topic);
 }
 
-export const levelName = (l: string) => vocab['级别'][l]['名称'] as string;
-export const checkName = (c: string) => vocab['检查方式'][c]['名称'] as string;
-export const ruleUrl = (t: Topic, r: Rule) => `${config.siteUrl}/topics/${t.slug}/#${r.id.toLowerCase()}`;
-export const topicUrl = (t: Topic) => `${config.siteUrl}/topics/${t.slug}/`;
+const ownershipCache = new Map<Lang, any>();
+export function loadOwnership(lang: Lang = 'zh'): any {
+  if (!ownershipCache.has(lang)) ownershipCache.set(lang, load(join(rulesDirFor(lang), '_归属.yaml')));
+  return ownershipCache.get(lang);
+}
+
+export const levelName = (l: string, lang: Lang = 'zh') => loadVocab(lang)['级别'][l]['名称'] as string;
+export const checkName = (c: string, lang: Lang = 'zh') => loadVocab(lang)['检查方式'][c]['名称'] as string;
+export const ruleUrl = (t: Topic, r: Rule, lang: Lang = 'zh') => `${config.siteUrl}${lang === 'en' ? '/en' : ''}/topics/${t.slug}/#${r.id.toLowerCase()}`;
+export const topicUrl = (t: Topic, lang: Lang = 'zh') => `${config.siteUrl}${lang === 'en' ? '/en' : ''}/topics/${t.slug}/`;
 
 /** 规则是否适用于给定的范围标签集合，规则见 agents-md-core.mjs 的 appliesTo。 */
 export const ruleApplies = (r: Rule, tags: Set<string>) => appliesTo(r.applies, tags);
 
-export const ownership = load(join(rulesDir, '_归属.yaml'));
+export const ownership = loadOwnership();
 /** 主题名称表（含还没整理的主题）。 */
 export const topicNames: Record<string, { slug: string; 名称: string; 前缀: string }> = ownership['主题'];
 
 /** 网站和技能里主题的分组。 */
-export const topicGroups: { name: string; ids: string[] }[] = [
-  { name: '工程基础', ids: ['01', '02', '03', '04', '05', '06'] },
-  { name: 'Web 与交互', ids: ['07', '08', '09'] },
-  { name: '编码 Agent 与大模型', ids: ['23', '24', '32'] },
-  { name: '语言', ids: ['10', '11', '12', '13', '14', '15'] },
-  { name: '后端与数据', ids: ['16', '17', '18', '19', '20', '21', '22'] },
-  { name: '安全、运维与合规', ids: ['25', '26', '27'] },
-  { name: '移动与桌面', ids: ['28', '29', '30', '31'] },
+export const topicGroups: { name: string; nameEn: string; ids: string[] }[] = [
+  { name: '工程基础', nameEn: 'Engineering Foundations', ids: ['01', '02', '03', '04', '05', '06'] },
+  { name: 'Web 与交互', nameEn: 'Web and Interaction', ids: ['07', '08', '09'] },
+  { name: '编码 Agent 与大模型', nameEn: 'Coding Agents and LLMs', ids: ['23', '24', '32'] },
+  { name: '语言', nameEn: 'Languages', ids: ['10', '11', '12', '13', '14', '15'] },
+  { name: '后端与数据', nameEn: 'Backend and Data', ids: ['16', '17', '18', '19', '20', '21', '22'] },
+  { name: '安全、运维与合规', nameEn: 'Security, Operations, and Compliance', ids: ['25', '26', '27'] },
+  { name: '移动与桌面', nameEn: 'Mobile and Desktop', ids: ['28', '29', '30', '31'] },
 ];

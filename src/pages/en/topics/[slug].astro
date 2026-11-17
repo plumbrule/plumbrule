@@ -1,0 +1,10 @@
+---
+import TopicPage from '../../../components/TopicPage.astro';
+import { getSite, type Topic } from '../../../lib/site.ts';
+
+export function getStaticPaths() {
+  return getSite('en').topics.map((t) => ({ params: { slug: t.slug }, props: { topic: t } }));
+}
+const { topic } = Astro.props as { topic: Topic };
+---
+<TopicPage topic={topic} lang="en" />

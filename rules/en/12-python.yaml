@@ -1,0 +1,568 @@
+id: "12"
+slug: python
+title: Python
+summary: "Engineering conventions at the Python language level: project and dependency management, lock files, version policy, Ruff, type checking, pytest, async, logging, database access and migration tools, web frameworks, data validation, and packaging and publishing."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Project metadata (pyproject.toml), dependency management, lock files, package indexes
+    - Python version policy and use of free-threaded (no-GIL) builds
+    - Ruff (linting and formatting), type checkers, inline suppressions
+    - pytest, Hypothesis, async testing
+    - Async and concurrency, HTTP clients, logging
+    - Database access libraries and migration tools (SQLAlchemy, Alembic, Django migrations)
+    - Web framework selection, Pydantic data validation, configuration loading
+    - Packaging and publishing to PyPI or internal repositories, dependency vulnerability audit tools
+  excludes:
+    - { what: "General principles for formatting and linting, log fields, error propagation, and general requirements for timeouts and retries", see: "02" }
+    - { what: "Default choice of local Git hook tool, CI gate order, dependency update cadence", see: "03" }
+    - { what: "Test layering, coverage definitions, flaky tests, offline installation acceptance", see: "04" }
+    - { what: "OpenAPI, error format (RFC 9457), API breaking-change checks", see: "16" }
+    - { what: "Migration principles, transactions and isolation levels, optimistic locking, outbox", see: "17" }
+    - { what: "Overall selection of message queues, caches, task scheduling and workflow engines", see: "18" }
+    - { what: "Login, JWT, OAuth, password storage and authorization", see: "19" }
+    - { what: "Parsing untrusted files such as PDF, Office documents and images", see: "20" }
+    - { what: "Data analysis stacks such as pandas, Polars, DuckDB and notebooks", see: "22" }
+    - { what: "LLM SDKs, MCP SDKs, tokenization and evaluation", see: "24" }
+    - { what: "Secret scanning, overall SCA approach, SBOM, SSRF, upload security", see: "25" }
+    - { what: "Container images, health checks, graceful shutdown, observability", see: "26" }
+    - { what: "License policy for LGPL, AGPL, etc. and license scanning tools", see: "27" }
+overview: |
+  1. **Applications lock; libraries declare ranges.** Applications use `pyproject.toml` with uv, commit `uv.lock`, and CI verifies with `uv lock --check` and `uv sync --locked`; lock files are never edited by hand. Libraries meant for others to install declare only version ranges and do not impose a lock on consumers. Existing Poetry or PDM projects need not migrate just for uniformity.
+  2. **Only use Python versions still under maintenance.** Follow the official Python version status table; production never runs a version that has reached end of security support. New applications pin a minor version that is still in bugfix status; libraries run CI on every version they claim to support. Free-threaded (no-GIL) builds are not the default.
+  3. **Ruff is the single tool for linting and formatting.** `ruff check` and `ruff format --check` must pass; inline suppressions name the rule.
+  4. **Pick one type checker as the gate.** mypy by default; teams already in the Pyright ecosystem may use Pyright. ty is still in beta and is used only for side-by-side comparison, not as a gate.
+  5. **Validate at the boundary.** External JSON, HTTP requests, configuration and tool outputs are validated with Pydantic v2 models before use.
+  6. **Async is not a default performance optimization.** No blocking calls inside `async def`; code that gains nothing from concurrency is written synchronously.
+  7. **Databases default to SQLAlchemy 2 + psycopg 3 + Alembic** (Django projects use the built-in ORM and migrations). Migration principles follow 17: prefer fixing forward, and never create tables with `create_all` in production.
+  8. **Web defaults to FastAPI + Pydantic v2 + Uvicorn**; use Django when an admin interface and a full ORM are needed; Flask is for small services and existing projects.
+  9. **Publish via Trusted Publishing.** Publish to PyPI with Trusted Publishing; do not store long-lived tokens in CI.
+  10. **The toolchain depends on a single vendor.** uv, Ruff and ty all come from Astral, and OpenAI has announced its acquisition of Astral. The tools are permissively licensed open-source projects, which leaves room to fork or replace them, but keep an eye on what happens next.
+rules:
+  # ── Project and dependencies ──
+  - id: PY-001
+    title: Projects declare metadata and dependencies in pyproject.toml; new projects do not write a setup.py with dynamic install logic
+    level: hard
+    check: auto
+    how: "CI checks that the repository root contains pyproject.toml with a `[project]` table; a setup.py appearing in a new project requires justification"
+    applies: [lang:python]
+    why: pyproject.toml is the standard metadata location for Python packaging and every tool reads it; a dynamically executed setup.py is hard to analyze statically and runs arbitrary code at install time.
+    sources: [S05]
+  - id: PY-002
+    title: Applications must commit a lock file; CI first verifies that the lock file matches pyproject.toml, then installs from the lock
+    level: hard
+    check: auto
+    how: "CI runs `uv lock --check` and `uv sync --locked` (Poetry projects use `poetry check --lock`; PDM projects use `pdm lock --check`)"
+    applies: [lang:python]
+    why: Unlocked dependencies may resolve differently on every install, making production issues impossible to reproduce; silently regenerating the lock in CI hides dependency changes.
+    detail: |
+      - Update the lock file only through the package manager (e.g. `uv lock --upgrade-package <name>`); never edit it by hand.
+      - PRs that upgrade dependencies include test results; for dependency update cadence see 03.
+      - PEP 751 defines a cross-tool lock file format, `pylock.toml`, which can be used for export and exchange; it is not yet required to replace `uv.lock`.
+    sources: [S02, S04]
+    see: ["03"]
+  - id: PY-003
+    title: Libraries meant for others to install declare version ranges in their dependencies, not exact versions; the development lock file serves only this repository's CI
+    level: soft
+    check: semi
+    how: "Review `project.dependencies` for `==` exact versions"
+    applies: [lang:python, kind:library]
+    why: Exact versions in a library conflict with the consumer's other dependencies and can make the library impossible to install.
+    sources: [S05]
+  - id: PY-004
+    title: "When using a private package index, internal package names resolve only from the internal index; do not mix public and internal indexes with pip's `--extra-index-url`"
+    level: hard
+    check: semi
+    how: "Check CI, Dockerfiles and pip configuration for `--extra-index-url`; for uv projects check the `[[tool.uv.index]]` configuration and the `explicit` setting"
+    applies: [lang:python]
+    why: pip picks the highest version across all indexes, so an attacker who registers the same package name on the public index can get it installed first (dependency confusion). uv by default stops at the first index where it finds the package, which is safer, but it still needs explicit configuration.
+    sources: [S03]
+    see: ["25"]
+  - id: PY-005
+    title: When adding a dependency, state its purpose, license and maintenance status; do not add a dependency for something the standard library handles simply
+    level: soft
+    check: semi
+    how: PRs that change the dependency list must state these three items; scan licenses with the tools specified in 27
+    applies: [lang:python]
+    why: The Python ecosystem has many LGPL, AGPL or abandoned packages (e.g. psycopg is LGPL, and Arq has entered maintenance-only mode); without recording them, problems surface only at delivery or upgrade time.
+    sources: [S16, S24]
+    see: ["27"]
+  - id: PY-006
+    title: CI scans locked dependencies with pip-audit; offline environments use an offline vulnerability database snapshot, and a failed scan is not treated as zero vulnerabilities
+    level: soft
+    check: auto
+    how: "CI runs `pip-audit` (for uv projects, first `uv export` a requirements file with hashes, then scan it); failure blocks the build"
+    applies: [lang:python]
+    why: Dependency vulnerabilities are the most common source of security issues in Python projects; for the overall SCA approach and remediation deadlines see 25.
+    sources: [S22]
+    see: ["25"]
+  - id: PY-007
+    title: "For projects delivered offline, prepare a complete set of wheels for each target operating system, CPU architecture and Python version, and verify by installing with `--no-index` and starting the application in an offline environment"
+    level: hard
+    check: auto
+    how: "CI installs inside a container with no internet access using `pip install --no-index --find-links` or `uv sync --offline`, then runs smoke tests"
+    applies: [lang:python, kind:onprem]
+    why: Being able to pip install does not mean binary wheels exist for the target architecture; a successful cached download does not mean the package installs on an offline machine.
+    see: ["04", "26"]
+  # ── Python versions ──
+  - id: PY-008
+    title: Production uses only Python versions still officially maintained (bugfix or security status); upgrade before a version reaches end of life
+    level: hard
+    check: auto
+    how: "CI reads `.python-version` or `requires-python`, compares it against the official Python version status table, and fails on versions past end of life"
+    applies: [lang:python]
+    why: Unmaintained versions no longer receive security fixes. The official status table lists whether each version is in bugfix, security, or end-of-life status, along with its planned end-of-life date.
+    sources: [S01]
+  - id: PY-009
+    title: "New applications pin a minor version that is still in bugfix status (written to `.python-version` and `requires-python`); run the full test suite in CI before upgrading to a new minor version"
+    level: soft
+    check: auto
+    how: "CI checks that `.python-version` exists, and periodically runs the tests on the next minor version"
+    applies: [lang:python, kind:service, kind:cli]
+    why: A newly released minor version may still lack binary wheels for some dependencies; pinning a minor version keeps development, CI and production consistent.
+    detail: |
+      - Versions in bugfix status still receive ordinary bug fixes, while security-status versions receive only security fixes, so new projects pick from versions in bugfix status.
+      - After the latest minor version is released, wait until key dependencies (database drivers, libraries with native extensions) all have wheels before switching.
+    sources: [S01]
+  - id: PY-010
+    title: "Libraries must test in CI every minor version declared in `requires-python`; do not claim support for versions that have not been tested"
+    level: hard
+    check: auto
+    how: "The CI matrix covers every still-maintained minor version within the `requires-python` range"
+    applies: [lang:python, kind:library]
+    why: If you claim support without testing, consumers will hit problems you never found when they upgrade.
+    sources: [S01, S05]
+  - id: PY-011
+    title: Free-threaded (no-GIL) builds are not the default runtime; before using one, confirm that all native extensions support it and test concurrent behavior in practice
+    level: soft
+    check: manual
+    how: During review, check free-threading compatibility records for native dependencies and concurrency test results
+    applies: [lang:python]
+    why: The official documentation states that in free-threaded builds, C extensions that do not support it cause the interpreter to re-enable the GIL, or can introduce thread-safety issues.
+    sources: [S25]
+  # ── Ruff and type checking ──
+  - id: PY-012
+    title: "`ruff check` and `ruff format --check` must pass in CI; do not also use a second formatter or linter such as Black, isort or flake8"
+    level: hard
+    check: auto
+    how: "CI runs `ruff check .` and `ruff format --check .`; check whether the repository still contains Black or isort configuration"
+    applies: [lang:python]
+    why: With one tool handling both linting and formatting, rules do not fight each other; multiple formatters keep rewriting the same code. For general principles see 02.
+    detail: |
+      - Suggested starter rules are `E4, E7, E9, F, I, B, UP, SIM`; for server-side projects, after review add `S` (security), `ASYNC`, `DTZ` (time zones), and `BLE` (blind except).
+      - Use Ruff's default line length; change it only when the team has a reason.
+      - Existing projects already using Black + flake8 may migrate in stages; do not add a third tool during the migration.
+    sources: [S06, S07]
+    see: ["COD-038"]
+  - id: PY-013
+    title: "Inline suppressions must name the rule code and give a reason: `# noqa` and `# type: ignore` without a code are forbidden"
+    level: hard
+    check: auto
+    how: "Enable Ruff's `PGH004` (noqa without a code), `PGH003` (type ignore without an error code) and `RUF100` (unused noqa)"
+    applies: [lang:python]
+    why: Blanket suppressions also swallow new problems that appear later; adding suppressions in bulk is a common way to turn checks green without fixing anything.
+    sources: [S07]
+    see: ["COD-039", "COD-040", "AGT-011"]
+  - id: PY-014
+    title: Choose one type checker as a CI gate; add type annotations to public interfaces and functions called across modules
+    level: hard
+    check: auto
+    how: "CI runs `mypy` (or `pyright`) and requires zero errors; mypy's `strict` mode is recommended for new code"
+    applies: [lang:python]
+    why: Type checking catches many interface misuses before runtime; running two checkers as gates causes conflicts and adds maintenance cost.
+    detail: |
+      - When a third-party library has no types, use a controlled `Any` at the boundary with a short explanation, and do not let `Any` spread.
+      - While migrating checkers, the other checker may report without blocking.
+    sources: [S10, S11]
+  - id: PY-015
+    title: Until ty publishes a stable release, it is not used as the sole type-checking gate, only for side-by-side comparison
+    level: soft
+    check: semi
+    how: Check which type-checking commands in CI block merges
+    applies: [lang:python]
+    why: ty is still officially labeled beta, its version number is 0.0.x, and it states that any two versions may contain breaking changes, including in diagnostics.
+    sources: [S08]
+  - id: PY-016
+    title: "Published libraries include a `py.typed` marker file so consumers can use the library's type annotations"
+    level: soft
+    check: auto
+    how: "After building, check that the wheel contains `py.typed`"
+    applies: [lang:python, kind:library]
+    why: "Per PEP 561, packages without `py.typed` are treated as untyped by type checkers."
+    sources: [S11]
+  - id: PY-017
+    title: "Local Git hooks follow the convention in 03: Lefthook by default; Python-centric repositories may use pre-commit; use only one per repository"
+    level: soft
+    check: semi
+    how: Check whether the repository contains both lefthook.yml and .pre-commit-config.yaml
+    applies: [lang:python]
+    why: The pre-commit ecosystem has ready-made hooks for Ruff and others, which suits pure-Python repositories; Lefthook in multi-language repositories does not depend on a Python runtime.
+    sources: [S28]
+    see: ["FLW-034"]
+  # ── Coding pitfalls that tools can catch ──
+  - id: PY-018
+    title: "No bare `except:` and no silently swallowed `except Exception`; when converting exceptions, use `raise ... from err` to preserve the cause"
+    level: hard
+    check: auto
+    how: "Enable Ruff's `E722` (bare except), `BLE001` (blind except), `B904` (raising a new exception inside except without from) and `S110` (try-except-pass)"
+    applies: [lang:python]
+    why: "A bare except also catches `KeyboardInterrupt`; omitting from loses the original exception chain, so the root cause cannot be found during troubleshooting. For general requirements see 02."
+    sources: [S07]
+    see: ["COD-010", "COD-011"]
+  - id: PY-019
+    title: Use parameter binding or a query builder for SQL; never build SQL with string concatenation or f-strings
+    level: hard
+    check: semi
+    how: "Enable Ruff's `S608` (possibly concatenated SQL) to find candidates, then confirm manually"
+    applies: [lang:python]
+    why: Concatenated SQL is a direct source of injection vulnerabilities.
+    sources: [S07, S15]
+    see: ["25"]
+  - id: PY-020
+    title: "Do not deserialize untrusted data with `pickle`, `yaml.load` (with a non-safe loader) or `eval`; do not pass external input to `subprocess` with `shell=True`"
+    level: hard
+    check: auto
+    how: "Enable Ruff's `S301` (pickle), `S506` (unsafe yaml.load), `S307` (eval) and `S602`/`S604` (shell=True)"
+    applies: [lang:python]
+    why: "These calls run arbitrary code during parsing or execution and are high-risk patterns specific to Python. Use `yaml.safe_load` for YAML, and pass commands to subprocess as an argument list."
+    sources: [S07]
+    see: ["25"]
+  - id: PY-021
+    title: "Use time-zone-aware datetimes and the standard library's zoneinfo for time zones; do not use `datetime.utcnow()` or naive `datetime.now()`"
+    level: soft
+    check: auto
+    how: "Enable Ruff's `DTZ` rule group"
+    applies: [lang:python]
+    why: Mixing naive datetimes with local time causes errors across time zones and daylight saving transitions; offline environments must preinstall tzdata. For general conventions see 02.
+    sources: [S07, S30]
+    see: ["COD-026", "COD-027"]
+  # ── Async and concurrency ──
+  - id: PY-022
+    title: "Do not call blocking operations inside `async def` (synchronous HTTP libraries, `time.sleep`, synchronous file and database calls, long CPU computations); when they are unavoidable, move them to a thread pool or a separate process"
+    level: hard
+    check: semi
+    how: "Enable Ruff's `ASYNC` rule group to find candidates (e.g. ASYNC210 for synchronous HTTP, ASYNC251 for time.sleep) and confirm in review; observe event loop latency in concurrency tests"
+    applies: [lang:python]
+    why: A single blocking call stalls every request on the same event loop.
+    detail: |
+      - Use `asyncio.to_thread` or the framework's thread pool to move blocking calls off the event loop; use a process pool or task queue for CPU-intensive work.
+      - In FastAPI, write route functions that call blocking libraries as plain `def`; the framework runs them in a thread pool.
+    sources: [S07, S12, S18]
+  - id: PY-023
+    title: Write synchronous code by default for simple needs; using async requires a clear concurrency benefit (large amounts of concurrent I/O)
+    level: soft
+    check: manual
+    how: During review, look at the justification for introducing async
+    applies: [lang:python]
+    why: Async is a choice of concurrency model and does not automatically make things faster; mixing sync and async complicates the call chain and makes blocking problems harder to spot.
+  - id: PY-024
+    title: "Manage concurrent tasks in a structured way such as `asyncio.TaskGroup`; tasks created with `create_task` must have their references kept and their results awaited"
+    level: soft
+    check: semi
+    how: "During review, check for `asyncio.create_task(...)` calls whose references are not kept; Ruff's `RUF006` can find some candidates"
+    applies: [lang:python]
+    why: The official documentation states that the event loop holds only weak references to tasks, so a task whose reference is not kept may be garbage-collected mid-execution; TaskGroup ensures that sibling tasks are cancelled together when one fails.
+    sources: [S07, S18]
+    see: ["COD-035"]
+  - id: PY-025
+    title: "Do not swallow `asyncio.CancelledError`; after catching it and finishing cleanup, re-raise it"
+    level: hard
+    check: manual
+    how: "During review, check the handling branches for `except BaseException` and `except asyncio.CancelledError`"
+    applies: [lang:python]
+    why: The official documentation requires that a cancellation exception be re-raised after it is caught; swallowing it breaks timeouts, TaskGroup and graceful shutdown.
+    sources: [S18]
+  - id: PY-026
+    title: "Set a timeout on every external HTTP call; when using `requests`, `timeout` must be passed explicitly"
+    level: hard
+    check: auto
+    how: "Enable Ruff's `S113` (requests call without timeout); HTTPX timeouts must not be set to `None`"
+    applies: [lang:python]
+    why: requests has no timeout by default, so a request waits forever when a downstream service hangs. HTTPX has a default timeout, but it can be disabled. For general requirements see 02.
+    sources: [S07, S19]
+    see: ["COD-033", "COD-034"]
+  - id: PY-027
+    title: HTTP clients, database engines and connection pools are reused for the application's lifetime and closed on exit, not created per request
+    level: soft
+    check: semi
+    how: "During review, check whether request handlers create `httpx.Client`, `create_engine`, etc.; integration tests check connection counts"
+    applies: [lang:python, kind:service]
+    why: HTTPX officially recommends reusing a Client to benefit from connection pooling; creating one each time wastes connections and leaks handles.
+    sources: [S15, S19]
+  # ── Logging ──
+  - id: PY-028
+    title: "Library code logs only through `logging.getLogger(__name__)` and does not configure handlers; applications configure structured output centrally at the entry point; production code does not use `print` for logging"
+    level: soft
+    check: auto
+    how: "Enable Ruff's `T20` (print) rules; review whether library code calls `logging.basicConfig`"
+    applies: [lang:python]
+    why: The official logging guide says libraries should not add handlers to their own loggers, otherwise they conflict with the application's configuration; for log field and redaction requirements see 02.
+    sources: [S27]
+    see: ["COD-016", "COD-019"]
+  # ── Validation and configuration ──
+  - id: PY-029
+    title: "External input (HTTP request bodies, external JSON, configuration, tool outputs) is validated with Pydantic v2 models at the boundary before use; new code does not use the `pydantic.v1` compatibility layer"
+    level: hard
+    check: semi
+    how: "Review whether unvalidated `dict`s are read directly at boundaries; search for `pydantic.v1` imports"
+    applies: [lang:python]
+    why: Unvalidated dicts carry type errors and malicious fields into business logic; Pydantic V1 is no longer developed and receives only critical and security fixes.
+    sources: [S13]
+  - id: PY-030
+    title: Configuration is loaded and validated centrally at startup with pydantic-settings; startup fails when it is missing or invalid
+    level: soft
+    check: semi
+    how: In startup tests, remove required configuration and confirm the process exits with an error
+    applies: [lang:python, kind:service]
+    why: Exposing configuration errors at startup is better than failing on the first request. For general requirements see 02.
+    sources: [S14]
+    see: ["COD-022"]
+  # ── Databases ──
+  - id: PY-031
+    title: "Production schemas are changed only by migration tools (Alembic or Django migrations); do not call `metadata.create_all` at startup"
+    level: hard
+    check: semi
+    how: "Search production code for `create_all` calls; CI checks that model changes come with migration files (Django uses `makemigrations --check`, Alembic uses `alembic check`)"
+    applies: [lang:python]
+    why: "`create_all` only creates missing tables; it does not alter existing tables and leaves no change history. For migration principles (prefer fixing forward, expand then contract) see 17."
+    sources: [S17]
+    see: ["17"]
+  - id: PY-032
+    title: Migrations autogenerated by Alembic must be reviewed manually before committing
+    level: hard
+    check: manual
+    how: Review migration files, focusing on renames, type changes, constraints and data migrations
+    applies: [lang:python]
+    why: Alembic's documentation states that autogenerate cannot detect table or column renames (it generates a drop followed by a create) and cannot detect some constraint and type changes.
+    sources: [S17]
+    see: ["17"]
+  - id: PY-033
+    title: Tests that depend on database semantics connect to a real database of the same kind (e.g. PostgreSQL started with testcontainers), not SQLite as a stand-in
+    level: hard
+    check: semi
+    how: Check the database connection configuration of integration tests
+    applies: [lang:python]
+    why: SQLite's types, locking and SQL dialect differ from PostgreSQL's, so passing tests do not mean the code works in production. For general requirements see 04.
+    sources: [S31]
+    see: ["TST-010"]
+  # ── Web and background tasks ──
+  - id: PY-034
+    title: Background tasks that must not be lost are handed to a separate task queue, not run with FastAPI's BackgroundTasks or in-process threads
+    level: hard
+    check: manual
+    how: During review, check whether the operations run in BackgroundTasks can tolerate being lost
+    applies: [lang:python, kind:service]
+    why: BackgroundTasks runs in the current process, so tasks are lost when the process restarts or crashes. Django's Tasks framework likewise only defines an interface and needs a separately configured execution backend. For overall queue selection and idempotency requirements see 18.
+    sources: [S12, S26]
+    see: ["18"]
+  # ── Testing ──
+  - id: PY-035
+    title: Use pytest for tests; add Hypothesis property-based tests for code with a large input space such as parsers, serialization and data transformation
+    level: soft
+    check: semi
+    how: During review, check whether parsing and transformation modules have property-based tests; when Hypothesis fails, keep the shrunk example
+    applies: [lang:python]
+    why: Property-based testing automatically generates many edge-case inputs and shrinks them to a minimal counterexample, finding cases hand-written tests miss. For test layering and coverage definitions see 04.
+    sources: [S20, S21]
+    see: ["04", "TST-014"]
+  - id: PY-036
+    title: Async tests use pytest-asyncio with an explicitly set event loop scope; tests do not share global state on the event loop
+    level: soft
+    check: semi
+    how: Check the asyncio mode and loop scope settings in the pytest configuration
+    applies: [lang:python]
+    why: Event loops and connections leaking between tests cause intermittent failures that appear only when running in parallel or in a particular order.
+    sources: [S29]
+  # ── Packaging and publishing ──
+  - id: PY-037
+    title: "Published libraries use a `src/` layout, and tests run against the built wheel after installing it"
+    level: soft
+    check: auto
+    how: "CI first runs `uv build`, then installs the wheel in a clean environment and runs the tests"
+    applies: [lang:python, kind:library]
+    why: The PyPA guide explains that the src layout prevents tests from accidentally importing the source in the repository instead of the installed package, which reveals files missing from the package.
+    sources: [S05]
+  - id: PY-038
+    title: When publishing to PyPI from CI, use Trusted Publishing (short-lived tokens); do not store long-lived API tokens in CI
+    level: soft
+    check: semi
+    how: Check the publishing pipeline's authentication method and the repository's list of secrets
+    applies: [lang:python, kind:library]
+    why: Trusted Publishing exchanges the CI identity for a token valid for a few minutes, carrying far less leak risk than a long-lived token. For signing and provenance attestations see 25.
+    sources: [S23]
+    see: ["25"]
+choices:
+  - category: Project and dependency management
+    pick: uv (pyproject.toml + uv.lock)
+    when: New applications, command-line tools and libraries
+    alternatives:
+      - { name: Poetry, when: "Existing Poetry projects with a stable team workflow; migration is not required" }
+      - { name: PDM, when: Existing PDM projects }
+      - { name: pip + pip-tools, when: Restricted environments where only pip is available }
+    avoid:
+      - { name: Maintaining only a loose requirements.txt, why: "Transitive dependencies are not locked, so installs are not reproducible" }
+      - { name: "Running `pip install -U` on production machines", why: "No record is kept and it cannot be rolled back" }
+    license: uv is dual-licensed under MIT or Apache-2.0
+    notes: "uv, Ruff and ty all belong to Astral; OpenAI announced its acquisition of Astral on 2026-03-19, and both parties committed to keeping the tools open source. Offline environments need a Python interpreter and a wheel repository prepared in advance."
+    sources: [S02, S09]
+  - category: Build backend
+    pick: Hatchling
+    alternatives:
+      - { name: uv_build, when: "Pure-Python projects that want to stay consistent with the uv toolchain" }
+      - { name: setuptools, when: Existing projects }
+      - { name: maturin, when: Native extensions written in Rust }
+      - { name: scikit-build-core, when: Native extensions written in C/C++ (CMake) }
+    avoid:
+      - { name: setup.py with dynamic install logic, why: "Runs arbitrary code at install time and is hard to analyze statically" }
+    sources: [S05]
+  - category: Linting and formatting
+    pick: Ruff
+    alternatives:
+      - { name: Black + isort + flake8, when: During migration of existing projects }
+    avoid:
+      - { name: Running multiple formatters at once, why: "Rules conflict and keep rewriting the same code" }
+    license: MIT
+    sources: [S06]
+  - category: Type checking
+    pick: mypy
+    alternatives:
+      - { name: Pyright, when: "The team mainly uses VS Code (Pylance) and wants editor and CI results to match; requires a Node runtime" }
+      - { name: ty, when: "Side-by-side comparison only; evaluate it as a gate after an official stable release" }
+    avoid:
+      - { name: Two checkers both acting as blocking gates, why: Rule differences cause conflicts }
+    license: mypy, Pyright and ty are all MIT
+    sources: [S08, S10]
+  - category: Web framework
+    pick: FastAPI + Pydantic v2 + Uvicorn
+    when: API-centric services
+    alternatives:
+      - { name: Django, when: "An admin interface and an integrated full ORM, authentication and migrations are needed" }
+      - { name: Flask, when: Small services or existing projects }
+      - { name: Litestar, when: "Controlled pilots; validate plugins and maintenance capacity first" }
+    avoid:
+      - { name: Writing your own ASGI or WSGI framework, why: "Mature frameworks exist, and maintaining a homegrown one is costly" }
+    license: FastAPI is MIT; Django and Flask are BSD-3-Clause
+    notes: FastAPI is still released as 0.x and updates frequently; read the release notes before upgrading.
+    sources: [S12]
+  - category: Data validation and configuration
+    pick: Pydantic v2; pydantic-settings for configuration
+    alternatives:
+      - { name: msgspec, when: Serialization and validation on performance-critical paths }
+      - { name: dataclasses, when: Internal data structures that need no validation }
+    avoid:
+      - { name: pydantic.v1 compatibility layer, why: V1 is no longer developed }
+      - { name: A separate set of validators in every layer, why: Duplicated and inconsistent }
+    license: MIT
+    sources: [S13, S14]
+  - category: Database access
+    pick: SQLAlchemy 2 (ORM and Core) + psycopg 3
+    alternatives:
+      - { name: Django ORM, when: Django projects }
+      - { name: asyncpg, when: "No ORM, and async PostgreSQL performance is the priority" }
+      - { name: SQLModel, when: "Simple FastAPI services; not a full replacement for SQLAlchemy" }
+    avoid:
+      - { name: Homegrown ORM, why: Mature solutions exist }
+      - { name: "Using it untested against various \"PostgreSQL-compatible\" databases", why: "Dialect, types and locking behavior may differ" }
+    license: SQLAlchemy is MIT; psycopg is LGPL-3.0 (review according to the policy in 27 before distribution)
+    sources: [S15, S16]
+  - category: Database migration tool
+    pick: Alembic
+    alternatives:
+      - { name: Django migrations, when: Django projects }
+    avoid:
+      - { name: create_all at startup, why: "Cannot alter existing tables and leaves no change history" }
+    license: MIT
+    notes: For migration principles see 17.
+    sources: [S17]
+  - category: HTTP client
+    pick: HTTPX
+    alternatives:
+      - { name: requests, when: "Existing synchronous projects; timeout must be passed explicitly" }
+      - { name: aiohttp, when: Its specific streaming or WebSocket capabilities are needed }
+    avoid:
+      - { name: urllib with hand-written connection pooling and retries, why: Too many edge cases }
+    notes: Use Tenacity for retries; for retry count and backoff requirements see 02.
+    sources: [S19]
+  - category: Background task library
+    pick: Celery
+    when: "Task systems that need routing, scheduling and multiple message brokers; for overall queue and scheduling selection see 18"
+    alternatives:
+      - { name: RQ, when: "Redis is already in place and tasks are simple" }
+      - { name: Dramatiq, when: License review permits LGPL }
+    avoid:
+      - { name: Arq as the default for new projects, why: It has officially declared maintenance-only mode }
+      - { name: FastAPI BackgroundTasks for tasks that must not be lost, why: Lost as soon as the process exits }
+    sources: [S24]
+  - category: Logging
+    pick: Standard library logging + a JSON formatter
+    alternatives:
+      - { name: structlog, when: Easier binding of context fields is needed }
+    avoid:
+      - { name: print as production logging, why: "No levels or structure, so it cannot be searched" }
+    sources: [S27]
+  - category: Testing
+    pick: pytest + Hypothesis + pytest-asyncio + testcontainers
+    alternatives:
+      - { name: unittest, when: Situations where third-party dependencies cannot be introduced }
+      - { name: pytest-xdist, when: "Many tests that need to run in parallel; first ensure tests are isolated from each other" }
+    avoid:
+      - { name: SQLite as a stand-in for PostgreSQL, why: Dialect and locking behavior differ }
+    license: pytest is MIT; Hypothesis is MPL-2.0
+    sources: [S20, S21, S29, S31]
+  - category: Dependency vulnerability auditing
+    pick: pip-audit
+    alternatives:
+      - { name: OSV-Scanner, when: "Multi-language repositories that want a single tool; for overall selection see 25" }
+    sources: [S22]
+antipatterns:
+  - { bad: Upgrading the whole repository immediately just because a new Python minor version was released, instead: "Run the full test suite in CI first and confirm that native dependencies all have wheels before switching" }
+  - { bad: "Using `# noqa` or `# type: ignore` in bulk to silence errors and turn CI green", instead: "Fix the problems; where an exception is unavoidable, write the rule code and reason for each one" }
+  - { bad: "Using requests or time.sleep inside `async def`", instead: "Use HTTPX's AsyncClient and asyncio.sleep, and move blocking calls to a thread pool" }
+  - { bad: Creating a new database connection or HTTP client per request, instead: Reuse them for the application's lifetime and close them on exit }
+  - { bad: "Preinstalling the full torch, pandas and Celery suite in every service", instead: "Use optional dependencies (extras) as needed, and manage data and model dependencies separately (see 22, 24)" }
+  - { bad: "Mixing public and internal indexes with `--extra-index-url`", instead: "Use an internal proxy mirror, and resolve internal package names only from the internal network" }
+  - { bad: Committing Alembic-autogenerated migrations directly, instead: "Manually review renames, type changes and constraint changes" }
+  - { bad: Claiming offline deployment support because installation succeeded in CI with network access, instead: Install with --no-index and start the application in an offline environment }
+sources:
+  - { id: S01, title: "Python Developer's Guide: Status of Python versions", url: "https://devguide.python.org/versions/", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "uv documentation: Locking and syncing", url: "https://docs.astral.sh/uv/concepts/projects/sync/", publisher: Astral, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "uv documentation: Package indexes", url: "https://docs.astral.sh/uv/concepts/indexes/", publisher: Astral, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S04, title: "PEP 751: A file format to record Python dependencies for installation reproducibility", url: "https://peps.python.org/pep-0751/", publisher: Python Software Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S05, title: Python Packaging User Guide, url: "https://packaging.python.org/en/latest/", publisher: PyPA, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: Ruff, url: "https://github.com/astral-sh/ruff", publisher: Astral, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Ruff: Rules", url: "https://docs.astral.sh/ruff/rules/", publisher: Astral, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: ty, url: "https://github.com/astral-sh/ty", publisher: Astral, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: OpenAI to acquire Astral, url: "https://openai.com/index/openai-to-acquire-astral", publisher: OpenAI, date: 2026-03-19, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: mypy documentation, url: "https://mypy.readthedocs.io/", publisher: mypy, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "PEP 561: Distributing and Packaging Type Information", url: "https://peps.python.org/pep-0561/", publisher: Python Software Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: FastAPI, url: "https://pypi.org/project/fastapi/", publisher: FastAPI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "Pydantic: Version policy", url: "https://pydantic.dev/docs/validation/latest/get-started/version-policy/", publisher: Pydantic, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: pydantic-settings, url: "https://pypi.org/project/pydantic-settings/", publisher: Pydantic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: SQLAlchemy documentation, url: "https://docs.sqlalchemy.org/en/21/", publisher: SQLAlchemy, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: Psycopg, url: "https://www.psycopg.org/", publisher: Psycopg, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Alembic: Auto Generating Migrations", url: "https://alembic.sqlalchemy.org/en/latest/autogenerate.html", publisher: SQLAlchemy, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "asyncio: Coroutines and Tasks", url: "https://docs.python.org/3/library/asyncio-task.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "HTTPX: Timeouts", url: "https://www.python-httpx.org/advanced/timeouts/", publisher: Encode, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: pytest documentation, url: "https://docs.pytest.org/", publisher: pytest, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Hypothesis documentation, url: "https://hypothesis.readthedocs.io/", publisher: Hypothesis, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: pip-audit, url: "https://github.com/pypa/pip-audit", publisher: PyPA, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "PyPI: Trusted Publishers", url: "https://docs.pypi.org/trusted-publishers/", publisher: PyPI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: arq, url: "https://github.com/python-arq/arq", publisher: arq, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S25, title: "Python support for free threading", url: "https://docs.python.org/3/howto/free-threading-python.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "Django: Tasks framework", url: "https://docs.djangoproject.com/en/6.0/topics/tasks/", publisher: Django Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Logging HOWTO: Configuring logging for a library", url: "https://docs.python.org/3/howto/logging.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: pre-commit, url: "https://pre-commit.com/", publisher: pre-commit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: pytest-asyncio, url: "https://pytest-asyncio.readthedocs.io/", publisher: pytest-dev, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "zoneinfo: IANA time zone support", url: "https://docs.python.org/3/library/zoneinfo.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: testcontainers-python, url: "https://testcontainers-python.readthedocs.io/", publisher: Testcontainers, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "Whether OpenAI's acquisition of Astral has closed, and whether governance and licensing of uv/Ruff/ty change afterward (when announced on 2026-03-19 it required regulatory approval; no closing announcement was found)"
+  - "Whether the pydantic.v1 compatibility layer still works on newer Python versions (the version policy page does not say); the timeline for Pydantic V3"
+  - Whether the uv_build build backend has been marked stable and is suitable as the default (not verified)
+  - "Licenses are carried over from the original research and have not been checked one by one against the official LICENSE files: uv, Hatchling, mypy, Pyright, Django, Flask, SQLAlchemy, psycopg, Alembic, Celery, RQ, Dramatiq, pytest, Hypothesis, pip-audit, structlog"
+  - "Ruff rule codes (PGH003/PGH004, RUF006, ASYNC210/251, S113, etc.) were written from the original research and existing knowledge and have not been verified one by one against the current rules page"
+  - "Compatibility of domestic Chinese databases (openGauss, Dameng, KingbaseES, etc.) with psycopg 3, SQLAlchemy and Alembic: research pending"
+  - "Research pending: maturity and recommendation of Python mutation testing tools (e.g. mutmut, cosmic-ray)"
+  - "Research pending: breaking-change checking tools for the OpenAPI exported by FastAPI (to be decided together with 16)"

@@ -1,0 +1,610 @@
+id: "06"
+slug: product
+title: Product and Requirements
+summary: "From an idea to the post-launch review: how to write requirements, how to write acceptance criteria that can be decided, when to ask a person, how to set scope and priority, how to break down tasks, what a prototype should deliver, and how to write release notes and review outcomes. This topic defines how the vocabularies for priority, task status, and risk level are used."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Form and level of detail of requirements documents
+    - Fields and wording of acceptance criteria (AC)
+    - "Requirements clarification: when to ask, what to ask, and what counts as blocking"
+    - Use of scope, priority (P0–P3), and MoSCoW
+    - Task breakdown, dependencies, and task status (including the Definition of Ready)
+    - Prototype fidelity levels and the design handoff checklist
+    - Fields of the delivery brief
+    - Content of release notes, user feedback, and outcome reviews
+  excludes:
+    - { what: "Binding fields for acceptance evidence, recording evidence status, and evidence invalidation", see: "04" }
+    - { what: "Which checks must run at each risk level", see: "04" }
+    - { what: "Branches, PRs, reviews, release process, and version numbers", see: "03" }
+    - { what: "How to write user-facing changelogs, ADRs, and diagramming tools", see: "05" }
+    - { what: "Specific conventions for interaction behavior such as empty, loading, and error states", see: "09" }
+    - { what: "Agents must not accept their own work; general requirements for delivery evidence", see: "23" }
+    - { what: "Prompt injection and untrusted input", see: "25" }
+    - { what: "Regulatory requirements such as personal information and cross-border data transfer", see: "27" }
+    - { what: "Event tracking, metric definitions, and experiments", see: "22" }
+overview: |
+  1. **Level of detail follows risk, not code size.** How much a requirements document says is decided by the change's risk level (R0–R3, see the shared glossary): R0–R1 get a task card, R2 a one-page spec, R3 a full spec plus a risk review. Not every project needs a long PRD.
+  2. **Write the problem first, then the solution.** State whose problem is being solved, how it is handled today, and what should change, before discussing how to do it. Keep facts, assumptions, and open questions separate.
+  3. **One source of meaning, linked from many places.** The approved version of the requirement is authoritative; the issue tracks execution status, the design file holds the concrete solution, and tests and evidence hold the verified facts. Reference each other with links instead of each keeping its own copy.
+  4. **Acceptance criteria must be decidable.** Preconditions, action, observable result, boundaries and counterexamples, how to verify, and who verifies. Do not write "fast", "friendly", or "complete". Use Gherkin only when it has a net benefit.
+  5. **Look it up before asking; stop when blocked.** Do not ask what can be found in the repository and existing documents; each round, ask only a few questions that only a person can decide, with a recommended default; for open questions about permissions, privacy, money, contracts, or irreversible operations, do not answer on someone's behalf with a default.
+  6. **Record the three dimensions separately.** The three vocabularies below mean different things; do not mix them:
+
+     | Dimension | Terms | Question it answers |
+     |---|---|---|
+     | Priority | P0 / P1 / P2 / P3 | When to do it (P0 immediately, P1 this iteration, P2 scheduled, P3 when time allows) |
+     | Scope level (MoSCoW) | Must / Should / Could / Won't this time (field values `must` / `should` / `could` / `wont`) | Whether it must be delivered in this version |
+     | Risk level | R0 / R1 / R2 / R3 | How strict the process and checks must be (required checks in 04) |
+
+  7. **There are only seven task statuses.** Needs clarification → Ready → In progress → In review → Awaiting acceptance → Done; any unfinished status can move to Cancelled. "Blocked" is a flag, not a status; "Released" is determined by the release record, not by task status.
+  8. **Green CI, passing AC, business acceptance, and release are four separate things.** Passing one does not imply the next; each has its own owner and its own record.
+  9. **Choose prototype fidelity by the risk it should reduce.** Do not default to high fidelity; AI-generated prototypes are only candidate solutions, not evidence of implementation.
+  10. **Look back after release.** Release notes state the changes users will notice, known issues, and how to roll back; after launch, check on the agreed schedule whether the outcome met expectations.
+rules:
+  # ── How to write requirements ──
+  - id: PRD-001
+    title: An approved requirement must have a unique, never-reused ID, a version number, an owner, and a status
+    level: hard
+    check: auto
+    how: Validate the requirement file's header fields with JSON Schema, then use a script to check that IDs are unique across the repository and that deleted IDs are not reused
+    applies: [all]
+    why: Without stable IDs and versions, tasks, tests, and evidence cannot point back to "which version was approved at the time".
+    detail: |
+      Requirement file header fields (the single canonical set):
+
+      | Field | Meaning |
+      |---|---|
+      | `id` | Requirement ID, e.g. `REQ-0012`; never reused |
+      | `title` | The problem to solve, in one sentence |
+      | `version` | Integer, incremented on each substantive change after approval |
+      | `owner` | Owner (role or account) |
+      | `status` | Draft / Approved / Deprecated (any change produces a new version) |
+      | `priority` | P0–P3 |
+      | `risk` | R0–R3 |
+      | `offline_required` | Whether it must work without network access |
+
+      The ID format is up to the project; the `REQ-` prefix in the example is only illustrative.
+    sources: [S08]
+  - id: PRD-002
+    title: Before implementation starts, state the problem, target users, current state, and the change it should bring
+    level: soft
+    check: semi
+    how: The template fixes these sections and CI checks they are not empty; whether the content holds up is judged in review
+    applies: [all]
+    why: When only the solution is written and not the problem, developers (especially Agents) will very efficiently solve the wrong problem.
+    sources: [S01, S02]
+  - id: PRD-003
+    title: State what is in scope and out of scope for this work; out-of-scope items must name concrete capabilities, not "advanced features are not considered for now"
+    level: soft
+    check: semi
+    how: The template fixes "In scope" and "Out of scope" sections and CI checks they are not empty; reviewers check that out-of-scope items are concrete
+    applies: [all]
+    why: A vague "not doing" neither stops scope creep nor stops implementers from adding features on their own.
+    detail: |
+      - Weak: "This phase will not consider some advanced features for now."
+      - Strong: "This phase does not include cross-department bulk authorization; does not send business data to third-party AI services; does not support automatic merging of offline edit conflicts. If needed, open a separate requirement with its own acceptance."
+    sources: [S01, S02]
+  - id: PRD-004
+    title: Write confirmed facts, unverified assumptions, external constraints, and open questions separately; do not present inferred content as confirmed requirements
+    level: soft
+    check: semi
+    how: Separate sections in the template; an Agent or reviewer flags "confirmed" content that has no source
+    applies: [all]
+    why: Once a guess is written into a requirement, it gets implemented and accepted as if users asked for it.
+  - id: PRD-005
+    title: The level of detail of a requirements document is decided by risk level R0–R3, based on impact, not code size
+    level: soft
+    check: manual
+    how: In review, check the requirement's declared level against the risk levels in the glossary; the author may only raise it
+    applies: [all]
+    why: Writing long documents for every requirement kills small changes; writing one sentence for every requirement lets high-risk changes get out of control.
+    detail: |
+      | Risk | Requirement form (illustrative) | Additional requirements |
+      |---|---|---|
+      | R0–R1 | Task card: goal, reproduction or current state, minimal AC, risk | No prototype required |
+      | R2 | One-page spec: problem, scope, structured AC, task breakdown | Low fidelity as needed when there is a UI |
+      | R3 | Full spec | Risk review (PRD-006), dependency graph, acceptance matrix, release and rollback plan, approval by an authorized person |
+
+      Work to validate technical feasibility or gauge cost is opened as a separate **exploration task** (PRD-024) and does not count as a requirement level.
+    see: ["04"]
+  - id: PRD-006
+    title: "An R3 requirement must complete a risk check during the requirements phase: permissions, money, personal information and outbound data, migrations and irreversible operations, offline requirements, handling of untrusted input; for items that do not apply, state why"
+    level: hard
+    check: semi
+    how: The requirement template includes risk-check sections; CI checks that every section of an R3 requirement has a conclusion or "not applicable" with a reason; the corresponding owner confirms
+    applies: [all]
+    why: If these issues are discovered only during implementation or after launch, the cost is rework, data leaks, or violations.
+    detail: |
+      - This rule only requires that the check be **triggered during the requirements phase**; for how to judge it, see 27 for regulations and privacy, and 25 for prompt injection and untrusted input (instructions embedded in requirement text or customer feedback).
+      - Write offline requirements into the acceptance criteria: complete the promised flow in an environment with no external network and an empty cache (verification method in TST-035).
+    see: ["25", "27", "TST-035"]
+  # ── Acceptance criteria ──
+  - id: PRD-007
+    title: Every "Must" requirement is linked to at least one numbered acceptance criterion (AC)
+    level: hard
+    check: auto
+    how: A script checks that every requirement whose priority is Must has at least one AC pointing to it
+    applies: [all]
+    why: For a Must item with no acceptance criteria, even when the work is done there is no way to tell whether it counts as complete.
+    sources: [S05]
+  - id: PRD-008
+    title: "Acceptance criteria use a single set of fields: preconditions, action, expected result, boundaries and counterexamples, verification method, evidence type, verifier"
+    level: soft
+    check: auto
+    how: Validate AC files with JSON Schema; use only the field names in the table below
+    applies: [all]
+    why: If everyone uses their own fields, coverage cannot be checked automatically and nothing can be reused across projects.
+    detail: |
+      AC fields (the single canonical set):
+
+      | Field | Meaning |
+      |---|---|
+      | `id` | AC ID, e.g. `AC-0042` |
+      | `requirement_id` | ID of the requirement it belongs to |
+      | `scope_level` | Must / Should / Could (`must` / `should` / `could`) |
+      | `kind` | Behavior / Constraint / Quality / Human judgment |
+      | `preconditions` | Preconditions (list) |
+      | `action` | Action or input |
+      | `expected` | Observable result, explicit rejection, or decision threshold |
+      | `boundary_cases` | Boundaries and counterexamples; if none, write "none" with a reason |
+      | `verification.method` | Automated / Manual / Mixed |
+      | `verification.ref` | Test ID or manual steps |
+      | `verification.evidence` | Required evidence type (test report, screenshot, logs, etc.) |
+      | `verification.environment` | Environment in which it is verified |
+      | `verification.verifier` | Verifier (role) |
+      | `status` | Draft / Approved / Deprecated |
+
+      The approver and approval time are not written in the AC file; the system records them (PRD-026).
+    sources: [S06]
+  - id: PRD-009
+    title: A "Must" AC must state the verification method, evidence type, and verifier
+    level: hard
+    check: auto
+    how: JSON Schema requires the three fields under verification to be non-empty for ACs whose scope_level is Must
+    applies: [all]
+    why: If it doesn't say who verifies and what proves it, acceptance comes down to "I think it's done".
+    see: ["04"]
+  - id: PRD-010
+    title: ACs state observable results or quantifiable decisions, not just "fast", "friendly", "complete", or "same as the design"; thresholds are set by the product side from a baseline, not invented by developers or Agents
+    level: soft
+    check: semi
+    how: Scan ACs for vague words using a word list; reviewers rewrite matches; threshold fields must cite their source
+    applies: [all]
+    why: Vague words cannot decide pass or fail; invented thresholds look precise but nobody actually agreed to them.
+    detail: |
+      | Vague wording | Direction for rewriting (numbers are illustrative only) |
+      |---|---|
+      | Export should be fast | For a given dataset, machine, and concurrency, most export jobs finish within the agreed threshold; on timeout, a traceable failure reason is given |
+      | Permissions are complete | When a regular member reads another department's private report, the server rejects it and the response contains none of the report content; an authorized administrator can read it |
+      | Same as the design | Under specified screens, content, and states, it matches the approved UI acceptance checklist; differences from dynamic content and system fonts are listed as exceptions |
+      | Friendly error messages | On validation failure, show actionable suggestions without exposing server stack traces, and the user can submit again |
+      | Upload just needs to succeed | Allowed types return a file ID; disallowed types are rejected; oversized files are not written to disk; temporary files are cleaned up on failure |
+      | Supports offline | In a fresh installation with the external network off and an empty cache, the specified flow completes with no required external requests |
+    sources: [S06]
+  - id: PRD-011
+    title: For flows involving failure, rejection, empty results, or boundary values, ACs must cover those cases, not only the happy path
+    level: soft
+    check: semi
+    how: An Agent or reviewer checks each AC's boundary_cases; any "none" must have a reason
+    applies: [all]
+    why: Acceptance that only checks positive cases breaks on the first abnormal input after launch.
+    sources: [S05]
+    see: ["TST-007"]
+  - id: PRD-012
+    title: Use Gherkin only when business rules are stable and scenarios will be bound to step definitions and actually executed; do not require every requirement to be written as a .feature file
+    level: soft
+    check: manual
+    how: In review, check that every .feature file has corresponding step definitions and runs in CI
+    applies: [all]
+    why: Gherkin without step definitions is just text in another format, yet it gives the false impression of "automated acceptance".
+    detail: |
+      - Given states the preceding context, When states the event, Then states the observable result.
+      - Not suited to Gherkin: API data contracts, mathematical constraints, deployment acceptance, pure copy reviews.
+    sources: [S06, S07]
+  - id: PRD-013
+    title: Spec quality passing, implementation evidence passing, and business acceptance passing are three layers of judgment; passing one layer does not imply the next; passing CI does not mean the AC passes
+    level: hard
+    check: semi
+    how: "Task status transition checks: entering Awaiting acceptance requires evidence for every Must AC; entering Done requires an acceptance record from an authorized person"
+    applies: [all]
+    why: Treating green CI or a fully ticked spec checklist as acceptance is the most common form of "fake done".
+    detail: |
+      - Spec quality: fields complete, no open blocking questions, AC decidable. Can be partly automated.
+      - Implementation evidence: verification executed on the specified commit and environment, with traceable evidence (binding fields in TST-030).
+      - Business acceptance: an authorized person confirms it matches the approved intent and the remaining risk is acceptable, recording the time, decision, and exceptions.
+    sources: [S05]
+    see: ["04", "AGT-014"]
+  - id: PRD-014
+    title: Record each AC's verification result only as "not run, passed, failed, skipped"; anything not actually verified is recorded as "not run" with a reason and a follow-up owner, never as passed
+    level: hard
+    check: auto
+    how: The delivery brief and acceptance matrix validate the status enum with a schema; "not run" or "skipped" without a reason is an error
+    applies: [all]
+    why: Recording unverified work as passed takes away the reviewer's basis for judgment.
+    see: ["TST-029", "AGT-013"]
+  - id: PRD-015
+    title: Acceptance passes only when all Must ACs pass; an overall pass rate does not offset failed Must items; exceptions are recorded by an authorized person
+    level: hard
+    check: auto
+    how: "A script computes from the acceptance matrix: if any Must AC is not \"passed\" and has no approved exception, the transition to Done is not allowed"
+    applies: [all]
+    why: "\"95% of tests pass\" may happen to miss exactly the acceptance for permissions or data security."
+  # ── Clarification ──
+  - id: PRD-016
+    title: Before asking, check the repository, existing specs, past decisions, and current product behavior; do not ask what can be looked up
+    level: soft
+    check: manual
+    how: In review, spot-check clarification questions to see whether the answer was already in the repository or documents
+    applies: [all]
+    why: Repeatedly asking about known things wastes decision-makers' time and shows the context wasn't read.
+    sources: [S04]
+  - id: PRD-017
+    title: Each round, ask only a few high-impact questions that only a person can decide; each question states its impact, options, and a recommended default, and the Q&A is recorded in the requirement
+    level: soft
+    check: semi
+    how: A script counts the questions per round and checks that fields are complete; question quality is judged in review
+    applies: [all, kind:agent]
+    why: Too many questions get perfunctory answers; without a recommended value, decision-makers have to think it through from scratch.
+    ref_value: "Reference value: no more than 3 per round. This is an empirical value for limiting interruptions, not a standard. Compare with Spec Kit's approach: at most 3 \"needs clarification\" markers in a spec; the clarification step asks one question at a time, at most 5 per session, with a recommended option for each."
+    detail: |
+      Clarification question fields (the single canonical set): `question_id`, `requirement_id`, `blocking` (whether it blocks), `options`, `recommended_default`, `reason` (impact description), `decider` (who decides), `answer`, `decided_at`.
+
+      The limit is a per-round budget, not a cap for the whole requirement; once answered, another round can start.
+    sources: [S04, S05]
+    see: ["AGT-018"]
+  - id: PRD-018
+    title: Open questions involving permissions, privacy, money, contracts, irreversible operations, or acceptance criteria must be marked as blocking; while blocked, the task stays in Needs clarification and no default may be used to answer on someone's behalf
+    level: hard
+    check: auto
+    how: "Status transition check: if a requirement has an unanswered question with blocking set to true, the transition to Ready is rejected"
+    applies: [all]
+    why: Guessing wrong on these means overreach, leaks, or breach of contract; you cannot gamble with "just go with the default for now".
+    detail: |
+      - Low-impact uncertainty: write it as an assumption and continue with reversible work.
+      - Things you can research yourself: turn them into an exploration task.
+      - High-impact questions only a person can decide: mark as blocking and wait for an explicit decision.
+  # ── Scope and priority ──
+  - id: PRD-019
+    title: Use only P0–P3 for priority, only Must/Should/Could/Won't this time for scope level, and only R0–R3 for risk; record the three separately and never substitute one for another
+    level: hard
+    check: auto
+    how: Restrict the enum values of the three fields with JSON Schema (scope level field values are must, should, could, wont)
+    applies: [all]
+    why: If each project invents its own vocabulary, cross-project aggregation and migration break; conflating "must do" with "do now" distorts priority.
+    detail: |
+      - P0–P3 are defined in the shared glossary; effort is recorded separately, and "small" is not used in place of "urgent" (see FLW-036).
+      - The field value for "Won't this time" is always `wont`, not `won't` or `wontfix`.
+      - The author may only raise the risk level; when unsure, go one level higher.
+    see: ["FLW-036", "TST-003"]
+  - id: PRD-020
+    title: Schedule regulatory, contractual, and security-blocking items first as hard gates, then rank the rest with MoSCoW or RICE; scores are only a reference and do not automatically decide whether to do something
+    level: soft
+    check: manual
+    how: When reviewing the schedule, check that hard-gate items are listed separately and that the ranking was confirmed by a person
+    applies: [all]
+    why: Scoring models push mandatory compliance items that "affect few people" to the bottom; the authors of RICE also say ranking need not strictly follow the score.
+    detail: |
+      - MoSCoW: suited to negotiating the scope of a single release; must come with a "Won't this time" list.
+      - RICE (Reach × Impact × Confidence ÷ Effort): suited to backlog items whose reach and effort can be compared; do not invent numbers when there is no baseline.
+      - Shape Up's appetite (the maximum time you're willing to invest): suited to uncertain requirements with fixed resources.
+    sources: [S10, S11, S02]
+  - id: PRD-021
+    title: Limit the number of Must items and set a time or budget cap for the work; when it is exceeded, first cut non-critical scope, then phase the work, and only then add resources; do not hide overruns
+    level: soft
+    check: manual
+    how: In review, check the proportion of Must items and whether the budget cap is stated; on overrun, check that there is a record and a decision
+    applies: [all]
+    why: If everything is Must, there is no priority; without a cap, scope keeps growing.
+    detail: |
+      Give estimates as ranges with assumptions (e.g. "3–5 days, assuming the API already exists"), and state how far over the estimate you stop and decide again; do not give precise single-point hours.
+    sources: [S02]
+  - id: PRD-022
+    title: Adding scope, or downgrading or deleting a Must AC, requires a change record and approval by an authorized person, and the old version is kept
+    level: hard
+    check: semi
+    how: Requirements and ACs live in Git; CI diffs the approved version against the current one; changes to Must ACs require approval by the requirement owner (e.g. via CODEOWNERS)
+    applies: [all]
+    why: Quietly changing the acceptance criteria and then declaring a pass amounts to no acceptance at all.
+    detail: |
+      Change record fields: `change_id`, reason, affected requirements and ACs, added cost or time, scope removed or deferred, decider, approval time.
+
+      Prototype iterations may change implementation details; once a user-visible result or an approved acceptance condition changes, it must go through the change process.
+    sources: [S02]
+    see: ["03"]
+  # ── Task breakdown and dependencies ──
+  - id: PRD-023
+    title: Every implementation task is linked to a requirement or AC, or to an approved maintenance goal (such as technical debt or a dependency upgrade)
+    level: soft
+    check: auto
+    how: A script checks that at least one of the task's requirement_ids, acceptance_ids, or maintenance-goal fields is non-empty
+    applies: [all]
+    why: For a task with no traceable origin, nobody can judge whether it should be done or how to accept it when finished.
+  - id: PRD-024
+    title: Keep exploration tasks (establishing feasibility, cost, or assumptions) separate from implementation tasks; an exploration produces conclusions and recommendations and does not automatically gain authorization to ship
+    level: soft
+    check: semi
+    how: A task type field distinguishes "implementation" from "exploration"; code from exploration tasks is not merged directly into the release branch, which is checked in review
+    applies: [all]
+    why: A working prototype does not mean the solution is ready to ship; exploration code usually hasn't passed security, performance, or boundary checks.
+  - id: PRD-025
+    title: Slice tasks vertically by user value that can be demonstrated independently, stating what to do, what not to do, and what may be changed; when multiple tasks jointly implement one AC, designate the person responsible for final verification
+    level: soft
+    check: manual
+    how: When reviewing the breakdown, check whether each task can be demonstrated and verified on its own
+    applies: [all]
+    why: Tasks split by layer (all the database first, then all the APIs) cannot be verified on their own when finished, and problems surface only at the end.
+    ref_value: When a routine coding task exceeds roughly 0.5–2 developer-days, suggest considering a further split. This is an empirical hint for spotting oversized tasks, not a rule on hours; an Agent working fast does not make verification cheaper.
+    detail: |
+      Task fields (the single canonical set): `id`, `kind` (implementation / exploration / documentation), `status`, `requirement_ids`, `acceptance_ids`, `depends_on`, `owner`, `budget` (range or timebox); the body states what to do, what must never be done, the modules and environments that may be changed, and the conditions for stopping.
+    sources: [S09]
+  - id: PRD-026
+    title: depends_on means blocking dependencies only; informational links are recorded separately; the task dependency graph must have no cycles
+    level: hard
+    check: auto
+    how: A script reads depends_on from all tasks, runs cycle detection, and checks that referenced task IDs exist
+    applies: [all]
+    why: A cyclic dependency graph cannot yield an execution order; recording "same module" as a blocking dependency makes tasks block each other.
+  - id: PRD-027
+    title: Task status uses only "Needs clarification, Ready, In progress, In review, Awaiting acceptance, Done, Cancelled", with transitions under defined conditions
+    level: hard
+    check: auto
+    how: The task system or a repository script validates the status enum and transition conditions; skipping Awaiting acceptance to go straight to Done is not allowed
+    applies: [all]
+    why: When status names and transition conditions aren't uniform, "done" means different things to different people.
+    detail: |
+      | Status | Entry condition |
+      |---|---|
+      | Needs clarification | Newly created; or has an unanswered blocking question |
+      | Ready | Goal, scope, Must ACs, and risk level are approved; no open blocking questions; dependencies are ready or scheduled (this is the Definition of Ready) |
+      | In progress | Someone has claimed it and started |
+      | In review | The change is submitted and awaiting code review |
+      | Awaiting acceptance | Review passed, trusted CI passed, and every Must AC has a verification result |
+      | Done | An authorized person has confirmed acceptance (PRD-015) |
+      | Cancelled | Reachable from any unfinished status; a reason is required |
+
+      - "Blocked" is marked with the `blocking` flag, not a separate status.
+      - "Done" only means acceptance passed; whether it has been released is determined by the release record (see 03).
+      - A PR merge is an event that triggers a status change, not a status itself.
+    see: ["FLW-036", "03"]
+  - id: PRD-028
+    title: Requirement approval and business acceptance are recorded by an authorized person in the task system or code hosting platform; Agents do not fill in the approver and time, and an "approver" handwritten in a file does not count as approval
+    level: hard
+    check: auto
+    how: Approval is based on the platform's approval events (e.g. PR approvals, issue status change history); a script verifies that the approver's identity is on the authorized list
+    applies: [all]
+    why: Anyone or any Agent can write an "approved_by" line in Markdown; only the platform's identity records prove that someone really approved it.
+    see: ["AGT-014"]
+  # ── Prototypes and design handoff ──
+  - id: PRD-029
+    title: Choose the prototype fidelity level by the risk it should reduce, and do not default to high fidelity; keep editable source files for flowcharts and prototypes
+    level: soft
+    check: manual
+    how: In review, check that the prototype fidelity matches the question it must answer; check that the repository or design tool has source files, not just images
+    applies: [all]
+    why: Building high fidelity before the direction is settled locks in the solution; a prototype kept only as images can be neither changed nor reproduced.
+    detail: |
+      | Level | Risk it reduces | Minimum deliverable |
+      |---|---|---|
+      | No prototype | APIs, scripts, very small fixes | Flow description or input/output examples |
+      | Low fidelity / flowchart | Information paths and step order | Flow nodes, key states, questions to confirm |
+      | Clickable prototype | Main paths and interaction branches | Link or file, version, main flow and error entry points |
+      | High-fidelity design | Visual design, complex business UIs | Stable version, key states, differences from the previous version |
+      | Runnable prototype | Real data or complex interactions | Repository and commit, startup steps, sample data, known limitations |
+    sources: [S12]
+    see: ["05"]
+  - id: PRD-030
+    title: Mark prototypes as "exploration" or "approved design"; unapproved prototypes and AI-generated prototypes are not treated as final, nor as evidence that a feature has been implemented
+    level: soft
+    check: semi
+    how: Design files or prototype directories carry a status marker; in review, check that the delivery brief does not use a prototype as implementation evidence
+    applies: [all]
+    why: A runnable AI-generated UI looks like a finished product, but security, accessibility, and data correctness have not been verified.
+    sources: [S22, S23]
+  - id: PRD-031
+    title: For requirements with a UI, the design handoff states the linked requirements and ACs, design version, user paths, required states, and real data boundaries
+    level: soft
+    check: semi
+    how: The handoff checklist template fixes these sections and CI checks they are not empty; the content is confirmed in review
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Given only a screenshot of the "normal state", developers have to guess what empty, failed, and no-permission states look like.
+    detail: |
+      - Required states (where applicable): normal, empty result, loading, failed, no permission, read-only or disabled. Interaction details for each state are in 09.
+      - Data boundaries: maximum length, quantity, masked samples, content that must not appear.
+      - What is illustrative and what is confirmed; open questions and the approver.
+      - How on-premises or offline customers view the design, and whether fonts and assets depend on the external network.
+    see: ["09"]
+  - id: PRD-032
+    title: Before customer or sensitive data enters a cloud prototyping tool or an external AI service, confirm the data classification and authorization
+    level: hard
+    check: manual
+    how: Before use, the data owner confirms according to the data classification and keeps a record; if synthetic or masked data will do, do not use real data
+    applies: [all]
+    why: Once data is sent to an external service it cannot be taken back, and it may violate contracts or regulations on personal information and cross-border data transfer.
+    sources: [S22, S23]
+    see: ["27"]
+  # ── Delivery, release, and review ──
+  - id: PRD-033
+    title: The delivery brief states the linked requirements and tasks, start and end commits, user-visible changes, what was not done, each AC's result and evidence, deviations, risks, and how to roll back
+    level: hard
+    check: semi
+    how: The delivery brief template fixes these sections; CI checks they are not empty and that AC result statuses are valid; reviewers check that evidence links open
+    applies: [all]
+    why: A delivery that only says "done" cannot be reviewed; per-AC results let the acceptor judge quickly.
+    detail: |
+      Delivery brief fields (the single canonical set):
+
+      - Header: `requirement_ids`, `task_ids`, `spec_version` (the requirement version it is based on), `base_commit`, `head_commit`, `environment`, `finished_at`, `claim` (delivery conclusion: in review / partially complete / blocked).
+      - Body: user-visible results; what was not done; PRs and artifacts; a per-AC table (AC, expected, actually observed, evidence status, evidence link); items that could not be verified and why; whether it deviates from the requirement or prototype; remaining risks; rollback and data impact; points needing human confirmation.
+      - The final acceptor and time are recorded by the platform (PRD-028), not filled in the brief by an Agent.
+
+      The fields evidence must be bound to are in TST-030.
+    see: ["AGT-015", "TST-030"]
+  - id: PRD-034
+    title: "Every external release must have release notes: changes users will notice, known issues and limitations, data or permission changes, migration and rollback requirements, and what was not verified"
+    level: hard
+    check: semi
+    how: The release process checks that release notes exist and these sections are not empty; the release review confirms the content
+    applies: [all]
+    why: Without release notes, users don't know what changed, and operations doesn't know how to roll back when something goes wrong.
+    detail: |
+      - Confirm before release: version and commit, target environment, coverage of Must ACs, approval records for exceptions and risks, offline check (where applicable).
+      - Conventions for writing changelogs and generating drafts from commit messages are in 05 and 03; the release process itself is in 03.
+    sources: [S21]
+    see: ["03", "05"]
+  - id: PRD-035
+    title: "After release, review on the agreed schedule: expected metrics, observation period, actual results, side effects, and falsified assumptions; do not measure value by PR count, code volume, or token count"
+    level: soft
+    check: semi
+    how: A review task is created automatically at release with the observation period stated; when it is due, check that there is a conclusion
+    applies: [all]
+    why: Verification before delivery answers "was the intended behavior implemented"; the review answers "was the problem solved"; neither can replace the other.
+    ref_value: "Reference schedule: check stability 1–2 weeks after launch and business results at 4–8 weeks. These are empirical values; adjust by how often the feature is used; where a contract specifies terms, follow the contract."
+    see: ["22"]
+  - id: PRD-036
+    title: Assign user feedback to an existing or new requirement, then re-check priority; collect only the information needed
+    level: soft
+    check: semi
+    how: The feedback template fixes the fields; periodically count feedback that has no linked requirement
+    applies: [all]
+    why: Feedback scattered in chats cannot be aggregated; collecting extra personal information is an additional compliance burden.
+    detail: |
+      - Feedback fields: environment, what the user was doing, expected and actual, severity, reproduction conditions, whether the reporter agrees to be contacted.
+      - For internal products with very little data, start with tickets, forms, and regular interviews; do not adopt a large analytics platform for a handful of features.
+      - Anonymization does not exempt you from other obligations for processing personal information; see 27 for the criteria.
+    see: ["22", "27"]
+choices:
+  - category: Medium for requirements and acceptance documents
+    pick: Markdown templates in the Git repository, with structured fields in a YAML header
+    when: The default; also works in offline and on-premises environments
+    alternatives:
+      - { name: GitLab issue description templates, when: "When the team tracks tasks in GitLab (including self-managed); available in the free tier" }
+      - { name: GitHub Issue Forms, when: "When using GitHub.com to collect structured requirements and feedback; currently in public preview and not supported for PRs" }
+    avoid:
+      - { name: Always writing a long PRD, why: For small changes the paperwork costs more than it is worth }
+      - { name: A one-line prompt as the requirement, why: "Objects, exceptions, boundaries, and priority are all missing" }
+      - { name: Treating GitLab Requirements Management as a free feature, why: "Officially available only in the Ultimate tier; the similar name is easy to misread" }
+    sources: [S19, S20, S24]
+  - category: Expressing acceptance criteria
+    pick: Structured AC (YAML, fields in PRD-008) plus business examples
+    alternatives:
+      - { name: Gherkin (.feature), when: "Business rules are stable, and scenarios will be bound to step definitions and run in CI" }
+    avoid:
+      - { name: Requiring every requirement to be written as .feature, why: Without step definitions it is just text in a different format }
+    license: The Gherkin parser is MIT, and the project is still actively maintained
+    sources: [S06, S07]
+  - category: Structural validation of requirement files
+    pick: JSON Schema 2020-12 + Ajv (Node)
+    alternatives:
+      - { name: Python jsonschema, when: The repository's toolchain is Python }
+    avoid:
+      - { name: Using LLM scoring instead of deterministic validation, why: "Results are unstable and cannot serve as a blocking condition; LLMs are only suited to listing candidates that \"may have problems\"" }
+      - { name: Writing your own regexes to validate fields, why: Cross-file references and conditionally required fields quickly become unmaintainable }
+    license: Ajv is MIT
+    notes: JSON Schema only covers field types, required fields, and enums; cross-file references, dependency cycles, status transitions, and AC coverage need separate validation scripts.
+    sources: [S17, S18]
+  - category: Reference for a spec-driven requirements process
+    pick: "GitHub Spec Kit's templates and process (spec → plan → tasks → implementation, including clarification and checklists) as a reference"
+    when: When Agents help draft requirements and tasks, borrow its templates and clarification practices
+    avoid:
+      - { name: Designing your own requirements-decomposition Agent process from scratch, why: Existing templates and checklists already cover the common gaps }
+      - { name: Assuming automatically generated tasks are complete, why: A person still needs to review the scope and AC }
+    license: MIT
+    notes: "Its clarification step asks one question at a time, at most 5 per session, with a recommended option for each; a spec has at most 3 \"needs clarification\" markers."
+    sources: [S03, S04, S05]
+  - category: Prioritization method
+    pick: Hard gates (regulatory, contractual, security-blocking) + MoSCoW
+    alternatives:
+      - { name: RICE, when: Backlog items can be compared by reach and effort }
+      - { name: "Shape Up's appetite and no-gos", when: Requirements are uncertain but time or headcount is fixed }
+    avoid:
+      - { name: Letting a single score automatically decide what to do, why: Mandatory items get pushed down the list }
+    sources: [S10, S11, S02]
+  - category: Clickable prototypes and design handoff
+    pick: Penpot
+    when: When on-premises or offline use is required, or you don't want to tie design to a cloud service
+    alternatives:
+      - { name: Figma, when: "The project allows cloud services and the team already has Figma assets" }
+    avoid:
+      - { name: Using static screenshots instead of multi-state interaction descriptions, why: "Empty, failed, and no-permission states get lost" }
+    license: Penpot is MPL-2.0 and can be self-hosted
+    notes: Being self-hostable does not mean it works offline by default; for offline deployment, add `enable-air-gapped-conf` to the configuration, which disables templates and libraries downloaded from GitHub as well as Google Fonts.
+    sources: [S12, S13]
+  - category: Flowcharts in requirements
+    pick: Text-based diagrams (such as Mermaid), kept in the repository alongside the requirement files
+    when: The overall choice of diagramming tools follows 05; this only adds notes specific to prototyping
+    alternatives:
+      - { name: diagrams.net (draw.io) source files, when: "Complex cross-role flows that need drag-and-drop editing" }
+      - { name: Excalidraw, when: Sketches and brainstorming }
+    avoid:
+      - { name: Keeping only exported PNGs, why: "They cannot be edited, and differences cannot be compared" }
+    license: "The draw.io web repository is Apache-2.0 and the drawio-desktop repository is GPL-3.0; the two differ. Excalidraw is MIT. Using them only as standalone tools is generally unaffected; if embedding in a distributed product, check against the criteria in 27"
+    sources: [S14, S15, S16]
+  - category: AI-generated prototypes
+    pick: Generated in the local repository by a controlled Agent using existing components and sample data
+    alternatives:
+      - { name: "v0, Figma Make", when: "The project allows data to go to the cloud; use only to explore directions" }
+    avoid:
+      - { name: Using cloud-generated output directly as production code, why: "Security, accessibility, and data correctness are unverified" }
+      - { name: Sending sensitive customer data to cloud generation tools, why: "The data cannot be taken back; see PRD-032" }
+    notes: For the local approach to work offline, the model must also be local.
+    sources: [S22, S23]
+  - category: Collecting user feedback
+    pick: The existing ticketing system or an intranet form, plus regular interviews
+    avoid:
+      - { name: Adopting a large product analytics platform when there are few users, why: "Operations and compliance burden outweigh the benefit; for choosing event tracking and analytics platforms see 22" }
+  - category: Release evidence
+    pick: A CI-generated evidence manifest + release notes, saved with the release
+    alternatives:
+      - { name: GitLab Release Evidence, when: "Releasing with GitLab and wanting an automatic evidence snapshot at release time; you still need to add AC and human approval information yourself" }
+    avoid:
+      - { name: "Rewriting your own release system for the sake of \"traceability\"", why: Existing CI and release tools can already produce evidence }
+    sources: [S21]
+antipatterns:
+  - { bad: Starting to write code from a single sentence, instead: "First draft a task card and minimal AC, and resolve blocking questions before starting" }
+  - { bad: Filling in every section of the PRD, instead: "Decide how much to write by risk level; for sections that don't apply, write one sentence explaining why" }
+  - { bad: Treating written Gherkin as automated acceptance, instead: "Bind it to step definitions and run it in CI; otherwise treat it only as examples" }
+  - { bad: Writing the technical solution as the sole requirement, instead: "Requirements state observable goals; the solution goes in a design document or ADR" }
+  - { bad: "Every requirement is \"Must\"", instead: "Limit the number of Must items, with a \"Won't this time\" list and a budget cap" }
+  - { bad: Ranking every requirement by RICE score, instead: "Put mandatory items first as hard gates, then score the rest" }
+  - { bad: "Adding AC at the last minute before release, then declaring a pass", instead: "Approve the AC first; changes go through change records and approval" }
+  - { bad: "\"At most 3 questions per round\" becomes an excuse to skip high-risk questions", instead: "The number of questions has a budget, but work does not start until blocking questions are resolved" }
+  - { bad: Treating a fully ticked spec checklist as implementation complete, instead: "Judge spec quality, implementation evidence, and business acceptance as three separate layers" }
+  - { bad: Assuming that a cloud prototype that runs will also run on the intranet, instead: "Test it in an offline environment with an empty cache, with fonts and scripts served locally" }
+  - { bad: "Measuring product value by PR count or Agent token usage", instead: "After launch, look at user and business outcomes on the agreed schedule" }
+sources:
+  - { id: S01, title: "Atlassian: How to create a product requirements document", url: "https://www.atlassian.com/agile/product-management/requirements", publisher: Atlassian, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: "Shape Up", url: "https://basecamp.com/shapeup", publisher: Basecamp, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S03, title: "GitHub Spec Kit", url: "https://github.com/github/spec-kit", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Spec Kit: clarify command template", url: "https://github.com/github/spec-kit/blob/main/templates/commands/clarify.md", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "Spec Kit: specify command template", url: "https://github.com/github/spec-kit/blob/main/templates/commands/specify.md", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "Cucumber: Gherkin reference", url: "https://cucumber.io/docs/gherkin/reference/", publisher: Cucumber, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "cucumber/gherkin", url: "https://github.com/cucumber/gherkin", publisher: Cucumber, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "ISO/IEC/IEEE 29148:2018 Requirements engineering", url: "https://www.iso.org/standard/72089.html", publisher: ISO, date: 2018-11, kind: standard, checked: 2026-11-13 }
+  - { id: S09, title: "Agile Alliance: INVEST", url: "https://agilealliance.org/glossary/invest/", publisher: Agile Alliance, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S10, title: "Atlassian: Prioritization frameworks", url: "https://www.atlassian.com/agile/product-management/prioritization-framework", publisher: Atlassian, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S11, title: "RICE: Simple prioritization for product managers", url: "https://www.intercom.com/blog/rice-simple-prioritization-for-product-managers", publisher: Intercom, date: 2018-01-05, kind: case, checked: 2026-11-13 }
+  - { id: S12, title: "Penpot", url: "https://github.com/penpot/penpot", publisher: Penpot, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "Penpot: Configuration (air-gapped)", url: "https://help.penpot.app/technical-guide/configuration/", publisher: Penpot, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "jgraph/drawio-desktop", url: "https://github.com/jgraph/drawio-desktop", publisher: JGraph, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: "jgraph/drawio", url: "https://github.com/jgraph/drawio", publisher: JGraph, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Excalidraw", url: "https://github.com/excalidraw/excalidraw", publisher: Excalidraw, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "JSON Schema Specification", url: "https://json-schema.org/specification", publisher: JSON Schema, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S18, title: "Ajv JSON schema validator", url: "https://github.com/ajv-validator/ajv", publisher: Ajv, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "GitHub: Syntax for issue forms", url: "https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-issue-forms", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "GitLab: Description templates", url: "https://docs.gitlab.com/user/project/description_templates/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "GitLab: Release evidence", url: "https://docs.gitlab.com/user/project/releases/release_evidence/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "Figma Make is now generally available", url: "https://www.figma.com/blog/figma-make-general-availability/", publisher: Figma, date: 2025-07-24, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Introducing the new v0", url: "https://vercel.com/blog/introducing-the-new-v0", publisher: Vercel, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "GitLab: Requirements management", url: "https://docs.gitlab.com/user/project/requirements/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "The approval statuses for requirements and ACs (draft, approved, deprecated) and the delivery conclusions (in review, partially complete, blocked) are not yet in the shared glossary; suggest adding them to the glossary file"
+  - "Progress on the 2026 revision draft of ISO/IEC/IEEE 29148 has not been verified; once the final version is published, re-check the source for PRD-001"
+  - "The date of the v0 launch article (the report says 2026-02-03) and the data-use terms of Figma Make and v0 have not been verified"
+  - "The licenses of Python jsonschema and Excalidraw were not re-verified from their repositories' LICENSE files this time"
+  - "Research to add: release notes templates (aligned with the changelog conventions in 03 and 05)"
+  - "Research to add: estimation methods (range estimates, confidence) and outcome experiments under gradual rollouts and feature flags (the experiment part aligned with 22)"
+  - "Research to add: comparison of AI prototyping and design tools that are available in China and can be deployed on-premises"
+  - "Research to add: newer 2025–2026 material on PRD, JTBD, and Shape Up practices; the report mostly cited only classic methods"

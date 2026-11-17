@@ -1,0 +1,655 @@
+id: "16"
+slug: api
+title: API Contracts and Events
+summary: "How to define contracts for external APIs and events: API style, contract-first OpenAPI and linting, error format, naming, pagination, versioning and breaking changes, idempotency, concurrent writes, publishing events and webhooks, real-time push, MCP servers, and machine-readable CLI output."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Choosing an API style (REST, GraphQL, gRPC/Connect, WebSocket)
+    - Contract-first OpenAPI, contract linting, breaking-change detection, versioning and deprecation
+    - Error response format (RFC 9457), JSON field naming, time format, pagination, filtering
+    - Idempotency semantics (Idempotency-Key) and concurrent writes (ETag / If-Match)
+    - Event format (CloudEvents, AsyncAPI), publishing outbound webhooks and signing them
+    - Resumption conventions for real-time push (SSE, WebSocket)
+    - MCP server interface conventions (tool design, errors, versioning, authorization)
+    - Machine-readable output contract for command-line tools
+  excludes:
+    - { what: "Receiving third-party callbacks (signature verification, deduplication, fast acknowledgment)", see: "21" }
+    - { what: "Database implementation of idempotency record tables, outbox / inbox tables, transactions and optimistic locking", see: "17" }
+    - { what: "Rate-limiting implementation, choice of message queue and job scheduler", see: "18" }
+    - { what: "Login, tokens, authorization models, detailed rules for deciding 401/403", see: "19" }
+    - { what: "Per-language OpenAPI generators and server frameworks", see: "10-14" }
+    - { what: "Detailed SSRF protection, secrets management", see: "25" }
+    - { what: "Contract testing, schema-based API testing tools", see: "04" }
+    - { what: "Listening and protection of local HTTP services (including local MCP services)", see: "32" }
+    - { what: "General guidance on llms.txt and documentation sites", see: "05" }
+    - { what: "Agent-side use and permissions of MCP tools", see: "23" }
+overview: |
+  1. **Define the contract first, then implement.** Ordinary HTTP APIs default to REST + OpenAPI; the contract file lives in the repository and is changed in the same PR as the implementation, with CI running lint and breaking-change detection. GraphQL, gRPC/Connect, and WebSocket need an objective reason, recorded in writing.
+  2. **OpenAPI defaults to 3.1.** 3.2 has been officially released, but support across generators, gateways, and lint tools is uneven; verify on your own toolchain before using 3.2 features.
+  3. **Errors use RFC 9457 uniformly** (`application/problem+json`). `type` and `code` are stable identifiers for programs to branch on; `title` and `detail` are for humans and are not parsed by programs. Never leak stack traces, SQL, or tokens.
+  4. **Use only one naming style per API domain.** JSON fields in new APIs default to camelCase, enforced by lint.
+  5. **Lists must be paginated.** A `limit` with a default and a maximum, a deterministic sort order (with a unique tiebreaker field), and opaque cursors; filtering and sorting accept only allowlisted fields.
+  6. **Write operations that may be retried must be idempotent.** Use `Idempotency-Key` (an IETF draft, not yet an RFC) or a client-assigned ID + PUT. Missing key: 400; same key with a different request body: 422; first request still in progress: 409. Idempotency records must be persisted together with the business change.
+  7. **Prevent lost updates with strong ETags + If-Match.** Mismatch: 412; missing precondition: 428; business state conflict: 409; the server performs an atomic compare-and-update.
+  8. **Breaking changes must not ship silently.** CI uses oasdiff to compare against the last released contract; breaking changes go to a new major version or an approved migration plan; deprecation is announced with the `Deprecation` / `Sunset` response headers.
+  9. **Separate events from delivery.** Events use the CloudEvents envelope and are described with AsyncAPI; delivery is at-least-once, redeliveries keep the same `(source, id)`, and consumers deduplicate; no promise of global ordering or exactly-once.
+  10. **Sign outbound webhooks per Standard Webhooks**: sign `webhook-id.webhook-timestamp.raw request body`, support multiple signatures for key rotation; bounded retries with backoff, a dead-letter queue, and manual replay; apply SSRF protection to user-supplied callback URLs.
+  11. **For MCP, follow the current official version and use the official SDK.** At the time of verification (2026-11-14) the current version is 2026-07-28: the initialization handshake has been removed, every request carries its own protocol version, and `server/discover` can be used to negotiate in advance; compatibility with older clients on 2025-11-25 and earlier must be tested separately. When authorization is enabled over the HTTP transport, the server is implemented as an OAuth 2.1 resource server: it publishes Protected Resource Metadata, validates the token audience, and does not pass tokens through.
+  12. **Command-line tools serve both humans and machines.** With `--json`, standard output contains only JSON and diagnostics go to standard error; exit codes are public and stable; non-interactive runs are supported.
+rules:
+  # ── API style and contracts ──
+  - id: API-001
+    title: Ordinary HTTP APIs default to REST + OpenAPI; when switching to GraphQL, gRPC/Connect, or WebSocket, record the objective reason in the design record
+    level: soft
+    check: manual
+    how: Review the design record (ADR) of new services and check whether non-REST options document the requirements basis and trade-offs
+    applies: [kind:service]
+    why: Clients, gateways, and debugging tools for REST + OpenAPI are the most widespread; introducing another style for a few scenarios adds operational and integration cost.
+    detail: |
+      Common objective reasons:
+      - GraphQL: the frontend frequently needs to compose queries freely, and query complexity limits can be enforced;
+      - gRPC / Connect: strongly typed calls between internal services, or streaming is needed; for browsers and third-party callers prefer Connect or REST, and do not force native gRPC;
+      - WebSocket: genuinely bidirectional real-time interaction. When it is only one-way server push, use SSE (see API-031).
+    sources: [S26, S27]
+    see: ["01"]
+  - id: API-002
+    title: External HTTP APIs must have an OpenAPI contract file stored in the repository, and API changes and contract changes are submitted in the same PR
+    level: hard
+    check: auto
+    how: CI checks that the contract file exists; schema-based tests (see 04) verify that the implementation's responses conform to the contract
+    applies: [kind:service]
+    why: Screenshots, verbal agreements, and chat logs cannot be checked by tools, and clients and SDKs cannot be generated from them.
+    detail: |
+      - The contract is the single source of truth; generated client and server stub code is read-only (per-language practices in 10–14).
+      - Exporting the contract from code annotations is also acceptable, but the exported file must be committed to the repository and take part in lint and breaking-change detection; it cannot only be generated at runtime.
+      - Schemas referenced by the contract are committed with the repository; do not fetch remote `$ref`s at build time or runtime.
+    sources: [S01]
+    see: ["04", "10-14"]
+  - id: API-003
+    title: Every operation must have a unique and stable operationId, and every response must specify its status code, Content-Type, and schema, with both success and error examples
+    level: hard
+    check: auto
+    how: Enable Spectral rules for unique operationId, required response schemas and examples, etc., and run them at error severity in CI
+    applies: [kind:service]
+    why: Generated SDK method names come from the operationId, so changing it is a breaking change; for undocumented responses, callers and Agents can only guess.
+    sources: [S01, S20]
+  - id: API-004
+    title: The contract lint ruleset lives in the repository, CI runs it on every contract change, and error-severity issues block merging
+    level: hard
+    check: auto
+    how: CI runs `spectral lint` (or the chosen tool) and checks the exit code
+    applies: [kind:service]
+    why: Conventions for naming, pagination, and error format drift over time if they exist only in documents; lint makes every change comply.
+    detail: Every convention in this topic that can be judged by machine (naming style, pagination parameters, error response format, operationId) should be written as a lint rule.
+    sources: [S20]
+    see: ["02"]
+  - id: API-005
+    title: OpenAPI defaults to 3.1; before using 3.2 features, confirm that the lint, diff, generator, and gateway tools in use all support it
+    level: soft
+    check: semi
+    how: Before upgrading, run a 3.2 contract through the entire toolchain in CI and compile the generated clients
+    applies: [kind:service]
+    why: 3.2 has been officially released, but a published specification does not mean tool support; some generators still label even their 3.1 support as beta.
+    detail: 3.2 adds descriptions for the `QUERY` method, streaming media types, and more. Upgrade only when you genuinely need these features.
+    sources: [S01, S02, S24]
+  - id: API-006
+    title: Model APIs around business resources and actions; do not expose database table names, internal function names, or internal enums directly
+    level: soft
+    check: manual
+    how: When reviewing a new API, compare it with the data model to see whether the paths and fields merely copy the table structure
+    applies: [kind:service]
+    why: Once an API is tied to the table structure, every table change forces a change to the public contract.
+    sources: [S06, S08]
+    see: ["17"]
+  - id: API-007
+    title: GET and HEAD requests must not have business side effects; business actions that do not map to a standard method use POST, and the contract states the side effects and whether the action is idempotent
+    level: hard
+    check: semi
+    how: During review, check whether GET handlers write to the database or call services with side effects; custom actions in the contract must have a side-effect description
+    applies: [kind:service]
+    why: HTTP defines GET and HEAD as safe methods; caches, prefetchers, crawlers, and retries all assume they have no side effects.
+    detail: |
+      A custom action can be written as `POST /v1/orders/{id}:cancel`, or modeled as a sub-resource `POST /v1/orders/{id}/cancellations`. Pick one and use it consistently across the whole API domain; do not mix them.
+    sources: [S05, S08]
+  # ── Naming and format ──
+  - id: API-008
+    title: Within one API domain, JSON fields, query parameters, and error codes each use a single naming style, enforced by lint
+    level: hard
+    check: auto
+    how: Spectral casing rules check schema property names and parameter names
+    applies: [kind:service]
+    why: When `createdAt` and `created_at` coexist in the same API, both callers and generators make mistakes, and unifying them afterward is a breaking change.
+    detail: |
+      - JSON fields and query parameters in new APIs default to camelCase (consistent with browsers and TypeScript clients, and the convention of the Microsoft API guidelines); where existing APIs or the ecosystem commonly use snake_case, keep the existing style.
+      - Error codes (`code`) use upper case with underscores, such as `ORDER_NOT_FOUND`.
+      - Enum values and event fields follow the same style of the API domain.
+      - Do not rename already-public fields just to unify the style.
+    sources: [S06, S28]
+    see: ["02"]
+  - id: API-009
+    title: "Time fields use RFC 3339 format with a time zone offset (UTC recommended), marked `format: date-time` in the schema"
+    level: soft
+    check: auto
+    how: A Spectral rule checks whether fields whose names look like times declare the date-time format
+    applies: [kind:service]
+    why: Times without a time zone cause errors in cross-time-zone deployments and in client parsing.
+    sources: [S06]
+  # ── Pagination, filtering, batch, long-running tasks ──
+  - id: API-010
+    title: "APIs that return lists must paginate: `limit` has a default and a maximum, and the sort order is deterministic with a unique field as tiebreaker"
+    level: hard
+    check: semi
+    how: Lint checks that list operations have pagination parameters and a maximum; tests use data with identical sort-field values to verify that paging has no duplicates or gaps
+    applies: [kind:service]
+    why: Unpaginated lists drag the service down as data grows; with a nondeterministic sort order, paging duplicates or skips data.
+    detail: |
+      - Use cursor pagination for large or fast-changing lists; use offset only for small, mostly static tables or where jumping to a page is genuinely required.
+      - Example: `GET /v1/orders?limit=50&sort=-createdAt,id&cursor=...`, where the trailing `id` guarantees a unique ordering.
+    sources: [S06]
+  - id: API-011
+    title: Cursors are opaque to callers and bound to the query conditions and caller that produced them; reject them when conditions differ, and do not promise snapshot consistency
+    level: soft
+    check: semi
+    how: Tests that tamper with a cursor, change the filter, or reuse a cursor as a different user should get 400; the contract documentation states the behavior when data is added or removed during paging
+    applies: [kind:service]
+    why: Once callers parse or construct cursors, the server can no longer change the implementation; cursors reusable across users may also enable unauthorized access.
+    detail: |
+      - Cursors can be signed to prevent tampering; base64 encoding is not protection.
+      - Make no promises about cursor contents or length.
+      - Unless snapshots are implemented, do not promise zero duplicates or zero omissions when data is added or removed during paging.
+    sources: [S06]
+  - id: API-012
+    title: Filter, sort, field-selection, and expansion parameters accept only allowlisted fields; SQL fragments or arbitrary expressions are not allowed
+    level: hard
+    check: semi
+    how: Declare these parameters as enums in the contract; tests passing non-allowlisted fields should get 400
+    applies: [kind:service]
+    why: Arbitrary expressions lead to injection and make query cost uncontrollable.
+    sources: [S06]
+    see: ["25"]
+  - id: API-013
+    title: For batch operations, the contract states whether they are all-or-nothing, the format of per-item results, and the granularity of idempotency
+    level: soft
+    check: manual
+    how: Review the contract of batch APIs to see whether there is a per-item status field and a description of partial failure
+    applies: [kind:service]
+    why: On partial success, the HTTP status code alone does not tell callers which items succeeded and which can be retried.
+    detail: On partial success, return per-item results in the response body, such as `items[{clientRef, status, result, error}]`; use 200 or 207 consistently within the API domain.
+    sources: [S06]
+  - id: API-014
+    title: Long-running tasks that may time out return 202 and a task resource that exposes status, final result, and failure reason, and document how to cancel and how long results are retained
+    level: soft
+    check: semi
+    how: End-to-end tests cover task submission, polling, completion, failure, and cancellation
+    applies: [kind:service]
+    why: Holding a connection open for a long time waiting for the result means callers cannot recover after a disconnect, and gateway timeouts will cut it off.
+    sources: [S07]
+  # ── Errors ──
+  - id: API-015
+    title: 4xx and 5xx responses use the RFC 9457 format (`application/problem+json`), with `status` matching the HTTP status code; do not wrap failures in 200
+    level: hard
+    check: auto
+    how: Lint checks that all error responses reference the shared Problem schema and media type; API tests validate error response bodies
+    applies: [kind:service]
+    why: "A uniform error format lets clients, gateways, and retry logic handle errors generically; `200 {success:false}` fools every middleware that works by status code."
+    detail: |
+      - Standard members: `type` (problem type URI, defaulting to `about:blank`), `title`, `status`, `detail`, `instance`.
+      - Add extension members as needed, such as `code` (stable error code), `errors` (field-level validation errors), `retryable`. Clients must ignore extension members they do not recognize.
+      - RFC 9457 obsoletes RFC 7807; write new code against 9457.
+    sources: [S03]
+  - id: API-016
+    title: Programs branch on errors only by `type` or `code`, never by parsing `title` and `detail`; error codes are registered in an error catalog and their meaning does not change after release
+    level: hard
+    check: semi
+    how: Declare `code` as an enum in the contract and compare it with the error catalog; when reviewing client code, look for matching on `detail` text
+    applies: [kind:service, kind:library]
+    why: RFC 9457 explicitly advises against parsing `detail`; it may be localized or reworded, and clients that rely on the text will suddenly break.
+    sources: [S03]
+  - id: API-017
+    title: Error responses must not contain stack traces, SQL, internal hostnames, tokens, or personal information; `instance` is used only as a tracing identifier
+    level: hard
+    check: semi
+    how: Tests trigger various server-side exceptions and scan error response bodies for stack-trace and SQL signatures
+    applies: [kind:service]
+    why: Error messages are a common channel for information leakage; attackers use them to probe internal structure.
+    sources: [S03]
+    see: ["25"]
+  - id: API-018
+    title: 429 and 503 responses include `Retry-After`; `retryable` only means the original request can be replayed as-is, and whether a write can be retried also depends on the idempotency strategy
+    level: soft
+    check: semi
+    how: Fault tests check the response headers of rate-limited and degraded responses; review the `retryable` values in the error catalog
+    applies: [kind:service]
+    why: Without retry hints, clients retry immediately and cause a cascading failure; marking non-idempotent writes as retryable causes duplicate execution.
+    sources: [S05]
+    see: ["18"]
+  # ── Idempotency ──
+  - id: API-019
+    title: "POST operations that have side effects and that callers may retry must declare their idempotency mechanism in the contract: Idempotency-Key, or a client-assigned ID + PUT"
+    level: hard
+    check: semi
+    how: Lint checks whether non-idempotent methods declare an `Idempotency-Key` request header or describe an alternative; review operations such as payments, placing orders, and sending messages
+    applies: [kind:service]
+    why: After a network timeout the caller does not know whether the request succeeded and can only retry; without idempotency this results in duplicate charges and duplicate orders.
+    detail: |
+      `Idempotency-Key` is defined by a draft from the IETF httpapi working group. At the time of verification (2026-11-14) it is still draft revision 08 (2026-10-22) and not yet an RFC; implement it according to the draft semantics and watch for later changes.
+    sources: [S04]
+  - id: API-020
+    title: When using Idempotency-Key, return 400 for a missing key (when it is required), 422 for the same key with a different request body, and 409 while the first request is still in progress; for the same key and request body that has already completed, return the first result
+    level: hard
+    check: auto
+    how: Contract tests construct each of these four cases and verify the status code and response body
+    applies: [kind:service]
+    why: These are the semantics defined by the draft; only with consistent status codes can clients tell "I used the key wrong" from "check back later".
+    detail: Error responses use the RFC 9457 format, with `type` distinguishing these cases.
+    sources: [S04, S03]
+  - id: API-021
+    title: The idempotency key is scoped to the caller and the operation and records a fingerprint of the request body; idempotency records are persisted together with the business change, and their validity period is stated in the contract
+    level: hard
+    check: semi
+    how: Concurrent duplicate-request tests and process-crash tests verify single execution; review whether the idempotency store is persistent
+    applies: [kind:service]
+    why: Idempotency keys held only in memory stop working on restart or with multiple instances; without comparing request bodies, two different requests get treated as one.
+    detail: |
+      - Example scope: tenant + caller + method + route + key.
+      - The validity period is only a replay-protection window; deduplication is not guaranteed after it expires. Business facts that must never be duplicated (such as the same payment) also need a database unique constraint.
+      - The in-progress state needs timeout-based reclamation so it cannot get stuck forever.
+      - For the storage and transaction implementation, see 17.
+    ref_value: A 24-hour validity period is a common product choice, not a requirement of the standard.
+    sources: [S04]
+    see: ["17"]
+  # ── Concurrent writes ──
+  - id: API-022
+    title: "Write operations that may lose updates use a strong ETag + If-Match as a precondition: return 412 on mismatch, 428 when a required precondition is missing, and 409 on a business state conflict; weak ETags are not used with If-Match"
+    level: hard
+    check: auto
+    how: "Two-client race test: two clients update one after the other with the same ETag, and the second must get 412"
+    applies: [kind:service]
+    why: When two people edit at the same time, whoever saves last silently overwrites the other's changes. Per HTTP, If-Match uses only strong comparison.
+    detail: |
+      - The server must use an atomic compare-and-update (such as an UPDATE conditioned on a version number); it must not read the ETag first and then update unconditionally.
+      - 428 comes from RFC 6585.
+      - A domain version field can be used instead of an ETag with the same semantics. For optimistic locking at the database layer, see 17.
+    sources: [S05]
+    see: ["17"]
+  # ── Versioning and compatibility ──
+  - id: API-023
+    title: CI uses oasdiff to compare against the contract of the last released version; block when a breaking change is detected, unless it goes to a new major version or comes with an approved migration plan
+    level: hard
+    check: auto
+    how: CI runs `oasdiff breaking <baseline contract> <new contract>` and blocks based on the exit code; exemptions must be stated in the PR and approved by the owner
+    applies: [kind:service, kind:library]
+    why: Removing a field, changing a type, or making a field required can leave a single service's tests all green while callers break.
+    detail: |
+      Breaking changes the tools cannot detect require manual review:
+      - new enum values (clients that treat enums exhaustively will break);
+      - changes to defaults, sort order, pagination behavior, rate limits, or permission semantics;
+      - changes to a field's meaning without a type change.
+      Clients should tolerate unknown fields and unknown enum values.
+    sources: [S22, S09]
+    see: ["03", "04"]
+  - id: API-024
+    title: Each API domain chooses a single versioning strategy and documents it in the API description; the default is a major version in the path (such as `/v1`)
+    level: soft
+    check: manual
+    how: Review whether the API description states the versioning strategy and the support period of the old version after a new one is released
+    applies: [kind:service]
+    why: When versions are mixed across paths, request headers, and dates, callers cannot tell which version they are using.
+    detail: |
+      - A major version in the path is simple and intuitive and suits most products.
+      - Public platforms that already have many SDKs can use a date-based version request header (as GitHub does).
+      - `info.version` is the version of the API document and the `openapi` field is the version of the specification; do not confuse the two.
+    ref_value: GitHub commits to supporting the previous version for at least 24 months after a new version is released; this is a reference point, not a general requirement.
+    sources: [S09]
+  - id: API-025
+    title: When a public API is deprecated, publish migration notes and include a `Deprecation` header in responses, then add a `Sunset` header once the removal date is set
+    level: hard
+    check: auto
+    how: Contract tests check that responses from operations marked deprecated include these two headers
+    applies: [kind:service]
+    why: If "will be removed later" is only written in release notes, callers mostly will not see it; standard response headers can be discovered automatically by clients and monitoring.
+    detail: |
+      - `Deprecation` is defined by RFC 9745 and its value is `@` followed by Unix seconds; `Sunset` is defined by RFC 8594 and its value is an HTTP date. The two formats differ.
+      - Also mark the operation as `deprecated: true` in the contract.
+    sources: [S10, S11]
+  # ── Events ──
+  - id: API-026
+    title: Externally published events use the CloudEvents envelope, with a stable `type` that carries a business version; each `type` has its own schema and is registered in the event catalog
+    level: soft
+    check: semi
+    how: CI validates event samples with JSON Schema; the event catalog (which can be described with AsyncAPI) is compared against the event types in code
+    applies: [kind:service]
+    why: When each service defines its own event fields, consumers must adapt to each one individually; when events have no schema, nobody knows whom a change will affect.
+    detail: |
+      - Required attributes: `specversion`, `id`, `source`, `type`.
+      - Event names use the past tense to express facts that have happened, such as `com.example.orders.order.confirmed.v1`; do not disguise commands as events.
+      - Do not mix up three kinds of version: `specversion` is the envelope specification version, the `type` suffix or `dataschema` is the business payload version, and the aggregate version number is the object's state sequence number.
+      - The event catalog records: owner, meaning, schema, whether it contains personal information, ordering key, delivery guarantee, retention period, replay method, and compatibility policy.
+    sources: [S12, S13]
+  - id: API-027
+    title: Design events for at-least-once delivery; redeliveries keep the same `(source, id)` so consumers can deduplicate by it; state the ordering scope, and do not promise global ordering or exactly-once
+    level: hard
+    check: semi
+    how: Test duplicate and out-of-order delivery and verify that consumer results are unchanged; review the ordering and delivery guarantee notes in the event catalog
+    applies: [kind:service]
+    why: Networks and retries make duplicates unavoidable; if every redelivery uses a new id, consumers cannot deduplicate.
+    detail: |
+      - When ordering is needed, order by aggregate object, and include the aggregate id and version number in the event.
+      - Consistency between key events and business changes relies on an outbox, and consumer deduplication state relies on an inbox; see 17 for table design.
+    sources: [S12]
+    see: ["17", "18"]
+  # ── Publishing outbound webhooks ──
+  - id: API-028
+    title: Outbound webhooks are signed per Standard Webhooks, with `webhook-id`, `webhook-timestamp`, and `webhook-signature`, signing "id.timestamp.raw request body", with a separate secret per receiving endpoint, and attaching both old and new signatures during rotation
+    level: hard
+    check: auto
+    how: Write tests with the official Standard Webhooks verification libraries to confirm that signatures verify, that verification fails after tampering with the request body or timestamp, and that both old and new secrets verify during rotation
+    applies: [kind:service]
+    why: Unsigned webhooks can be forged; a signature that does not include a timestamp cannot stop replays.
+    detail: |
+      - Default to HMAC-SHA256 (`v1`); when receivers are not fully trusted and should only be given a public key, use Ed25519 (`v1a`).
+      - `webhook-id` stays the same across retries and receivers use it to deduplicate; `webhook-timestamp` is the send time of this attempt.
+      - The bytes sent must be exactly the bytes that were signed.
+      - Use HTTPS only; keep request bodies small and send links for large content.
+      - For the side that receives third-party callbacks, see 21.
+    ref_value: The specification recommends that payloads generally not exceed about 20 KB; it gives no value for the timestamp tolerance window, which is set by the receiver.
+    sources: [S14]
+    see: ["21", "25"]
+  - id: API-029
+    title: When webhook delivery fails, retry with exponential backoff plus random jitter under a total-duration cap; after sustained failure, disable the receiving endpoint and notify its owner, and provide delivery logs and manual replay
+    level: soft
+    check: semi
+    how: "Fault-injection tests: the receiving endpoint returns 5xx, times out, or returns 410; check the retry cadence, disabling, and replay"
+    applies: [kind:service]
+    why: Brief receiver outages are common; without retries events are lost, while unlimited retries overwhelm both the receiver and yourself.
+    detail: |
+      - Disable the receiving endpoint when it returns 410; honor `Retry-After` when present.
+      - A 2xx only means the receiver got the message, not that business processing succeeded.
+      - Delivery logs include the time, status code, and duration of each attempt.
+    ref_value: The example retry schedule in Standard Webhooks spans about 3 days; this is a reference value.
+    sources: [S14]
+    see: ["18"]
+  - id: API-030
+    title: When webhook URLs are supplied by users, validate the target address before sending and on every followed redirect, and forbid loopback, internal network, and cloud metadata addresses
+    level: hard
+    check: auto
+    how: "SSRF test cases: loopback addresses, private network ranges, metadata addresses, redirects pointing to the internal network, and DNS rebinding must all be rejected"
+    applies: [kind:service]
+    why: User-controlled callback URLs are a classic SSRF entry point and can be used to probe and attack internal services.
+    detail: In on-premises deployments where customers need delivery into their own internal network, permit it through an explicitly configured allowlist; do not disable validation altogether. For specific protection measures, see 25.
+    see: ["25"]
+  # ── Real-time push ──
+  - id: API-031
+    title: SSE streams that promise resumption after disconnection give every event an `id`, and the server resumes from persisted event records according to `Last-Event-ID`; beyond the retention period, explicitly tell the caller to resynchronize
+    level: soft
+    check: semi
+    how: End-to-end tests cover network disconnect and reconnect, server restart, and cursor expiry
+    applies: [kind:service, platform:web]
+    why: Events held only in process memory are lost on restart or disconnect; silently dropping a stretch of history makes the client believe its data is complete.
+    detail: |
+      - Periodically send comment lines as heartbeats to prevent intermediate proxies from closing idle connections.
+      - The browser's native EventSource cannot set custom request headers; authenticate with cookies or with a client that supports streaming fetch.
+      - Use SSE for one-way server push; use WebSocket only when bidirectional interaction is needed.
+    sources: [S15]
+  # ── MCP servers ──
+  - id: API-032
+    title: Design MCP tools around user tasks instead of automatically turning every REST endpoint into a tool; every tool has a clear name, description, and input schema, and structured output declares an output schema
+    level: soft
+    check: semi
+    how: Statically check the tool list so that every tool has a description and its input schema forbids extra fields; use a fixed task set to evaluate how accurately tools are selected and invoked (see 24)
+    applies: [kind:service, kind:llm]
+    why: With too many, too fine-grained tools, the model easily picks the wrong one; with unclear descriptions, the model does not know when to use a tool or what to do after an error.
+    detail: |
+      - Descriptions state clearly: what the tool does, when to use it, when not to use it, whether it modifies data, the format and units of inputs, and the safe next step after failure.
+      - A single output has a size limit; when there are many results, paginate, filter, or return resource links.
+      - Long-running tasks return a task handle instead of blocking.
+      - The tool list has a stable order.
+    sources: [S16]
+    see: ["24"]
+  - id: API-033
+    title: Business errors during MCP tool execution go in the tool result marked `isError`; only protocol-level errors (unknown tool, arguments not matching the schema, etc.) use JSON-RPC errors
+    level: hard
+    check: auto
+    how: "Protocol tests: construct requests for both business failures and protocol errors, and check the form of the response"
+    applies: [kind:service, kind:llm]
+    why: Errors in the tool result are visible to the model, which can correct itself; when returned as protocol errors, the model usually gets no useful information.
+    sources: [S16]
+  - id: API-034
+    title: Implement the MCP protocol layer with the official SDK; declare which protocol versions are supported, and run interoperability tests for each declared version
+    level: hard
+    check: auto
+    how: CI connects to the service with clients for each declared version and runs tool listing and invocation tests
+    applies: [kind:service, kind:llm]
+    why: The new protocol version differs greatly from older ones, and hand-assembled protocol messages are error-prone; claiming compatibility without testing means old clients fail only after launch.
+    detail: |
+      - At the time of verification (2026-11-14) the current version is 2026-07-28: every request carries the protocol version in `_meta` and in the `MCP-Protocol-Version` header, the server accepts or rejects each request individually, and when a version is unsupported it returns `UnsupportedProtocolVersionError` listing the supported versions; clients can call `server/discover` to obtain versions and capabilities in advance.
+      - 2025-11-25 and earlier versions are based on an initialization handshake; supporting them requires implementing the specification's "Backward Compatibility" section and testing separately.
+      - Features marked deprecated are kept for at least 12 months (90 days in urgent cases); check the specification's list of deprecated features before upgrading.
+    sources: [S17]
+  - id: API-035
+    title: MCP services offered over HTTP that require authorization are implemented as OAuth 2.1 resource servers, publishing Protected Resource Metadata, validating that tokens were issued for this service, neither accepting nor passing through other tokens, and never putting tokens in URLs
+    level: hard
+    check: auto
+    how: Tests accessing with a token issued for another service, an expired token, or a token in a query parameter must all get 401; check that the Protected Resource Metadata endpoint is reachable
+    applies: [kind:service, kind:llm]
+    why: The specification uses MUST for these requirements; a service that does not validate the audience accepts tokens meant for other services, and passing tokens through enables confused deputy attacks.
+    detail: |
+      - Authorization in MCP is itself optional; once it is done over the HTTP transport, implement it per the specification. The stdio transport does not use this flow and takes credentials from the environment.
+      - For invalid or expired tokens return 401 with `WWW-Authenticate` (including `resource_metadata`); for insufficient permissions return 403 with `insufficient_scope`, giving all scopes required by the current operation at once.
+      - For client registration prefer Client ID Metadata Documents; Dynamic Client Registration has been marked deprecated and is kept only for compatibility.
+      - For general rules on tokens, sessions, and authorization models, see 19; for listening and protection of locally run MCP services, see 32.
+    sources: [S18]
+    see: ["19", "RUN-038", "RUN-039"]
+  - id: API-036
+    title: MCP clients or hosts do not trust tool annotations self-reported by third-party services (read-only, destructive, idempotent, etc.); side effects and permissions are decided by the host's own policy
+    level: hard
+    check: manual
+    how: Review the host's permission policy and confirm that write operations are not automatically allowed based on third-party annotations
+    applies: [kind:llm, kind:agent]
+    why: Annotations are declared by the server itself; a malicious or buggy service can mark a delete operation as read-only.
+    detail: MCP services you provide yourself should still annotate truthfully, for the benefit of trusted hosts.
+    sources: [S16]
+    see: ["23"]
+  # ── Command-line tools ──
+  - id: API-037
+    title: Command-line tools provide a `--json` mode (standard output contains exactly one valid JSON document, diagnostics go to standard error), publish a stable exit code table, and support non-interactive runs
+    level: soft
+    check: auto
+    how: CLI tests parse `--json` output with `jq`; run in an environment without a terminal and check that the tool does not wait for input
+    applies: [kind:cli]
+    why: Scripts, CI, and Agents rely on stable output and exit codes to determine results; mixing in progress bars or prompt text makes output unparseable.
+    detail: |
+      - Provide `--no-input`; operations that need confirmation fail immediately when non-interactive or require an explicit `--yes`.
+      - Commands that make changes provide a `--dry-run` preview.
+      - Use a separate mode for streaming large lists (such as `--output ndjson`); do not let `--json` sometimes output one object and sometimes multiple lines.
+      - Exit codes do not reuse HTTP status codes directly; error output includes the API error's `code`.
+      - Command structure is globally consistent, such as "product noun verb".
+    sources: [S19]
+choices:
+  - category: API style
+    pick: REST + OpenAPI
+    when: Ordinary HTTP APIs, especially public APIs and third-party callers
+    alternatives:
+      - { name: GraphQL, when: "The frontend frequently composes queries freely, and query complexity limits can be enforced" }
+      - { name: Connect / gRPC, when: "Strongly typed calls between internal services, or streaming is needed; Connect is compatible with browsers and ordinary HTTP clients" }
+      - { name: WebSocket, when: Genuinely bidirectional real-time interaction }
+    avoid:
+      - { name: Introducing a GraphQL service for a handful of pages, why: Operational and security governance costs exceed the benefits }
+      - { name: Forcing browsers and third parties to use native gRPC, why: "Browsers do not support it directly, so integration cost is high" }
+    sources: [S01, S26, S27]
+  - category: OpenAPI specification version
+    pick: OpenAPI 3.1
+    alternatives:
+      - { name: OpenAPI 3.2, when: "New features such as the QUERY method or streaming media descriptions are genuinely needed, and toolchain support has been verified" }
+    avoid:
+      - { name: Swagger 2.0 / OpenAPI 3.0 for new projects, why: "Not fully compatible with JSON Schema, and new tools are increasingly using 3.1 as the baseline" }
+    license: The specification is Apache-2.0
+    sources: [S01, S02]
+  - category: Contract lint
+    pick: Spectral (ruleset kept in the repository)
+    alternatives:
+      - { name: Redocly CLI, when: "Multi-file contract bundling is needed, or you want its built-in rules; it can be used alongside Spectral, linting after bundling" }
+    avoid:
+      - { name: Judging contract correctness only from the documentation preview, why: A preview that renders does not mean the contract is correct }
+    license: Spectral is Apache-2.0; Redocly CLI is MIT (both to be verified)
+    notes: Both are tools that run standalone in CI and are not distributed with the product.
+    sources: [S20, S21]
+  - category: Breaking-change detection
+    pick: oasdiff
+    alternatives:
+      - { name: openapi-diff, when: Already in use and it meets the detection needs }
+    avoid:
+      - { name: Plain-text diffing of contract files, why: Cannot reveal semantic breakage }
+    license: Apache-2.0 (to be verified)
+    notes: It only finds breakage at the contract level; behavioral changes still need manual review and contract tests (see 04).
+    sources: [S22]
+  - category: API documentation site
+    pick: Scalar or Redoc, built statically and self-hosted
+    avoid:
+      - { name: "Documentation sites for on-premises projects that reference external CDNs, fonts, or online schemas", why: They do not load on internal networks }
+    license: Both MIT (to be verified)
+    notes: This covers only API reference documentation; for general documentation sites, see 05.
+    sources: [S23]
+  - category: Client and SDK generation
+    pick: Choose a dedicated generator per language (see 10–14)
+    alternatives:
+      - { name: OpenAPI Generator, when: "SDKs for multiple languages need to be generated at once; first verify the target language generator's 3.1 support" }
+    avoid:
+      - { name: Hand-editing generated code, why: It is overwritten on the next generation }
+      - { name: "Also leaving error recovery, caching, reconnection, and idempotency key management to the generator", why: These need a hand-written thin wrapper with tests }
+    license: OpenAPI Generator is Apache-2.0 (to be verified)
+    sources: [S24]
+  - category: Error format
+    pick: RFC 9457 Problem Details
+    alternatives:
+      - { name: Adapting the old format during migration, when: "Existing callers depend on the old format; set a migration deadline" }
+    avoid:
+      - { name: "200 {success: false}", why: "Breaks clients, gateways, and retry logic that work by status code" }
+    sources: [S03]
+  - category: Write idempotency
+    pick: Idempotency-Key + persisted idempotency records
+    alternatives:
+      - { name: Client-assigned resource ID + PUT, when: "When the resource ID can be generated by the client; naturally idempotent" }
+    avoid:
+      - { name: Keeping idempotency keys only in an in-memory cache, why: Stops working on restart and with multiple instances }
+      - { name: "Comparing only the key, not the request body", why: Different requests get mistaken for duplicates }
+    sources: [S04]
+  - category: Concurrent writes
+    pick: Strong ETag + If-Match
+    alternatives:
+      - { name: Domain version number + compare-and-update, when: Non-HTTP interfaces or clients that cannot easily handle ETags }
+    avoid:
+      - { name: Last write silently overwrites earlier writes, why: Silently loses other people's changes }
+    sources: [S05]
+  - category: List pagination
+    pick: Opaque cursor + capped limit + deterministic sort
+    alternatives:
+      - { name: Offset pagination, when: "Small, mostly static data, or jumping to a page is genuinely needed" }
+    avoid:
+      - { name: Returning everything without pagination, why: Drags the service down as data grows }
+    sources: [S06]
+  - category: Long-running tasks
+    pick: 202 + task resource (see Google AIP-151 long-running operations)
+    avoid:
+      - { name: Holding the HTTP connection open for a long time waiting for the result, why: "Cannot recover from disconnects, and is easily cut off by gateway timeouts" }
+    sources: [S07]
+  - category: Large file uploads
+    pick: Chunked, resumable upload sessions; use the tus protocol when interoperability with third parties is needed
+    alternatives:
+      - { name: multipart/form-data, when: Small files }
+    avoid:
+      - { name: "Uploading large files in a single request, restarting from scratch on failure", why: Almost never completes on poor networks }
+    sources: [S25]
+  - category: Event envelope and description
+    pick: CloudEvents envelope + AsyncAPI to describe event channels
+    alternatives:
+      - { name: JSON Schema + documentation, when: "Few events, small scale" }
+    avoid:
+      - { name: Each service defining its own event fields, why: Consumers must adapt to each one individually }
+      - { name: Using OpenAPI to describe all event semantics, why: Cannot express channels or publish/subscribe relationships }
+    license: The CloudEvents and AsyncAPI specifications are both Apache-2.0
+    notes: "AsyncAPI documents themselves do not provide reliable delivery, replay, or ordering; you must implement these yourself."
+    sources: [S12, S13]
+  - category: Outbound webhook format and signing
+    pick: Standard Webhooks, signing and verifying with its official per-language libraries
+    alternatives:
+      - { name: Keeping the existing format and offering both in parallel, when: Many existing receivers depend on the old format }
+    avoid:
+      - { name: No signature or a home-grown signature format, why: "Receivers cannot verify with generic libraries, and security holes are likely" }
+    license: The specification is Apache-2.0
+    sources: [S14]
+  - category: Real-time push
+    pick: SSE + persisted event records + Last-Event-ID resumption
+    alternatives:
+      - { name: WebSocket, when: Bidirectional interaction is needed }
+      - { name: Long polling, when: Intermediate networks do not support long-lived connections }
+    avoid:
+      - { name: Adopting WebSocket just for server push, why: Adds connection management and authentication complexity }
+      - { name: Keeping events only in process memory while claiming resumption support, why: Lost on restart }
+    sources: [S15]
+  - category: MCP servers
+    pick: Official SDK, implementing the current official protocol version
+    alternatives:
+      - { name: Also supporting the older handshake-based versions, when: "Old clients still exist; test version by version" }
+    avoid:
+      - { name: Hand-assembling protocol messages, why: "Version negotiation, transport, and authorization involve many details and are error-prone" }
+      - { name: Automatically turning every REST endpoint into an MCP tool, why: "The number of tools explodes, and the model easily takes wrong actions" }
+    notes: Verify each SDK's license and its support for the current version in its repository when adopting it.
+    sources: [S17, S16]
+  - category: Machine-readable CLI output
+    pick: Design according to the CLI Guidelines (clig.dev), with JSON Schema for `--json` output
+    avoid:
+      - { name: "Mixing progress bars, colors, or prompts into JSON mode", why: Cannot be parsed }
+    sources: [S19]
+antipatterns:
+  - { bad: "Returning 200 with {success: false} on failure", instead: Use the correct status code and an RFC 9457 error body }
+  - { bad: Clients determining the cause by matching the error's detail text, instead: Branch on type or code }
+  - { bad: Relying only on cached 24-hour idempotency keys to ensure a payment executes once, instead: Persisted idempotency records + business unique constraint + transaction }
+  - { bad: "The frontend sends back the ETag, but the server reads first and then updates unconditionally", instead: Use an atomic update conditioned on the version }
+  - { bad: Using a new id every time an event is redelivered, instead: "Redeliveries keep the same (source, id)" }
+  - { bad: "Promising global ordering and exactly-once for events by default", instead: Order by aggregate object + at-least-once + consumer deduplication }
+  - { bad: Parsing and re-serializing the JSON before verifying the signature, instead: Verify the signature over the raw request body bytes }
+  - { bad: Sending to whatever callback URL the user enters, instead: "Validate the address and restrict redirects, to prevent SSRF" }
+  - { bad: Paging with page number + offset on large fast-changing tables, instead: Cursor pagination + deterministic sort }
+  - { bad: Treating llms.txt as an API contract or a basis for authorization, instead: "The contract is defined by OpenAPI, AsyncAPI, JSON Schema, and tests" }
+  - { bad: "Writing separate business rules for web forms, HTTP, MCP, and CLI", instead: "Share one set of domain logic and authorization, and define a contract for each interface separately" }
+sources:
+  - { id: S01, title: OpenAPI Specification (version index), url: "https://spec.openapis.org/oas/", publisher: OpenAPI Initiative, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S02, title: Announcing OpenAPI v3.2, url: "https://www.openapis.org/blog/2025/09/23/announcing-openapi-v3-2", publisher: OpenAPI Initiative, date: 2025-09-23, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "RFC 9457: Problem Details for HTTP APIs", url: "https://www.rfc-editor.org/rfc/rfc9457.html", publisher: IETF, date: 2023-07, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: "The Idempotency-Key HTTP Header Field (Internet-Draft)", url: "https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/", publisher: IETF httpapi WG, date: 2026-10-22, kind: standard, checked: 2026-11-14 }
+  - { id: S05, title: "RFC 9110: HTTP Semantics", url: "https://www.rfc-editor.org/rfc/rfc9110.html", publisher: IETF, date: 2022-06, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: Zalando RESTful API Guidelines, url: "https://opensource.zalando.com/restful-api-guidelines/", publisher: Zalando, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S07, title: "AIP-151: Long-running operations", url: "https://google.aip.dev/151", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S08, title: "AIP-121: Resource-oriented design", url: "https://google.aip.dev/121", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S09, title: "GitHub REST API: API versions", url: "https://docs.github.com/en/rest/about-the-rest-api/api-versions", publisher: GitHub, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S10, title: "RFC 9745: The Deprecation HTTP Response Header Field", url: "https://www.rfc-editor.org/rfc/rfc9745.html", publisher: IETF, date: 2025-03, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: "RFC 8594: The Sunset HTTP Header Field", url: "https://www.rfc-editor.org/rfc/rfc8594.html", publisher: IETF, date: 2019-05, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: CloudEvents Specification, url: "https://github.com/cloudevents/spec/blob/main/cloudevents/spec.md", publisher: CNCF, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S13, title: AsyncAPI Specification, url: "https://github.com/asyncapi/spec/blob/master/spec/asyncapi.md", publisher: AsyncAPI Initiative, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S14, title: Standard Webhooks Specification, url: "https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md", publisher: Standard Webhooks, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S15, title: "MDN: Using server-sent events", url: "https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "MCP Specification: Tools", url: "https://modelcontextprotocol.io/specification/2026-07-28/server/tools", publisher: Model Context Protocol, date: 2026-07-28, kind: standard, checked: 2026-11-13 }
+  - { id: S17, title: "MCP Specification: Versioning", url: "https://modelcontextprotocol.io/specification/versioning", publisher: Model Context Protocol, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S18, title: "MCP Specification: Authorization", url: "https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization", publisher: Model Context Protocol, date: 2026-07-28, kind: standard, checked: 2026-11-14 }
+  - { id: S19, title: Command Line Interface Guidelines, url: "https://clig.dev/", publisher: clig.dev, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S20, title: Spectral, url: "https://github.com/stoplightio/spectral", publisher: Stoplight, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Redocly CLI, url: "https://github.com/Redocly/redocly-cli", publisher: Redocly, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: oasdiff, url: "https://github.com/oasdiff/oasdiff", publisher: oasdiff, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Scalar, url: "https://github.com/scalar/scalar", publisher: Scalar, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: OpenAPI Generator, url: "https://github.com/OpenAPITools/openapi-generator", publisher: OpenAPI Tools, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "tus: Resumable upload protocol", url: "https://tus.io/protocols/resumable-upload", publisher: tus, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S26, title: "GraphQL: Learn", url: "https://graphql.org/learn/", publisher: GraphQL Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Connect: Introduction", url: "https://connectrpc.com/docs/introduction/", publisher: Connect, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: Microsoft Azure REST API Guidelines, url: "https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md", publisher: Microsoft, date: null, kind: case, checked: 2026-11-13 }
+open_questions:
+  - The licenses of Spectral, Redocly CLI, oasdiff, Scalar, Redoc, OpenAPI Generator, and AsyncAPI CLI were not verified online this time; each repository's LICENSE is authoritative
+  - "Details of the MCP 2026-07-28 tools specification, such as isError, structuredContent, outputSchema allowing any JSON type, and tool annotations being untrusted, were not individually re-verified online this time"
+  - The original report claimed that the HTTP QUERY method became RFC 10008 in 2026-06; this is unverified, and QUERY will not be written into the rules until it is verified
+  - "Defaulting JSON fields in new APIs to camelCase is a ruling of this topic (based on the Microsoft guidelines and the frontend ecosystem), while guidelines such as Zalando's use snake_case; the position needs to be reconfirmed with 02"
+  - "Research pending: choice of mock server and consumer-driven contract testing tools (coordinate with 04)"
+  - "Research pending: off-the-shelf libraries or services for sending webhooks (including options that can be deployed on-premises)"
+  - "Research pending: Connect and GraphQL implementations and licenses per language; industry conventions for field-selection and filter parameters"

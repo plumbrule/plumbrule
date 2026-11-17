@@ -1,0 +1,502 @@
+id: "04"
+slug: testing
+title: Testing and Quality
+summary: "Cross-language testing requirements and definitions: how to layer tests, integration with real dependencies, contract testing, how to handle flaky tests, how to read coverage, what evidence acceptance must keep, and principles for visual regression, performance, and fault injection."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Test layering and change risk tiers
+    - Test effectiveness (assertions, regression tests, negative cases)
+    - Integration tests with real dependencies and test data isolation
+    - How contract testing is defined
+    - Principles for Web UI testing and visual regression
+    - Recording and quarantining flaky tests
+    - How coverage is measured and interpreted
+    - Acceptance evidence and evidence invalidation
+    - Principles for performance testing and fault injection
+  excludes:
+    - { what: "Language-specific unit testing, property-based testing, mutation testing, and in-process mocking libraries", see: "10-15" }
+    - { what: E2E tools for mobile and desktop, see: "28-31" }
+    - { what: "Branch protection, merge queues, PR review, CI gate ordering", see: "03" }
+    - { what: Evaluation methods and tools for LLMs and agents, see: "24" }
+    - { what: "Agents must not self-accept their work or modify protected tests", see: "23" }
+    - { what: "API style, OpenAPI lint, and breaking-change diff tools", see: "16" }
+    - { what: Database migration principles and backup/restore drills, see: "17" }
+    - { what: "Security testing (SAST, fuzzing as a security measure, secret scanning)", see: "25" }
+    - { what: "Capacity planning, production load testing, and chaos drills", see: "26" }
+    - { what: Personal data and licensing considerations for test data, see: "27" }
+overview: |
+  1. **No uniform ratio.** Don't use a fixed recipe (such as 70/20/10) for the mix of unit, integration, contract, and E2E tests; the pyramid and the trophy are only heuristics. Combine test types based on risk and system boundaries.
+  2. **Checks follow change risk.** Changes fall into four tiers, R0–R3; the tier determines the required checks and approvals. The author can only raise the tier; when in doubt, go one tier higher.
+  3. **Tests must be able to catch bugs.** Use meaningful assertions, write a failing regression test before fixing a bug, and cover boundaries and failure paths; empty assertions, `only`, and open-ended skips must not be committed.
+  4. **Test databases, queues, and caches against the real thing.** Mocks cannot verify SQL dialects, transactions, or protocols; and don't use one engine to stand in for another.
+  5. **Contracts are three separate things.** Schema validation, schema-based property testing, and cross-team consumer contracts each cover a different part; having an OpenAPI file does not mean the contract passes.
+  6. **Retries don't launder failures.** A test that fails first and passes on retry must be recorded as flaky; quarantine requires an owner and an expiry date.
+  7. **Coverage is only a signal.** No global hard threshold, and it never decides on its own whether to ship; coverage of changed code can serve as a reference value.
+  8. **Evidence is tied to the commit.** Acceptance is based on raw reports from trusted CI on the final commit; once source, lockfiles, tests, or policies change, old evidence is invalid.
+  9. **Test the final artifact.** Install and run deliverable products in a clean environment; for air-gapped deployments, run them in an air-gapped environment.
+rules:
+  # ── Layering and risk ──
+  - id: TST-001
+    title: Do not prescribe a uniform ratio of unit, integration, and E2E tests; decide which tests each kind of project needs based on risk and system boundaries
+    level: soft
+    check: manual
+    how: Review the repository's test strategy document and check that it describes the purpose of each test type per project type, rather than just stating ratios
+    applies: [all]
+    why: Fixed ratios don't fit projects such as CLIs, SDKs, or desktop clients, and they tempt people to delete necessary integration tests just to hit the ratio.
+    detail: |
+      Common combinations (illustrative):
+      - Backend services: unit + integration with real dependencies are mandatory; add contracts when crossing services; E2E for critical main paths.
+      - Web frontend: unit + component integration against real boundaries + E2E for critical user journeys; visual regression can be added for key states.
+      - Libraries or SDKs: unit + target-platform integration + compatibility matrix; contract or ABI checks for public interfaces.
+      - CLI: unit + tests with real subprocesses and file systems, checking exit codes, stdout and stderr, paths with spaces, and permissions.
+      - For mobile and desktop see 28–31; for applications that call LLMs see TST-033 and 24.
+    sources: [S01, S02]
+  - id: TST-002
+    title: "The repository documents its test strategy: project type, change risk tiering rules, required checks for each tier, and how long evidence is retained"
+    level: soft
+    check: auto
+    how: CI checks that the strategy file exists and all fields are present (can be validated with JSON Schema)
+    applies: [all]
+    why: Only a written strategy can be reused and audited across projects, instead of relying on verbal agreements.
+    see: ["03"]
+  - id: TST-003
+    title: Changes are tiered R0–R3 to determine required checks and approvals; the author may only raise the tier, never lower it, and when in doubt goes one tier higher
+    level: soft
+    check: semi
+    how: Automatically assign a minimum tier based on changed paths (migrations, permissions, policies, lockfiles) and breaking API diffs; reviewers confirm or raise it
+    applies: [all]
+    why: A single process for all changes either slows down small changes or lets high-risk changes through; letting authors lower their own tier is the same as having no tiers.
+    detail: |
+      | Tier | Typical changes | Required checks (illustrative) | Approval |
+      |---|---|---|---|
+      | R0 Minimal | Comments, formatting, docs not involving acceptance rules | Formatting, links, config parsing | Normal review |
+      | R1 Low | Local pure functions, low-impact copy | Lint, build, relevant unit tests | Normal review |
+      | R2 Medium | New APIs, database queries, regular page flows | R1 + integration with real dependencies + contracts (when applicable) + critical E2E + migration checks | Review by someone other than the author |
+      | R3 High | Permissions, money, privacy, data migrations, irreversible operations, concurrency consistency, breaking API changes, cross-tenant boundaries, release channels | R2 + failure recovery and rollback drills + negative cases + targeted mutation testing or fuzzing (when applicable) + clean-environment smoke test | Independent review + business owner |
+
+      This is the only risk tiering scheme for this topic. Businesses with stricter requirements can add checks within a tier, but should not introduce a separate numbering scheme. For how to configure branch protection and approvals, see 03.
+  # ── Test effectiveness ──
+  - id: TST-004
+    title: "Do not commit tests with focused runs (only / focus), open-ended skips, empty or always-true assertions, swallowed exceptions, or forced success"
+    level: hard
+    check: auto
+    how: Use the lint rules of each language's test framework to check for focus and skips (rules in 10–15); skips must carry a ticket number and expiry date, checked by CI
+    applies: [all]
+    why: These patterns keep tests permanently green and make the gate meaningless.
+    see: ["10-15"]
+  - id: TST-005
+    title: When fixing a defect, add a regression test that fails before the fix; if it can't be automated, attach reproducible steps
+    level: soft
+    check: semi
+    how: During review, check whether the fix PR includes a regression test; CI can run the new test against the pre-fix commit once to confirm it fails
+    applies: [all]
+    why: A test that doesn't fail before the fix can't prove it actually tests this defect.
+  - id: TST-006
+    title: Changes to production logic with semantic impact come with corresponding behavior tests; pure formatting or renaming can be exempt
+    level: soft
+    check: semi
+    how: CI flags changes to production code without test changes; reviewers confirm the reason for the exemption
+    applies: [all]
+    why: For behavior changes without tests, nobody will notice when the next refactor breaks them.
+  - id: TST-007
+    title: Tests for core paths cover normal, boundary, invalid-input, and failure-recovery cases, not just the happy path
+    level: soft
+    check: manual
+    how: During review, compare against the test checklist to see whether each core path has boundary and failure cases
+    applies: [all]
+    why: Most production incidents happen in boundary conditions and error handling, which happy-path tests don't catch.
+  - id: TST-008
+    title: Changes that weaken assertions, delete tests, bulk-update snapshot or screenshot baselines, lower thresholds, or modify test configuration must state the reason in the PR and be approved by the test owner
+    level: hard
+    check: semi
+    how: Put test configuration, baseline directories, and quality policy files in CODEOWNERS; CI detects deleted tests and bulk baseline updates and labels them
+    applies: [all]
+    why: These changes can make any implementation "pass" and are the most easily overlooked way of lowering the bar.
+    sources: [S12]
+    see: ["03", "AGT-011", "AGT-012"]
+  - id: TST-009
+    title: For high-risk modules, use targeted mutation testing or deliberately injected defects to check whether tests can catch bugs; full mutation runs or killing every mutant are not required on every PR
+    level: soft
+    check: semi
+    how: Run mutation testing periodically on R3 modules and explain each surviving mutant (equivalent mutants need not be killed)
+    applies: [all]
+    why: Line coverage only shows that code was executed, not that assertions can catch bugs; full mutation runs are too expensive.
+    see: ["10-15"]
+  # ── Real dependencies and test data ──
+  - id: TST-010
+    title: Changes involving database, message queue, cache, or file storage semantics must have integration tests against the same real component; don't use another engine as a stand-in (such as SQLite in place of PostgreSQL)
+    level: hard
+    check: semi
+    how: CI has jobs marked as integration tests in which the started component images are visible; reviewers check whether another engine is being substituted
+    applies: [kind:service, kind:data]
+    why: Mocks and substitute engines cannot verify SQL dialects, transactions, indexes, concurrency, or protocol behavior; what was tested is not the system that ships.
+    sources: [S06]
+  - id: TST-011
+    title: "Test data is isolated: each run uses its own database, schema, or instance, leaves nothing that affects the next run, and can run in parallel; use transaction rollback for cleanup only when you can prove all reads and writes happen in the same transaction"
+    level: soft
+    check: semi
+    how: Run the tests twice in parallel with randomized order; results should be identical
+    applies: [all]
+    why: Shared data causes ordering dependencies and parallel conflicts; background jobs, DDL, sequences, and the like are outside the test transaction, so rollback cleanup misses them.
+  - id: TST-012
+    title: Tests must not connect to production write endpoints or production databases
+    level: hard
+    check: auto
+    how: Network policies in test environments allow only test dependencies; configuration checks prevent tests from reading production connection strings
+    applies: [all]
+    why: Tests writing to production directly corrupt data, and the damage is hard to trace.
+  - id: TST-013
+    title: Containerized test dependencies pin image digests and use health checks to wait until the service is ready; "container started" does not mean ready
+    level: soft
+    check: auto
+    how: CI checks that test image references include a digest; the integration test framework configures a wait strategy
+    applies: [all]
+    why: Floating tags make results change with upstream; a container that is up while its service is not is a common cause of flaky integration tests.
+    sources: [S06]
+  - id: TST-014
+    title: Time, randomness, time zone, and locale are injectable and can be fixed; when random or property-based tests fail, record the seed and the shrunk minimal example
+    level: soft
+    check: semi
+    how: During review, check that the relevant code gets values from an injected clock and random source; the seed of failing cases is visible in the CI report
+    applies: [all]
+    why: Without fixing them, failures can't be reproduced; time zones, daylight saving time, leap days, and month ends are common sources of bugs.
+    see: ["10-15"]
+  - id: TST-015
+    title: Test data is synthetic by default; real data must be anonymized and approved first; recordings for replay must have tokens, timestamps, and user identifiers replaced first; secrets and personal data must not end up in test artifacts
+    level: hard
+    check: semi
+    how: Run secret and sensitive-data scanning on test data, recordings, and CI artifacts; fixtures are labeled with their source
+    applies: [all]
+    why: Test artifacts get copied, uploaded, and kept for a long time, so their leak surface is even larger than that of the production database.
+    see: ["25", "27"]
+  - id: TST-016
+    title: "Database migrations are verified on an anonymized sample database from the previous version: upgrade, verify the schema, and check read/write behavior; irreversible migrations must not claim to support automatic rollback"
+    level: soft
+    check: semi
+    how: CI runs migrations and smoke tests on a sample database from the previous release
+    applies: [kind:service, kind:data]
+    why: Migrations that succeed on an empty database often fail on real data.
+    see: ["17"]
+  # ── Contracts ──
+  - id: TST-017
+    title: Changes to public interfaces must pass schema validation and backward-compatibility checks; breaking changes must be explicitly marked and go through R3
+    level: hard
+    check: auto
+    how: CI runs lint and breaking-change diff detection on interface description files (tools in 16)
+    applies: [kind:service, kind:library]
+    why: All-green tests for a single service don't prove that its consumers still work.
+    see: ["16"]
+  - id: TST-018
+    title: When an interface description file exists, use schema-based property testing to check that the implementation matches the description; "returns 200" does not count as passing the contract
+    level: soft
+    check: auto
+    how: CI runs schema-based tests against a running test instance, checking status codes, response structure, and state transitions
+    applies: [kind:service]
+    why: No matter how well the file is written, the implementation can still diverge from it; looking only at status codes lets structural errors through.
+    sources: [S07]
+  - id: TST-019
+    title: Use consumer-driven contract testing when there are consumers in other teams or with independent releases; don't force a contract broker on internal modules in the same repository and team
+    level: soft
+    check: semi
+    how: During review, look at the interface's list of consumers and check that every independently released consumer has a contract that is verified in the provider's CI
+    applies: [kind:service]
+    why: Consumer contracts catch breakage before the provider releases; for internal modules in the same repository, the maintenance cost usually outweighs the benefit.
+    sources: [S08]
+  # ── UI and visual ──
+  - id: TST-020
+    title: UI tests must not use fixed-duration waits (sleep) to wait for page state
+    level: hard
+    check: auto
+    how: Use the E2E framework's lint rules to forbid fixed waits (such as Playwright's waitForTimeout)
+    applies: [platform:web]
+    why: Fixed waits waste time on fast machines and still fail on slow ones; they are the number one cause of flaky UI tests.
+    sources: [S03]
+    see: ["28-31"]
+  - id: TST-021
+    title: UI tests use user-facing locators (role, visible text, label) and auto-retrying assertions, and assert on results the user can see; don't assert only on CSS class names or internal state
+    level: soft
+    check: semi
+    how: Lint flags CSS- or XPath-based locators; reviewers check what the assertions target
+    applies: [platform:web]
+    why: Tests bound to implementation details break on every refactor, yet miss the problems users actually run into.
+    sources: [S03]
+    see: ["09"]
+  - id: TST-022
+    title: When using visual regression, screenshot baselines are generated and updated only in a fixed environment (image, browser, fonts), and baseline changes are reviewed in the PR
+    level: hard
+    check: semi
+    how: Baselines are generated only by a designated CI job; the baseline directory is in CODEOWNERS
+    applies: [platform:web]
+    why: Screenshots differ across operating systems, browsers, fonts, and GPUs; casually updating baselines on a local machine effectively removes the check.
+    sources: [S04]
+  - id: TST-023
+    title: Visual regression covers only key pages and key states; full-page screenshots of the whole site are not a gate on every PR
+    level: soft
+    check: manual
+    how: Review the visual test list and check whether the page or state behind each screenshot is necessary
+    applies: [platform:web]
+    why: The more screenshots, the more false positives from incidental differences, until everyone habitually updates them all with one click.
+    sources: [S04]
+  # ── Flaky tests ──
+  - id: TST-024
+    title: Tests that pass only after retrying must be marked flaky, with the result of every attempt kept; they must not be reported as passing on the first try
+    level: hard
+    check: auto
+    how: Test reports keep every attempt; the CI summary lists "passed after retry" separately
+    applies: [all]
+    why: Retries are a diagnostic tool; treating a green light after retries as a pass hides real regressions and race conditions.
+    sources: [S05]
+  - id: TST-025
+    title: When quarantining a flaky test, record an owner, a tracking ticket, and an expiry date; if it isn't fixed by the expiry date, it becomes blocking again; tests on R3 paths are not quarantined long-term
+    level: soft
+    check: auto
+    how: The quarantine list lives in the repository; CI checks required fields and expiry dates
+    applies: [all]
+    why: Quarantine without a deadline turns into permanent deletion, and the quality debt becomes invisible.
+  - id: TST-026
+    title: Regularly measure the rate and ranking of flaky tests, broken down by environment, parallelism, and time zone, and fix the most impactful ones first
+    level: soft
+    check: auto
+    how: Aggregate the share of "passed after retry" runs from CI history reports and produce a ranking each period
+    applies: [all]
+    why: Without measurement you can only go by impressions, and by the time nobody trusts CI anymore it's too late.
+    ref_value: "Starting reference value: runs that pass only after retry make up less than 0.5% of all runs. No industry source; calibrate against your team's own baseline."
+  # ── Coverage ──
+  - id: TST-027
+    title: Coverage is only a signal; no global hard threshold, and it does not on its own decide whether something can be merged; coverage of changed code can serve as a reference
+    level: soft
+    check: auto
+    how: CI reports overall coverage and coverage of changed code; a drop in coverage for core modules must be explained in the PR
+    applies: [all]
+    why: Coverage only shows which code was executed; hard thresholds tempt people to write tests without assertions to pad the numbers.
+    detail: |
+      Distinguish three questions: line or branch coverage (which code ran), changed-code coverage (how much of the newly changed code ran), and mutation score (whether assertions can catch injected bugs). None of them proves business correctness. Generated code and platform glue code can be measured separately.
+    ref_value: "Starting reference value: 70%–80% changed-code coverage as a warning line, not a merge condition. No industry source; adjust according to module risk."
+  # ── Evidence and acceptance ──
+  - id: TST-028
+    title: Release-blocking checks must run on trusted CI against the final commit; local results, screenshots, and verbal reports don't count as passing
+    level: hard
+    check: auto
+    how: Branch protection accepts only check results reported by the designated CI (see 03)
+    applies: [all]
+    why: Local environments can't be independently verified, and self-reported results may come from an old commit or modified tests.
+    sources: [S12]
+    see: ["03", "AGT-013", "AGT-014"]
+  - id: TST-029
+    title: The result of every check is recorded as one of "Not run", "Passed", "Failed", or "Skipped"; skipped checks must state a reason, and conditional checks must state why they don't apply
+    level: hard
+    check: auto
+    how: When CI aggregates the report, it checks that every required check has a status; skipped items without a reason cause an error
+    applies: [all]
+    why: When "not run" and "ran" are mixed together, reviewers cannot judge whether the conclusion holds.
+    detail: |
+      - Use only the status names from "Evidence status" in the glossary.
+      - "Not applicable" is not a status: applicability must be determined by a rule (for example, the change did not touch interface description files, so the contract check is skipped) and recorded in the report.
+  - id: TST-030
+    title: Acceptance records are bound at minimum to the full commit SHA, the CI run ID, and the raw test reports; R3 changes additionally include lockfile and runtime environment digests and artifact digests
+    level: hard
+    check: auto
+    how: CI generates an evidence manifest and validates required fields; raw reports (such as JUnit XML) are stored with the run
+    applies: [all]
+    why: A screenshot or summary alone can't prove which commit or environment produced the result.
+    detail: |
+      - Minimum set: full commit SHA, CI run ID, executor identity, raw reports, and the evidence status of each check.
+      - R3 additionally: lockfile digest, test suite digest, runtime environment (image digest, etc.), and deliverable artifact digest; when needed, sign with CI artifact attestations.
+      - The evidence retention period is set by the organization's compliance requirements and written into the test strategy (TST-002).
+    sources: [S14]
+  - id: TST-031
+    title: When source code, lockfiles, test code, runtime configuration, or the test strategy changes, the related acceptance results become invalid and must be rerun; before merging, verify the final merged result again
+    level: hard
+    check: auto
+    how: Use branch protection's "require branches to be up to date before merging" or a merge queue (configuration in 03); when using a merge queue, CI must respond to merge group events
+    applies: [all]
+    why: A green light on an old commit can't vouch for a new one; verifying only the PR branch and not the merge result misses conflicts introduced by concurrent merges.
+    sources: [S12, S13]
+    see: ["03"]
+  - id: TST-032
+    title: "On failure, keep material for reproduction: traces and screenshots for UI, commands, exit codes, and output for CLI, statements and state for databases"
+    level: soft
+    check: auto
+    how: CI automatically uploads the corresponding artifacts on failure and checks that they exist
+    applies: [all]
+    why: Without material from the failure, all you can do is rerun and hope; recording everything on every run is too expensive, so keep it only on failure.
+    sources: [S03]
+  - id: TST-033
+    title: "Features that call LLMs need a layer of deterministic checks that can block releases: output structure, tool arguments, permissions, and the real state after execution; for semantic quality evaluation methods see 24"
+    level: hard
+    check: semi
+    how: Tests check system state, files, and databases directly, rather than a "done" returned by the model or tool
+    applies: [kind:llm]
+    why: Model output is nondeterministic and semantic scores drift; only the deterministic layer can reliably stop privilege overreach and incorrect side effects.
+    sources: [S11]
+    see: ["24"]
+  # ── Artifacts, performance, and faults ──
+  - id: TST-034
+    title: For products delivered for installation, every release build is installed, started, migrated or upgraded, and smoke-tested in a clean environment; test the final artifact, not the source code
+    level: soft
+    check: auto
+    how: CI installs the release artifact in a fresh container or VM and checks exit codes and health checks
+    applies: [kind:service, kind:cli, platform:desktop, platform:mobile, kind:onprem]
+    why: Passing source-level tests doesn't mean the artifact works; packaging, dependencies, and build scripts can all introduce differences.
+    see: ["26"]
+  - id: TST-035
+    title: For products that must be deployable air-gapped, run installation and tests once in an environment with no internet access; browsers, images, fonts, models, and other dependencies are all preloaded
+    level: hard
+    check: auto
+    how: CI has a job with internet access disabled that runs a full installation and smoke test
+    applies: [kind:onprem]
+    why: "\"The tool is open source\" and \"there's a container\" don't mean it works offline; browsers, fonts, and models are often downloaded on first run."
+    see: ["26", "32"]
+  - id: TST-036
+    title: Do fault-injection tests for timeouts, disconnects, duplicate delivery, partial writes, unavailable dependencies, and similar faults to verify retries, idempotency, and recovery; R3 changes must cover these
+    level: soft
+    check: semi
+    how: In integration tests, use fault proxies or test doubles to create faults; when reviewing R3 changes, check for the corresponding cases
+    applies: [kind:service]
+    why: A system tested only on success paths reveals its problems at the first network hiccup.
+    see: ["16", "26"]
+  - id: TST-037
+    title: Write performance requirements as measurable scenarios and metrics, measure them in a fixed environment, and compare against a baseline; don't gate on absolute durations on shared CI machines
+    level: soft
+    check: manual
+    how: Review the performance test plan and check that scenarios, metrics, environment, and baseline are specified
+    applies: [kind:service, platform:web]
+    why: Durations on shared machines fluctuate widely; absolute thresholds either produce false positives or get loosened until they're useless.
+    see: ["26"]
+  - id: TST-038
+    title: Full mutation testing, long-running fuzzing, full visual regression, and load testing run as scheduled jobs or on R3 changes, not as a synchronous gate on every PR
+    level: soft
+    check: auto
+    how: CI splits jobs into fast checks and heavy checks and tracks the duration of each kind
+    applies: [all]
+    why: When PR feedback is too slow, people work around the checks; heavy checks on scheduled jobs catch problems just as well.
+    ref_value: "Starting reference value: PR fast checks within 10–15 minutes, scheduled heavy checks 30–90 minutes. No industry source; adjust according to project size."
+  - id: TST-039
+    title: Use existing testing tools; don't build your own browser drivers, screenshot comparison, HTTP mocking, container management, mutation engines, or load testers
+    level: soft
+    check: manual
+    how: Review newly added test infrastructure code and check whether a mature tool already does the job
+    applies: [all]
+    why: All of these have mature open-source implementations; the maintenance cost of building your own far outweighs the benefit.
+choices:
+  - category: Test layering approach
+    pick: Combine test types based on risk and system boundaries (TST-001)
+    avoid:
+      - { name: "Fixed ratios (such as 70/20/10)", why: "Don't fit projects such as CLIs, SDKs, or desktop apps, and tempt people to delete necessary integration tests" }
+    sources: [S01, S02]
+  - category: "Language-specific unit testing, property-based testing, mutation testing, in-process mocking"
+    pick: For language-specific libraries see 10–15
+  - category: Integration with real dependencies
+    pick: "Testcontainers (start databases, queues, and other containers on demand within tests)"
+    alternatives:
+      - { name: "CI built-in service containers or isolated Compose environments", when: When managing containers from the test process is inconvenient }
+    avoid:
+      - { name: Using a different database engine as a stand-in, why: "SQL dialects, transactions, and concurrency behavior differ" }
+      - { name: All tests sharing a single development database, why: "Ordering dependencies, parallel conflicts, mutual contamination" }
+    license: "MIT (verified for the Java version; for other language versions, refer to their respective repositories)"
+    notes: Requires a preinstalled container runtime and images; air-gapped environments need an internal image registry.
+    sources: [S06]
+  - category: Web end-to-end and UI testing
+    pick: Playwright
+    alternatives:
+      - { name: Cypress, when: When the team already uses it and only tests JS frontends }
+    avoid:
+      - { name: "Home-made browser drivers, scripts relying on fixed waits", why: "Flaky and costly to maintain" }
+    notes: For mobile and desktop E2E see 28–31. Use Playwright only for systems visible in a browser; don't treat it as a general-purpose cross-language testing framework.
+    sources: [S03, S16]
+  - category: Web visual regression
+    pick: Playwright's built-in screenshot comparison, with baselines generated in a fixed image
+    alternatives:
+      - { name: Chromatic, when: When using Storybook and a cloud service is acceptable }
+    avoid:
+      - { name: Full-page screenshots of the whole site as a PR gate, why: Many false positives }
+    notes: Chromatic performs comparisons in the cloud and cannot be self-hosted or used offline.
+    sources: [S04, S15]
+  - category: Schema-based API testing
+    pick: Schemathesis
+    license: MIT
+    notes: Requires an accessible test instance. For interface description lint and breaking-change diff tools see 16.
+    sources: [S07]
+  - category: Cross-team consumer contracts
+    pick: Pact + self-hosted Pact Broker
+    alternatives:
+      - { name: "PactFlow (commercial hosted)", when: "When you don't want to operate the Broker yourself and data may leave the internal network" }
+    avoid:
+      - { name: Forcing a Broker on internal modules in the same repository and team, why: Cost outweighs benefit }
+    license: Pact Broker is MIT; self-hosting means you are responsible for its security and upgrades
+    sources: [S08]
+  - category: Standalone HTTP mock server
+    pick: "WireMock (standalone process, cross-language; use the stable 3.x line)"
+    alternatives:
+      - { name: Language-specific in-process mocking libraries, when: "When used only in unit or component tests in a single language (see 10–15)" }
+    avoid:
+      - { name: Online SaaS mock services, why: "Unavailable when air-gapped; data leaves the network" }
+      - { name: Hand-written replay proxies or proprietary stub syntax, why: "High maintenance cost for recording, filtering, and clock handling" }
+    license: Apache-2.0
+    notes: 4.x is still in beta and will have breaking changes; not the default.
+    sources: [S09]
+  - category: Load testing
+    pick: k6
+    alternatives:
+      - { name: Locust, when: "When the team works mainly in Python and wants to write scenarios in Python" }
+    avoid:
+      - { name: Home-made load testers, why: Mature tools already exist }
+    license: "k6 is AGPL-3.0; when used as a standalone test tool and not distributed with the product, the obligations differ from integrating it into the product; see 27"
+    notes: For capacity planning and production load testing see 26.
+    sources: [S10]
+  - category: Flaky test diagnosis
+    pick: Test runner's built-in retries and flaky marking + JUnit XML reports + CI history statistics
+    avoid:
+      - { name: Reporting only the final result after multiple retries, why: Erases the first failure }
+    sources: [S05]
+  - category: Acceptance evidence
+    pick: Raw CI reports + full commit SHA + run ID
+    alternatives:
+      - { name: "CI artifact attestations (such as GitHub artifact attestations or Sigstore-compatible solutions)", when: When the change is R3 or you need to prove artifact provenance externally }
+    avoid:
+      - { name: "Developers or agents uploading their own screenshots and signing off \"passed\" themselves", why: Cannot be independently verified }
+    sources: [S14]
+  - category: LLM and agent evaluation
+    pick: See 24
+antipatterns:
+  - { bad: "Assertions like `expect(true).toBe(true)` to pad coverage", instead: "Assert business outcomes and failure paths; verify with mutation testing when needed" }
+  - { bad: "Lowering the coverage threshold or updating all snapshots with one click in the same change as the code", instead: Review threshold and baseline changes separately }
+  - { bad: "Mocking everything in a complex application, never testing against a real database or queue", instead: Use integration tests with real dependencies for key semantics }
+  - { bad: "Testing on SQLite, shipping on PostgreSQL, and still claiming compatibility", instead: Test with the same engine as production }
+  - { bad: "Sleeping 5 seconds in UI tests and locating elements by CSS class name", instead: Semantic locators and auto-waiting assertions }
+  - { bad: "Treating a green light after `retry=3` as a pass", instead: "Record every attempt; mark tests that pass after retry as flaky" }
+  - { bad: Putting the commit SHA in a screenshot's file name and calling it evidence, instead: "Use the CI run ID, raw reports, and artifact digests" }
+  - { bad: Upgrading dependencies and still merging on an old commit's green light, instead: "After lockfile changes, related acceptance results are invalid and must be rerun" }
+  - { bad: "\"It has a container, so it must work offline\"", instead: Actually run it once in an air-gapped environment }
+  - { bad: "Merging all test frameworks into a home-grown \"unified testing platform\"", instead: "Use each language's native runners; unify only the report format and evidence manifest" }
+sources:
+  - { id: S01, title: The Practical Test Pyramid, url: "https://martinfowler.com/articles/practical-test-pyramid.html", publisher: "Ham Vocke (martinfowler.com)", date: 2018-02-26, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: "Write tests. Not too many. Mostly integration.", url: "https://kentcdodds.com/blog/write-tests", publisher: Kent C. Dodds, date: 2019-07-13, kind: community, checked: 2026-11-13 }
+  - { id: S03, title: "Playwright: Best Practices", url: "https://playwright.dev/docs/best-practices", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S04, title: "Playwright: Visual comparisons", url: "https://playwright.dev/docs/test-snapshots", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "Playwright: Retries", url: "https://playwright.dev/docs/test-retries", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: Testcontainers for Java, url: "https://github.com/testcontainers/testcontainers-java", publisher: Testcontainers, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: Schemathesis, url: "https://github.com/schemathesis/schemathesis", publisher: Schemathesis, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "Pact Docs: Pact Broker", url: "https://docs.pact.io/pact_broker", publisher: Pact Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "WireMock: Download and installation", url: "https://wiremock.org/download", publisher: WireMock, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: Grafana k6, url: "https://github.com/grafana/k6", publisher: Grafana Labs, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: Demystifying evals for AI agents, url: "https://www.anthropic.com/research/demystifying-evals-for-ai-agents", publisher: Anthropic, date: 2026-01-09, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "GitHub: About protected branches", url: "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "GitHub: Managing a merge queue", url: "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "GitHub: Using artifact attestations", url: "https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Chromatic CLI, url: "https://github.com/chromaui/chromatic-cli", publisher: Chromatic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: Cypress, url: "https://github.com/cypress-io/cypress", publisher: Cypress.io, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "Licenses of Playwright (Apache-2.0), Cypress (core MIT), Locust (MIT), and Chromatic CLI were not verified online this time"
+  - "Licenses of non-Java versions of Testcontainers (Go, Node, Python, etc.) have not been verified one by one"
+  - "For coverage, Google Testing Blog's \"Code Coverage Best Practices\" (2020-08-07) could be cited, but its text could not be fetched and verified, so it is not cited for now"
+  - "Equivalent mechanisms for \"verify the final merged result before merging\" on non-GitHub platforms (GitLab, Gitea, Jenkins) have not been verified"
+  - "To be researched: E2E tools for mobile and desktop (belongs to 28–31)"
+  - "To be researched: cross-language tools for coverage measurement and changed-code coverage"
+  - "To be researched: breaking-change diff tools for interfaces, gRPC/protobuf contract checks (coordinate with 16)"
+  - "To be researched: off-the-shelf tools for detecting and measuring flaky tests (Allure, ReportPortal, etc.) and empirical industry data"
+  - "To be researched: discussion of the test pyramid and trophy from the last two years; current methodology sources all date from 2018–2019"
+  - "To be researched: approaches to compatibility test matrices for domestic Chinese operating systems, CPUs, and databases"

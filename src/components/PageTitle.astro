@@ -1,16 +1,20 @@
 ---
 // 页面标题：主题页在标题上方显示所属分组，编号用等宽灰字。
 const PAGE_TITLE_ID = '_top'; // 与 Starlight 内部常量一致，供「回到顶部」使用
-import { topics, topicGroups } from '../lib/site.ts';
+import { getLang, getSite, localize, strings } from '../lib/site.ts';
 
+const path = Astro.url.pathname;
+const lang = getLang(path);
+const site = getSite(lang);
+const s = strings[lang];
 const title = Astro.locals.starlightRoute.entry.data.title;
-const m = Astro.url.pathname.match(/^\/topics\/([^/]+)\/$/);
-const topic = m ? topics.find((t) => t.slug === m[1]) : undefined;
-const group = topic ? topicGroups.find((g) => g.ids.includes(topic.id))?.name : undefined;
+const m = path.match(/^(?:\/en)?\/topics\/([^/]+)\/$/);
+const topic = m ? site.topics.find((t) => t.slug === m[1]) : undefined;
+const group = topic ? site.groups.find((g) => g.ids.includes(topic.id))?.name : undefined;
 ---
 
-{Astro.url.pathname === '/' ? null : <>
-{topic && <p class="crumb"><a href="/topics/">主题</a> / {group}</p>}
+{path === '/' || path === '/en/' ? null : <>
+{topic && <p class="crumb"><a href={localize('/topics/', lang)}>{s.topics}</a> / {group}</p>}
 <h1 id={PAGE_TITLE_ID}>{topic ? <><span class="num">{topic.id}</span> {topic.title}</> : title}</h1>
 </>}
 

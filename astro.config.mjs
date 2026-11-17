@@ -3,11 +3,21 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import { loadTopics, topicGroups, config } from './tools/lib.ts';
 
-const topics = new Map(loadTopics().map((t) => [t.id, t]));
+const zhTopics = new Map(loadTopics('zh').map((t) => [t.id, t]));
+const enTopics = new Map(loadTopics('en').map((t) => [t.id, t]));
 const sidebar = topicGroups
   .map((g) => ({
     label: g.name,
-    items: g.ids.filter((id) => topics.has(id)).map((id) => ({ label: `${id} ${topics.get(id).title}`, link: `/topics/${topics.get(id).slug}/` })),
+    translations: { en: g.nameEn },
+    items: g.ids.filter((id) => zhTopics.has(id)).map((id) => {
+      const zh = zhTopics.get(id);
+      const en = enTopics.get(id);
+      return {
+        label: `${id} ${zh.title}`,
+        translations: en ? { en: `${id} ${en.title}` } : undefined,
+        link: `/topics/${zh.slug}/`,
+      };
+    }),
   }))
   .filter((g) => g.items.length);
 
@@ -17,10 +27,13 @@ export default defineConfig({
   trailingSlash: 'always',
   integrations: [
     starlight({
-      title: '准绳',
+      title: 'Plumbrule',
       description: '做软件的准绳：一套通用的工程规范，网页可查，编码 Agent 可用。',
       defaultLocale: 'root',
-      locales: { root: { label: '简体中文', lang: 'zh-CN' } },
+      locales: {
+        root: { label: '简体中文', lang: 'zh-CN' },
+        en: { label: 'English', lang: 'en' },
+      },
       favicon: '/favicon.svg',
       social: [{ icon: 'github', label: 'GitHub', href: config.repoUrl }],
       customCss: ['./src/styles/site.css'],

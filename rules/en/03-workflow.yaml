@@ -1,0 +1,632 @@
+id: "03"
+slug: workflow
+title: Engineering Workflow and Collaboration
+summary: "How code flows from task to production: how to name branches and write commits, how to open PRs, how to review, how to order CI gates, how to release, and how to upgrade dependencies, while staying portable across GitHub, GitLab, and Gitea."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Branching strategy, branch naming, commit messages
+    - Size, description, review, and merging of PRs (called MRs in GitLab)
+    - Protected main branch, CODEOWNERS (a file that assigns owners by path), required checks
+    - CI tiers, caching, merge queues
+    - Version numbers, release records, rollback
+    - Dependency update bots, local Git hooks, repository templates
+    - Common fields for issues and tasks
+    - Portability across code hosting platforms
+  excludes:
+    - { what: How to write user-facing changelogs, see: "05" }
+    - { what: "How to write README, CONTRIBUTING, and ADRs", see: "05" }
+    - { what: "Definitions of test tiers, coverage, and acceptance evidence", see: "04" }
+    - { what: "Definitions of requirements, acceptance criteria, priorities, and task statuses", see: "06" }
+    - { what: "AGENTS.md, agent permissions, worktrees and task registration for parallel multi-agent work", see: "23" }
+    - { what: "Signing and provenance, least privilege for CI tokens, secret scanning", see: "25" }
+    - { what: "Deployment, artifact repositories, runtime rollback", see: "26" }
+    - { what: "Open-source licensing (e.g., obligations when using AGPL tools)", see: "27" }
+    - { what: "Language-specific lint, build, and release tooling details", see: "10-15" }
+overview: |
+  1. **Short branches + trunk-based development.** `main` is always mergeable and releasable; GitFlow and a long-lived `develop` branch are not the default. Add restricted release branches only when you must maintain multiple release lines in parallel.
+  2. **Commit freely on branches; clean up at merge.** Squash merge by default and check only that the final commit message (usually the PR title) follows Conventional Commits; do not require every temporary commit to comply.
+  3. **Commit messages are raw material for the changelog, not the finished product.** Tools generate a draft from commit messages; the user-facing parts are rewritten by a human (see 05 for how).
+  4. **The main branch can only be entered via PR.** Direct pushes, force pushes, and deletion are forbidden; required checks run on the server, and local hooks only give early feedback.
+  5. **Checks must match the final commit.** Required check results must be from the exact commit to be merged; new commits invalidate old results and old approvals.
+  6. **At least one human approval.** A reviewer other than the author, plus the owner on critical paths. AI review is only a supplement: even if a tool's approval can count toward the rules, it must not be the only approval.
+  7. **Platforms differ in capability; don't pretend they don't.** On GitLab Free, approvals cannot block merging, and merge trains require a paid tier; Gitea's CODEOWNERS uses Go regular expressions. For gates you cannot enforce, document the alternative; do not treat them as enforced.
+  8. **Keep CI logic in repository scripts.** Platform YAML only handles triggers and adaptation; local runs and CI run the same command, and switching platforms only changes that thin layer.
+  9. **Never change what has been released.** Don't rewrite tags or overwrite artifacts; if a release is wrong, publish a new version. Roll back code with `git revert`.
+  10. **Use existing tools.** Use Renovate or Dependabot for dependency updates, release-please or Changesets for releases, and Lefthook for hooks; do not write your own scripts.
+rules:
+  # ── Branches and commits ──
+  - id: FLW-001
+    title: "The main branch must be protected: forbid direct pushes, force pushes, and deletion; changes can only be merged via PR"
+    level: hard
+    check: auto
+    how: Check the platform's branch protection or ruleset settings; on GitHub also enable "Do not allow bypassing" so administrators are bound too
+    applies: [all]
+    why: As long as any path bypasses PRs, review and required checks can both be skipped; force pushes also invalidate the history others have checked out.
+    detail: |
+      - GitHub lets administrators bypass branch protection by default; you must explicitly enable "Do not allow bypassing the above settings".
+      - When an emergency bypass is truly needed, it is performed by someone with bypass permission and recorded afterward.
+      - Bot accounts (including agents) are bound by this rule too; see 23.
+    sources: [S06, S09]
+    see: ["23"]
+  - id: FLW-002
+    title: Use trunk-based development with short branches by default; reserve long-lived branches for release lines maintained in parallel
+    level: soft
+    check: manual
+    how: When reviewing the branching model, look for long-lived feature or develop branches that are periodically synced
+    applies: [all]
+    why: The longer a branch lives, the greater the merge conflicts and integration risk; trunk-based development requires small merges and continuous integration.
+    detail: |
+      - Trunk-based development does not mean no branches; it means branches are short-lived and merged frequently.
+      - When multiple versions need patches at the same time (e.g., SDK 2.x and 3.x), open maintenance branches like `release/2.x` that accept only fixes.
+    sources: [S02]
+  - id: FLW-003
+    title: Name branches "type/task-ID-short-description", e.g., feat/PROJ-142-export-report
+    level: soft
+    check: auto
+    how: A push hook or CI checks the branch name with a regular expression and warns on mismatches
+    applies: [all]
+    why: You can tell at a glance what a branch does and which task it belongs to, which makes cleanup and tracing easier.
+    detail: |
+      - Types match Conventional Commits: feat, fix, chore, docs, refactor, etc.; plus `release/` and `hotfix/`.
+      - Don't subdivide prefixes too much; use the project's standard task IDs.
+  - id: FLW-004
+    title: Multiple small commits are fine on feature branches; squash merge by default, and repositories that must keep commit history use rebase or merge instead and say so in the contributing guide
+    level: soft
+    check: auto
+    how: Check the platform's allowed merge method settings
+    applies: [all]
+    why: Temporary commits are allowed during development, and review is based on the whole PR's diff; after squashing, main history has one commit per PR, which makes rollback and changelog generation easier.
+    detail: |
+      - Libraries that need every commit to be traceable (e.g., every commit must build independently and support bisection) can choose rebase merging, but then every commit must comply with FLW-005.
+  - id: FLW-005
+    title: In repositories that squash merge, the final commit message (the PR title) must follow Conventional Commits, and breaking changes must be explicitly marked
+    level: hard
+    check: auto
+    how: "CI runs commitlint on the PR title; for breaking changes, check that the title contains `!` or the body contains `BREAKING CHANGE:`"
+    applies: [all]
+    why: Version inference and changelog drafts both come from this message; if it is wrong, all downstream automation is wrong.
+    detail: |
+      - Example: `feat(api): add export endpoint`; for a breaking change write `feat(api)!: drop v1 export` or put `BREAKING CHANGE: ...` in the body.
+      - The specification only assigns version meaning to `feat` (minor), `fix` (patch), and breaking changes (major); do not assume `refactor`, `perf`, etc. will trigger a release.
+      - Only the final message is checked; do not require every temporary commit to comply, to avoid a double burden.
+    sources: [S03]
+  - id: FLW-006
+    title: Commit messages are only used to generate a changelog draft; the user-facing parts are rewritten by a human before release
+    level: soft
+    check: manual
+    how: During release review, check that user-facing changelog entries have been rewritten rather than being raw commit titles
+    applies: [all]
+    why: Commit messages are written for developers; pasting them directly for users fills the changelog with internal jargon and irrelevant entries.
+    detail: |
+      - Tools (release-please, Changesets, etc.) generate drafts grouped by commit type; a human removes internal changes, merges similar items, and rewrites them in language users understand.
+      - For changelog structure and style, see 05.
+    see: ["05"]
+  - id: FLW-007
+    title: When staging, only git add explicit paths; do not use git add -A or git add .; review the staged list and untracked files before committing
+    level: soft
+    check: semi
+    how: Before committing, look at `git status --short` and `git diff --cached --name-only`; forbid `git add -A` / `git add .` in agent permission settings
+    applies: [all, kind:agent]
+    why: Adding everything at once is the easiest way to commit personal files, generated secrets, and other people's changes along with your own.
+    detail: |
+      - The repository root often has local files that should not be committed (debug scripts, screenshots, environment variable backups), and `.gitignore` cannot catch them all.
+      - This matters especially when multiple agents work at the same time; see 23.
+    see: ["23"]
+  - id: FLW-008
+    title: Required checks must run on server-side CI and be a merge condition; local hooks only give early feedback and cannot replace CI
+    level: hard
+    check: auto
+    how: Configure required checks in branch protection; verify that every local hook check has a counterpart in CI
+    applies: [all]
+    why: Local hooks can be skipped with `--no-verify` and environments vary; only server-side checks can actually block.
+    detail: |
+      - Do not bypass via `--no-verify`, ignoring CI failures, temporarily removing required checks, or similar; genuine exceptions go through owner approval and are recorded.
+    sources: [S06]
+  - id: FLW-009
+    title: Decide whether to require signed commits based on audit requirements; before enabling, test bot commits and squash merges
+    level: soft
+    check: manual
+    how: Enable the signing requirement in a test repository and run through bot commits, squash merges, and local merges to confirm they all pass
+    applies: [all]
+    why: A signature only proves which key a commit came from, not that the code is trustworthy; enabling it hastily also blocks existing workflows.
+    detail: |
+      - GitHub: after enabling "Require signed commits", any unsigned commit on the PR head branch may block a squash merge, even though the final squash commit would be signed by GitHub; the fix is to rewrite and sign those commits. If you squash locally and then push, you must sign the resulting commit yourself.
+      - For overall signing and provenance requirements, see 25.
+    sources: [S06]
+    see: ["25"]
+  # ── PRs ──
+  - id: FLW-010
+    title: One PR per change that can be independently reviewed and independently accepted; split large features into multiple PRs
+    level: soft
+    check: semi
+    how: CI counts changed lines and files (excluding generated code, lock files, and pure formatting) and, above the reference value, prompts the author to explain why it was not split
+    applies: [all]
+    why: Small PRs get reviewed more carefully, merge faster, and are easier to roll back when something goes wrong.
+    ref_value: Google's experience is that about 100 lines is usually fine and 1000 lines is usually too large; this is not a universal threshold. Teams calibrate against their own review data, and it only warns, never blocks.
+    detail: |
+      - "One feature, one PR" does not mean a month-long feature may only have one giant PR.
+      - Dependent slices can use stacked PRs (each PR based on the previous one's branch).
+    sources: [S01]
+  - id: FLW-011
+    title: Link each PR to a task ID and acceptance criteria; small changes such as typo fixes and routine dependency updates may skip the link
+    level: soft
+    check: semi
+    how: CI checks that the PR description contains a task link or carries the agreed exemption label
+    applies: [all]
+    why: Reviewers need to know what the change is for and what counts as done; but filing an issue for a typo fix is pointless overhead.
+    detail: |
+      - Spell out the scope of exemptions in the contributing guide; exempt PRs still go through review and required checks.
+    see: ["06"]
+  - id: FLW-012
+    title: The PR description states the goal, the changes, what is out of scope, risks, verification results, what was not verified, and how to roll back or fix forward
+    level: soft
+    check: auto
+    how: Fix these sections with the platform's PR template, and have CI check that they are not empty
+    applies: [all]
+    why: Reviewers rely on this information to decide whether to merge and how to back out if something goes wrong; without it they can only guess.
+    detail: |
+      - Suggested sections: task, goal and acceptance criteria, changes, explicitly out of scope, verification (only what was actually run), compatibility and risks, rollback or fix-forward, where you want reviewers to focus.
+      - GitHub uses `.github/pull_request_template.md`, GitLab uses `.gitlab/merge_request_templates/`, Gitea uses `.gitea/`; keep the content consistent.
+      - PRs submitted by agents have stricter requirements; see AGT-015.
+    sources: [S24]
+    see: ["AGT-015", "05"]
+  - id: FLW-013
+    title: "Verification results must be recorded truthfully: mark each check as Passed, Failed, Not run, or Skipped, with the command and where the evidence is; state the reason for anything not run, and a stated reason never exempts a required check"
+    level: hard
+    check: semi
+    how: During review, compare the results written in the PR against the CI records on the final commit; spot-check commands and evidence links
+    applies: [all]
+    why: A falsely reported "passed" leaves reviewers with nothing to rely on, and problems go straight into main.
+    detail: |
+      - Status names follow the evidence statuses in the vocabulary: "Not run" means it should have run but could not (state why); "Skipped" means it does not apply (state why it does not apply).
+      - Evidence includes the exact command, exit code, and CI run link; do not pass off someone else's results or results from an older commit.
+    see: ["04", "AGT-013"]
+  - id: FLW-014
+    title: Open PRs that are not yet ready for review as drafts (Draft)
+    level: soft
+    check: manual
+    how: Reviewers only handle PRs marked ready for review
+    applies: [all]
+    why: Opening a draft early lets CI run first and lets others know someone is working on it, without tying up reviewers prematurely.
+  # ── Review ──
+  - id: FLW-015
+    title: Merging to main requires at least one approval from someone other than the author; where the platform cannot enforce approvals, restrict merge permission to reviewers and check manually
+    level: hard
+    check: semi
+    how: On platforms that support it, set the required approval count in branch protection and forbid authors from approving their own changes; on GitLab Free and others that cannot enforce approvals, restrict "Allowed to merge" on protected branches to the Maintainer role and periodically spot-check merge records
+    applies: [all]
+    why: Problems the author can't see are often obvious to someone else; reviewing and merging your own change is no review at all.
+    detail: |
+      - On GitLab Free, approvals are optional and cannot block merging without approval; enforced required approvals need Premium or Ultimate. Do not write "approval required" on the Free tier without any means of enforcement.
+      - The same bot token must not be both author and approver; different bot accounts are not necessarily independent either, depending on who controls them.
+    sources: [S06, S10]
+    see: ["AGT-014", "AGT-029"]
+  - id: FLW-016
+    title: Human review looks at whether requirements are met, data and state semantics, interface compatibility, error flows, and rollback feasibility; leave formatting, lint, and type checks to tools
+    level: soft
+    check: manual
+    how: The review checklist lists these points; CI has the corresponding formatting and lint checks
+    applies: [all]
+    why: Human attention is limited; if it is spent on things tools can check, the real problems slip through.
+    sources: [S04]
+    see: ["02"]
+  - id: FLW-017
+    title: An AI review approval must not be the only approval for a merge; required approvals include at least one accountable human
+    level: hard
+    check: semi
+    how: Check the AI review tool's "allow approval" setting; when enabled, the required approval count in branch protection must include one more human, or critical paths must require approval from someone in CODEOWNERS
+    applies: [all]
+    why: AI review can misjudge correct implementations and shares blind spots with the AI that wrote the code; being able to count toward the rules does not mean it should be allowed through on its own.
+    detail: |
+      - GitHub Copilot code review leaves only "Comment" reviews by default and does not count toward required approvals; administrators can enable approvals at the enterprise, organization, or repository level, after which its approvals satisfy required approval rules just like a colleague's. Its approval is dismissed when new commits are pushed.
+      - AI review is good for surfacing risk leads and giving verifiable change suggestions. Research shows developers reject more AI review comments than they accept, so "passed AI review" cannot be treated as a quality guarantee.
+      - Using cloud AI review means code leaves your network; intranet projects must first confirm whether this is allowed; see 27.
+    sources: [S11, S30, S31]
+    see: ["AGT-014", "27"]
+  - id: FLW-018
+    title: Blocking review comments must be resolved before merging; new commits dismiss old approvals and affected checks rerun
+    level: hard
+    check: auto
+    how: In branch protection, enable "Require conversation resolution before merging" and "Dismiss stale approvals when new commits are pushed"
+    applies: [all]
+    why: An unresolved blocking comment might as well not have been raised; code changed quietly after approval has not been seen by anyone.
+    detail: |
+      - Non-blocking suggestions can be followed up in an issue, with the link noted in the comment.
+    sources: [S04, S06]
+  - id: FLW-019
+    title: Reviews give a timely first substantive response, and response time is tracked as a team goal; timeouts must never auto-approve
+    level: soft
+    check: semi
+    how: Measure the time from "ready for review" to the first substantive review
+    applies: [all]
+    why: The longer a review drags on, the higher the author's context-switching cost and the more the PR tends to grow.
+    ref_value: Following Google's practice, the first response takes no more than one business day.
+    sources: [S05]
+  - id: FLW-020
+    title: Use CODEOWNERS to assign path owners and require owner approval in branch protection; CODEOWNERS, CI configuration, and release configuration themselves must also have owners
+    level: hard
+    check: auto
+    how: Check that branch protection has "Require review from Code Owners" enabled; check that CODEOWNERS covers itself, the CI directory, and release configuration
+    applies: [all]
+    why: The CODEOWNERS file by itself only auto-assigns reviewers; without enforcement it is not a gate. If nobody owns the gate configuration, authors can change the gates to let themselves through.
+    detail: |
+      - The syntax differs across the three platforms: GitHub and GitLab each use their own glob patterns, while Gitea uses Go regular expressions. Do not copy the same file directly to another platform; you can maintain a neutral owner list and generate each platform's file with a small script.
+      - Since version 28, Gitea supports "block merging until all matching CODEOWNERS rules have owner approval".
+      - Agents must not modify these files; see AGT-011.
+    sources: [S07, S08, S09]
+    see: ["AGT-011"]
+  - id: FLW-021
+    title: Changes involving permissions, credentials, billing, customer data, database migrations, releases, and gate configuration require additional approval from the relevant owner
+    level: hard
+    check: auto
+    how: Put these paths in CODEOWNERS and require owner approval; for changes that cannot be identified by path, use a risk label to trigger additional approval
+    applies: [all]
+    why: These changes have irreversible or cross-system effects, and the cost of a mistake far exceeds waiting for one more approval.
+    detail: |
+      - Merge permissions can be tiered by risk (illustrative):
+        - Low: documentation typos and low-risk generated files; auto-merge after CI passes may be trialed, but must be recorded and revocable.
+        - Normal: ordinary features and fixes; one independent reviewer.
+        - Elevated: public interfaces, shared dependencies, database schema, cross-module changes; owner approval and compatibility verified on the latest main.
+        - High: the scope listed in this rule; approval by someone who bears real responsibility; release and gate changes are authorized separately.
+    see: ["25", "AGT-029"]
+  # ── CI ──
+  - id: FLW-022
+    title: The list of required checks lives in the repository, check names are unique and stable, and each is restricted to the CI app allowed to report it
+    level: hard
+    check: auto
+    how: A script compares the check list declared in the repository with the required checks in branch protection; on GitHub, specify the source app for each required check
+    applies: [all]
+    why: With duplicate check names or unrestricted sources, any integration that can write statuses can forge a "pass".
+    detail: |
+      - Keep check names consistent across platforms, e.g., `ci/lint`, `ci/build`, `ci/tests`, `ci/policy`, and map them on each platform.
+      - On GitHub, once a source app is specified, statuses with the same name reported by other people or integrations are not accepted.
+    sources: [S06]
+  - id: FLW-023
+    title: Required check results must correspond to the latest commit to be merged; when merging via API, pass the head commit ID as a condition
+    level: hard
+    check: auto
+    how: Branch protection requires the branch to be up to date with main, or a merge queue is enabled; the merge API is given the expected head SHA and fails on mismatch
+    applies: [all]
+    why: If new commits land or main changes after the checks finish, the old "pass" no longer proves anything.
+    detail: |
+      - GitHub's merge pull request API accepts `sha` and refuses to merge when the head does not match; other platforms use similar conditional parameters, or re-read the status before merging.
+      - For low-throughput repositories, "require up to date with main before merging + merge serially" is enough; no merge queue needed.
+    sources: [S14, S06]
+    see: ["AGT-013"]
+  - id: FLW-024
+    title: CI check logic lives in scripts in the repository; platform YAML only handles triggers, permissions, and the runtime environment; the same command can be run locally
+    level: soft
+    check: semi
+    how: During review, check that the CI configuration only calls scripts like `scripts/ci/*` and has no large blocks of inline logic
+    applies: [all]
+    why: Check logic tied to one platform's YAML cannot be reproduced locally and must be rewritten when switching platforms; Gitea Actions is also only broadly compatible with GitHub Actions.
+    detail: |
+      - Recommended layout: `scripts/ci/check-format`, `check-build`, `check-tests`, `check-policy`; `.github/workflows/`, `.gitlab-ci.yml`, and `.gitea/workflows/` are each thin adapters.
+      - Only abstract stable command-line scripts; do not invent your own cross-platform workflow language.
+    sources: [S18]
+  - id: FLW-025
+    title: "Tier CI: run fast checks that decide mergeability on PRs, run long regressions after merge or on a schedule, and run release gates at release time"
+    level: soft
+    check: manual
+    how: When reviewing CI configuration, verify each tier's trigger conditions and whether it is required
+    applies: [all]
+    why: Piling every check onto PRs slows down every merge; checking only at release time finds problems too late.
+    detail: |
+      - Tiers (illustrative): local pre-check → PR required checks → merge candidate (when a merge queue is enabled) → post-merge or scheduled → tag and release.
+      - Checks that only run after merge block a release only if they are a release gate. For test tiers, see 04.
+    see: ["04"]
+  - id: FLW-026
+    title: When a merge queue (or merge train) is enabled, required checks must run on the merge candidates the queue creates
+    level: hard
+    check: auto
+    how: GitHub workflows must listen for the `merge_group` event; third-party CI must run on branches starting with `gh-readonly-queue/`; for GitLab merge trains, enable merged results pipelines per the official configuration
+    applies: [all]
+    why: Two PRs that each pass but break when combined are exactly what merge queues prevent; if checks don't run on the merge candidate, the queue is pointless.
+    detail: |
+      - If a GitHub workflow does not listen for `merge_group`, required checks will not trigger once a PR enters the queue, and the merge will fail.
+      - GitLab merge trains are only available in Premium and Ultimate; do not assume Gitea has an equivalent.
+      - Only adopt a merge queue when main is busy and "green separately, red together" happens often; otherwise use the approach in FLW-023.
+    sources: [S12, S13]
+  - id: FLW-027
+    title: CI caches hold only regenerable dependencies and intermediate results, never secrets, and are not used as official artifacts; outputs passed to later steps use the artifact mechanism
+    level: hard
+    check: semi
+    how: Review the cache paths in CI configuration to confirm they contain no credential files or release outputs; cache keys include the lock file hash and runtime environment version
+    applies: [all]
+    why: Caches may be read and written by pipelines on other branches, so their contents are untrusted; secrets placed in them leak, and using them as artifacts makes them untraceable.
+    sources: [S15, S16]
+    see: ["25"]
+  - id: FLW-028
+    title: Stale PR pipelines on the same branch can be auto-cancelled; release, database migration, and shared integration environment jobs must run serially, and cancellation must not leave partial results
+    level: soft
+    check: auto
+    how: "Check the concurrency settings in CI configuration: GitHub uses `concurrency`; GitLab uses `workflow: rules` for deduplication and resource groups"
+    applies: [all]
+    why: Cancelling stale pipelines saves resources; but releases and migrations that run concurrently or are cancelled midway can produce corrupted artifacts or data.
+    sources: [S17]
+  # ── Versions, releases, and rollback ──
+  - id: FLW-029
+    title: Projects with external interfaces, SDKs, or libraries use Semantic Versioning (SemVer); time-based products with no public interface may use Calendar Versioning (CalVer)
+    level: soft
+    check: manual
+    how: When reviewing the versioning strategy, check whether the project has interfaces that others depend on
+    applies: [all]
+    why: The value of SemVer is communicating compatibility to dependents; forcing SemVer onto internal applications with no dependents makes the major version meaningless.
+    detail: |
+      - For the versioning strategy of interfaces themselves (URL versions, OpenAPI versions), see 16.
+    sources: [S19, S20]
+    see: ["16"]
+  - id: FLW-030
+    title: Each release is bound to a fixed source commit, version number, and artifact digest; the release record states compatibility changes, approvers, and how to roll back or fix forward
+    level: soft
+    check: auto
+    how: The release pipeline generates a release manifest (version, source commit, build record, artifact names, sha256, channel, notes, rollback method) and fails if anything is missing
+    applies: [all]
+    why: When something goes wrong, you must be able to answer "which code was the thing users installed built from" and know how to back out.
+    detail: |
+      - For deployment, artifact repositories, and runtime rollback, see 26; for signing and provenance, see 25.
+      - Database rollback is not promised to be one-click; for principles, see 17.
+    see: ["25", "26"]
+  - id: FLW-031
+    title: "Released versions must not change content: do not rewrite or delete released tags, do not overwrite artifacts of the same name; if there is a problem, release a new version"
+    level: hard
+    check: auto
+    how: Enable tag protection on the platform; disable same-version overwrites in the artifact repository
+    applies: [all]
+    why: If one version number maps to different content, nobody can be sure which one is installed out there.
+    detail: |
+      - SemVer states explicitly: once a version is released, its contents must not be modified; any modification must be released as a new version.
+    sources: [S19]
+  - id: FLW-032
+    title: Roll back code with git revert to create a new commit, never by force-pushing main; when reverting a merge commit, explicitly specify the mainline
+    level: soft
+    check: semi
+    how: Force pushes to main are forbidden (FLW-001); when reviewing a rollback PR, check that it is a revert commit
+    applies: [all]
+    why: A revert keeps the record of what was done and what was undone; force pushes break other people's work based on the old history.
+    detail: |
+      - When reverting a merge commit, add a parameter such as `-m 1` to specify the mainline.
+    sources: [S21]
+  # ── Dependencies, hooks, and templates ──
+  - id: FLW-033
+    title: Dependency updates are opened as PRs automatically by a bot and run the required checks, handled by update level; major version upgrades are not auto-merged by default
+    level: soft
+    check: auto
+    how: "Check the dependency bot's configuration: no auto-merge for major updates; run the official config validator on the configuration file"
+    applies: [all]
+    why: Manual upgrades are easily missed and delayed; major upgrades often contain incompatible changes and need a human to look.
+    detail: |
+      - Patch versions and dev dependencies can be auto-merged after CI passes; review major upgrades one by one.
+      - In air-gapped environments the bot needs an internal package registry and metadata source; otherwise it can only see versions it already knows.
+    sources: [S22, S23]
+    see: ["25"]
+  - id: FLW-034
+    title: A repository uses only one local Git hook manager, and the commands run in hooks match CI
+    level: soft
+    check: semi
+    how: Check whether the repository contains multiple hook configurations at once (e.g., lefthook.yml and .pre-commit-config.yaml)
+    applies: [all]
+    why: Two hook tools run things twice and overwrite each other's installation; if hooks and CI run different commands, passing locally still fails in CI.
+    sources: [S28, S29]
+  - id: FLW-035
+    title: Repository template updates go through versioned PRs; existing projects upgrade by version deliberately, and their rules are never changed silently
+    level: soft
+    check: semi
+    how: Tag versions in the template repository; record the template version used in each project, and have CI prompt when a new version is available
+    applies: [all]
+    why: Silent changes make old projects suddenly gain failing checks, and nobody can tell when the rules changed.
+  # ── Tasks, platforms, and offline ──
+  - id: FLW-036
+    title: "Issues use a common set of core fields: owner, priority, status, acceptance criteria, risk; record priority and effort separately"
+    level: soft
+    check: semi
+    how: Fix these fields in the issue template; periodically count issues with missing fields
+    applies: [all]
+    why: Only common fields let you migrate across platforms without losing information; treating "small" as "urgent" distorts priorities.
+    detail: |
+      - Priority uses P0–P3; status uses "Needs clarification, Ready, In progress, In review, Awaiting acceptance, Done, Cancelled"; definitions are in 06 and the shared vocabulary.
+      - Write key semantics in the issue body or common fields; do not rely solely on a platform-specific field type.
+      - The task system is the source of truth for task status; a PR merge is an event that triggers a status change, not the status itself.
+    see: ["06"]
+  - id: FLW-037
+    title: Process requirements that the platform or CI can enforce are configured as enforced; for capabilities the platform does not support, document the alternative and do not treat them as enforced
+    level: soft
+    check: manual
+    how: List every "must" in the contributing guide and map each to branch protection, a CI check, or a manual review point; flag those that don't map
+    applies: [all]
+    why: Rules that exist only in documents have no backstop; writing unenforceable gates as "must" makes people think protection already exists.
+    detail: |
+      - Examples of platform differences: GitLab Free approvals are not enforced and merge trains need a paid tier; Gitea's CODEOWNERS uses Go regular expressions; Gitea Actions is not fully identical to GitHub Actions.
+      - When an automation script hits a feature the platform does not support, it must explicitly report "unsupported" and block or degrade, never silently treat it as passing.
+    sources: [S10, S08, S18]
+    see: ["AGT-010"]
+  - id: FLW-038
+    title: Projects to be delivered in intranet or air-gapped environments must have build, CI, and release working end to end under air-gapped conditions before delivery
+    level: hard
+    check: auto
+    how: Periodically run the full pipeline on a runner with no internet access, pulling dependencies only from internal mirrors
+    applies: [kind:onprem]
+    why: Working with internet access does not mean working air-gapped; if any of Actions, package registries, hook dependencies, or certificates is not mirrored, it will fail on site.
+    detail: |
+      - What to prepare: internal Git service, runners, package registry mirrors, CI action mirrors, internal CA, and installation packages for hook and release tools.
+      - Before introducing cloud AI review or coding assistants, confirm whether code and context are allowed to leave the network; see 27.
+    see: ["26", "27"]
+  - id: FLW-039
+    title: "Choose monorepo or multi-repo by change boundaries: things often changed and released together go in one repository; things with different permissions, lifecycles, or customer isolation are kept separate"
+    level: soft
+    check: manual
+    how: In architecture review, look at the frequency of cross-repo atomic changes and permission boundaries
+    applies: [all]
+    why: Splitting wrongly means either constant cross-repo coordination or permissions and releases entangled with each other; do not split repositories just because there are many agents.
+    detail: |
+      - When multiple packages share versions and release cadence, use a monorepo with workspaces (e.g., pnpm workspace) and Changesets.
+      - Protocols shared across repositories must be explicitly published as versioned packages; do not reference unreleased source across repositories.
+    sources: [S32]
+    see: ["01"]
+  - id: FLW-040
+    title: When parallel tasks need to change the same high-contention file (migrations, lock files, interface contracts, CI configuration), agree on an owner and merge order first, or merge the contract PR first
+    level: soft
+    check: manual
+    how: Before starting, note in the task which high-contention files will be changed; during review, check whether two in-progress PRs change the same one
+    applies: [all]
+    why: Conflicts in these files are hard to merge automatically, and a wrong merge only shows up at runtime.
+    detail: |
+      - For worktree isolation and task registration with parallel agents, see 23; for migration file conventions, see 17.
+    see: ["23", "17"]
+choices:
+  - category: Branching strategy
+    pick: Trunk-based development + short branches
+    alternatives:
+      - { name: Trunk + restricted release maintenance branches, when: You need to patch multiple released versions at the same time }
+    avoid:
+      - { name: Mandating GitFlow for all projects, why: "Long-lived branches have high sync and integration costs, unsuitable for continuous delivery" }
+    sources: [S02]
+  - category: Commit message convention and checking
+    pick: Conventional Commits, with commitlint checking only the PR title or the squashed commit
+    alternatives:
+      - { name: Team-defined format, when: Versions and changelogs are not generated from commit messages }
+    avoid:
+      - { name: Completely free-form text while still wanting automatic version inference, why: Automation has no way to judge compatibility }
+    license: commitlint is MIT
+    sources: [S03, S25]
+  - category: Merge method
+    pick: Squash merge
+    alternatives:
+      - { name: Rebase merge, when: "The library must keep every commit, and every commit must build independently" }
+      - { name: Merge commit, when: "Branch structure must be preserved, e.g., merging a long-term maintenance branch" }
+    avoid:
+      - { name: Pushing directly to main, why: Bypasses review and required checks }
+  - category: Local Git hooks
+    pick: Lefthook
+    when: Default, especially for multi-language repositories
+    alternatives:
+      - { name: pre-commit, when: "Python-centric repositories, or when you want to use ready-made hooks from the pre-commit ecosystem directly (it manages an isolated runtime environment for each hook)" }
+    avoid:
+      - { name: Installing both in the same repository, why: "Duplicate runs, and they overwrite each other's hook installation" }
+      - { name: Hand-written .git/hooks scripts, why: "Not under version control, cannot be installed uniformly" }
+      - { name: Relying only on local hooks with no CI backstop, why: Can be skipped with --no-verify }
+    license: Lefthook and pre-commit are both MIT (to be verified)
+    notes: Lefthook is a single binary, does not depend on a Python or Node runtime, and runs commands in parallel; pre-commit requires Python. Air-gapped projects must mirror hooks and their dependencies in advance.
+    sources: [S28, S29]
+  - category: Dependency update bot
+    pick: Self-hosted Renovate
+    when: "Across platforms such as GitHub, GitLab, and Gitea, or when it must run on an intranet"
+    alternatives:
+      - { name: Dependabot, when: "Only GitHub is used, and its ecosystem and configuration capabilities are acceptable" }
+    avoid:
+      - { name: Hand-written upgrade scripts in every project, why: "Reinventing the wheel, and easy to miss ecosystem edge cases" }
+      - { name: Auto-merging major upgrades by default, why: Major versions often contain incompatible changes }
+    license: Renovate is AGPL-3.0 and is used as a standalone tool; for obligations when offering a modified version as a network service, see 27
+    notes: Dependabot natively runs only on GitHub.
+    sources: [S22, S23]
+  - category: Changelog drafts and release automation
+    pick: "Single package, with Conventional Commits as input: release-please"
+    alternatives:
+      - { name: Changesets, when: "JS/TS monorepo with multiple independently released packages" }
+      - { name: semantic-release, when: "You want fully automated releases and the team's commit discipline is mature" }
+      - { name: GoReleaser, when: "Go command-line tools needing multi-platform binaries, checksums, and packaging (see 11)" }
+    avoid:
+      - { name: One giant cross-language release framework for everything, why: "Complex configuration, and it handles no language ecosystem's edge cases well" }
+    license: release-please is Apache-2.0; Changesets, semantic-release, and the open-source edition of GoReleaser are MIT (to be verified)
+    notes: These tools generate drafts; user-facing content is rewritten by hand per 05.
+    sources: [S26, S27, S33, S34]
+  - category: Versioning scheme
+    pick: SemVer
+    when: "There are external interfaces, SDKs, libraries, or command-line compatibility commitments"
+    alternatives:
+      - { name: CalVer, when: Time-based delivery with no public interface that others depend on }
+    avoid:
+      - { name: Calendar versioning for all projects, why: Loses the compatibility signal for dependents }
+    sources: [S19, S20]
+  - category: Code hosting platform
+    pick: "Choose by scenario: self-managed GitLab for private deployment and multiple teams; Gitea for lightweight and air-gapped setups; GitHub for public open-source collaboration"
+    avoid:
+      - { name: Assuming the advanced features of the three platforms are identical, why: "Enforced approvals, merge queues, and CODEOWNERS syntax all differ" }
+    license: Gitea is MIT; GitLab is split into the open-source Community Edition and the commercial Enterprise Edition
+    notes: GitHub.com cannot be self-hosted; whether GitHub Enterprise Server can run fully air-gapped must be verified separately.
+    sources: [S09, S10]
+  - category: Serial validation on main
+    pick: Require up to date with main before merging + merge conditioned on the head commit ID
+    alternatives:
+      - { name: GitHub merge queue / GitLab merge trains, when: "Main is busy, and changes that pass separately often fail together" }
+    avoid:
+      - { name: Writing your own distributed merge queue for occasional conflicts, why: Operating cost far exceeds the benefit }
+    sources: [S12, S13, S14]
+  - category: Cross-platform path owners
+    pick: Each platform's native CODEOWNERS + owner approval in branch protection
+    alternatives:
+      - { name: "A neutral owner list, with a small script generating each platform's CODEOWNERS", when: The same rules must be maintained on multiple platforms }
+    avoid:
+      - { name: Copying the same CODEOWNERS directly to another platform, why: "Gitea uses Go regular expressions, so the syntax differs" }
+      - { name: Assuming a CODEOWNERS file means enforcement, why: Owner approval must be enabled in branch protection }
+    sources: [S07, S08]
+  - category: Repository templates
+    pick: Lightweight template repository + versioned initialization checklist
+    alternatives:
+      - { name: Copier or Cookiecutter, when: "There is a clear need for variable substitution, or template updates must be synced back to existing projects" }
+    avoid:
+      - { name: Building a scaffolding service for a dozen or so files, why: Over-engineering }
+antipatterns:
+  - { bad: "Interpreting \"one feature, one PR\" as one giant PR for a month-long feature", instead: "One PR per reviewable, acceptable slice; split large features into several" }
+  - { bad: Merging AI-written code once another AI review passes it, instead: "AI review as a supplement, plus executable checks and an accountable human approval" }
+  - { bad: "Only writing \"no direct pushes to main\" in AGENTS.md or the contributing guide", instead: Enable branch protection on the platform and forbid bypassing }
+  - { bad: Treating all-green local hooks as all-green CI, instead: Run required checks on server-side CI }
+  - { bad: Merging new code on a green light from an old commit, instead: "Verify the head commit ID when merging; use a merge queue when main is busy" }
+  - { bad: "Requiring polished messages on every temporary commit while also squash merging", instead: Only strictly check the final PR title }
+  - { bad: "Writing \"approval required to merge\" on GitLab Free without any enforcement", instead: "List the capabilities of your deployed edition; for what it cannot do, document the alternative or upgrade the platform" }
+  - { bad: Deleting the tag and re-releasing when a release goes wrong, instead: "Release a new version with the fix, and keep the old version" }
+  - { bad: Treating the build cache as an official deliverable, instead: "Pass outputs via the artifact mechanism, with digests" }
+  - { bad: "Relying entirely on public Actions and package registries while promising air-gapped delivery", instead: Internal mirrors + air-gapped drills }
+  - { bad: Pasting the commit log verbatim as user-facing release notes, instead: "Generate a draft from commit messages, and rewrite the user-facing parts by hand" }
+  - { bad: "Writing your own cross-platform workflow language to replace GitHub, GitLab, and Gitea CI", instead: "Only abstract stable command-line scripts, with thin platform YAML adapters" }
+sources:
+  - { id: S01, title: "Google Engineering Practices: Small CLs", url: "https://google.github.io/eng-practices/review/developer/small-cls.html", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: "Trunk Based Development: Short-Lived Feature Branches", url: "https://trunkbaseddevelopment.com/short-lived-feature-branches/", publisher: trunkbaseddevelopment.com, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S03, title: Conventional Commits 1.0.0, url: "https://www.conventionalcommits.org/en/v1.0.0/", publisher: Conventional Commits, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: "Google Engineering Practices: The Standard of Code Review", url: "https://google.github.io/eng-practices/review/reviewer/standard.html", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S05, title: "Google Engineering Practices: Speed of Code Reviews", url: "https://google.github.io/eng-practices/review/reviewer/speed.html", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S06, title: "GitHub: About protected branches", url: "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "GitHub: About code owners", url: "https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Gitea: Code Owners", url: "https://docs.gitea.com/usage/repository/code-owners/", publisher: Gitea, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: Gitea 28.0.0 is released, url: "https://blog.gitea.com/release-of-28.0.0/", publisher: Gitea, date: 2026-09-30, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: "GitLab: Merge request approvals", url: "https://docs.gitlab.com/user/project/merge_requests/approvals/", publisher: GitLab, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "GitHub: Using GitHub Copilot code review", url: "https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-code-review", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "GitHub: Managing a merge queue", url: "https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "GitLab: Merge trains", url: "https://docs.gitlab.com/ci/pipelines/merge_trains/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "GitHub: REST API endpoints for pull requests", url: "https://docs.github.com/en/rest/pulls/pulls", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "GitHub: Dependency caching", url: "https://docs.github.com/en/actions/concepts/workflows-and-actions/dependency-caching", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "GitLab: Caching in GitLab CI/CD", url: "https://docs.gitlab.com/ci/caching/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "GitHub: Control the concurrency of workflows and jobs", url: "https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Gitea: Compared to GitHub Actions", url: "https://docs.gitea.com/usage/actions/comparison/", publisher: Gitea, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: Semantic Versioning 2.0.0, url: "https://semver.org/spec/v2.0.0.html", publisher: semver.org, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S20, title: Calendar Versioning, url: "https://calver.org/", publisher: calver.org, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S21, title: git-revert, url: "https://git-scm.com/docs/git-revert", publisher: Git, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "Renovate (repository and LICENSE)", url: "https://github.com/renovatebot/renovate", publisher: Mend, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "Renovate: Supported platforms", url: "https://docs.renovatebot.com/modules/platform/", publisher: Mend, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "GitHub: Using templates to encourage useful issues and pull requests", url: "https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: commitlint, url: "https://github.com/conventional-changelog/commitlint", publisher: conventional-changelog, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: release-please, url: "https://github.com/googleapis/release-please", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: Changesets, url: "https://github.com/changesets/changesets", publisher: Changesets, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: Lefthook, url: "https://github.com/evilmartians/lefthook", publisher: Evil Martians, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: pre-commit, url: "https://pre-commit.com/", publisher: pre-commit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "Is Agentic Code Review Helpful? Mining Developers' Feedback to CodeRabbit Reviews in the Wild", url: "https://arxiv.org/abs/2607.03316", publisher: arXiv, date: 2026-07-03, kind: case, checked: 2026-11-13 }
+  - { id: S31, title: "Are LLMs reliable code reviewers? Systematic overcorrection in requirement conformance judgement", url: "https://link.springer.com/article/10.1007/s10515-026-00638-5", publisher: Automated Software Engineering, date: 2026-06-26, kind: community, checked: 2026-11-13 }
+  - { id: S32, title: "pnpm: Workspace", url: "https://pnpm.io/workspaces/", publisher: pnpm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: semantic-release, url: "https://github.com/semantic-release/semantic-release", publisher: semantic-release, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: GoReleaser, url: "https://github.com/goreleaser/goreleaser", publisher: GoReleaser, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "Which repositories and plans GitHub merge queues are available for: the official page does not say; verify against your plan before enabling"
+  - Whether GitHub Enterprise Server can use Actions, caching, and package registries fully air-gapped needs separate verification
+  - "The licenses of Lefthook, pre-commit, commitlint, Changesets, semantic-release, and GoReleaser are carried over from the original research and have not been checked one by one against the official LICENSE files; the feature boundary between GoReleaser's commercial and open-source editions has not been verified"
+  - "Whether Renovate's license is AGPL-3.0-only or or-later: the LICENSE file is the full AGPL v3 text; confirm against the declaration in package.json"
+  - "Details of signed commits and approval rules for protected branches in Gitea's stable documentation: the original research cited development-version docs; verify against the version actually deployed"
+  - "The mapping between GitLab tiers (Free, Premium, Ultimate) and the Community Edition / Enterprise Edition licenses is oversimplified in the original research"
+  - "Research needed: selection of monorepo build and task tools (Nx, Turborepo, Bazel, Pants), or explicitly hand it to 10"
+  - "Research needed: tools and practices for stacked PRs (e.g., Graphite, ghstack, git-town)"
+  - "Research needed: mapping of roles and permission levels across platforms (GitHub's write/maintain, GitLab's Developer/Maintainer, Gitea's permissions)"
+  - "Research needed: capability differences between Forgejo and Gitea"
+  - "Research needed: measurement definitions for process quality metrics (time to first review response, PR cycle time, rework rate, post-merge rollback rate), to be aligned with 22"
+  - "Research needed: the default choice between Lefthook and pre-commit must be aligned with 02 and 12"

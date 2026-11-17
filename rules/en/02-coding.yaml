@@ -1,0 +1,538 @@
+id: "02"
+slug: coding
+title: General Coding Standards
+summary: "Language-agnostic coding conventions: naming, comments, error handling and propagation, log fields and levels, configuration, complexity; the error-prone areas of time, money, encoding, and concurrency; and general principles for formatting and linting."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Identifier naming, terminology, units, magic numbers
+    - Comments and doc comments for public interfaces
+    - Error classification, catching and propagation, converting errors at boundaries
+    - Application log fields, levels, and what must not be logged
+    - Configuration loading and validation
+    - Complexity, readability, reuse
+    - Time, money, floating point, text encoding, large integers
+    - Timeouts, retries, concurrent tasks, and shared state
+    - General principles for formatting and linting (a single formatter; exceptions need a reason and an expiry date)
+  excludes:
+    - { what: "Language-specific formatters, linters, complexity tools, and their configuration", see: "10-15" }
+    - { what: "External error response format (RFC 9457), JSON field casing, event naming, API compatibility and idempotency semantics", see: "16" }
+    - { what: "Database column naming and migration compatibility", see: "17" }
+    - { what: "Secret management, secret scanning, SAST", see: "25" }
+    - { what: "Log collection, retention, distributed tracing (OTel), alerting", see: "26" }
+    - { what: "Commit hooks, review process, CI gate ordering", see: "03" }
+    - { what: "Layering, dependency direction, abstraction boundaries", see: "01" }
+    - { what: "READMEs, glossary documents, which language comments are written in", see: "05" }
+    - { what: "Rate limiting, distributed locks, job scheduling", see: "18" }
+overview: |
+  1. **Across languages, unify semantics, not surface style.** Names must be clear and consistent; casing and suffixes follow each language's conventions; whitespace and import order are left to the formatter.
+  2. **Comments explain why.** Reasons, constraints, boundaries, risks; public interfaces document inputs and outputs, errors, and side effects.
+  3. **Never swallow errors or lose their cause.** When propagating, keep the original error and add context; catch only where you can handle or need to convert; at boundaries, convert to stable error codes and never hand stack traces or SQL to the caller.
+  4. **Logs are structured data.** Fixed base fields and consistent level meanings; never log secrets, tokens, or unnecessary personal data; log the same error in full only once.
+  5. **Load configuration in one place and validate at startup.** If anything is missing or invalid, fail to start, reporting the key name but not the value.
+  6. **Watch complexity trends; no cross-language line-count limits.** Thresholds inherit each language tool's defaults and apply only to new code; do not split code mechanically just to hit a line count.
+  7. **Follow standards where mistakes are easy.** Use RFC 3339 for points in time and store the IANA time zone separately for local times; never use binary floating point for money, and attach an ISO 4217 currency code; default to UTF-8 for text; integers above 2^53 are strings in JSON.
+  8. **Every external call has a timeout; retries are bounded and back off.** Non-idempotent writes are not retried automatically without an idempotency design; every background task has a way to stop.
+  9. **One formatter only; lint exceptions need a reason.** Suppressions target specific rules and state the reason; long-lived exceptions record an owner and an expiry date.
+rules:
+  # ── Naming ──
+  - id: COD-001
+    title: Use the same name for the same concept across the whole project, and never share a name between different concepts; record domain terms in the glossary
+    level: soft
+    check: manual
+    how: During review, check newly introduced names against the glossary; the glossary itself is reviewed together with the code
+    applies: [all]
+    why: One concept with several names, or one name with several meanings, is a common cause of misreading code and wiring up the wrong field.
+    detail: |
+      - Types are nouns, functions are verb phrases, and booleans read like predicates (`is_active`, `has_children`).
+      - Collections use plurals or explicit collection names, distinguishing them from single objects.
+    sources: [S03]
+    see: ["05"]
+  - id: COD-002
+    title: Identifier casing, prefixes, and suffixes follow the conventions of the language in use; do not force a single style across languages
+    level: hard
+    check: auto
+    how: Check with each language's naming lint rules (tools in 10–15)
+    applies: [all]
+    why: Each language's toolchain, standard library, and community code follow their own conventions; forcing uniformity fights the ecosystem.
+    detail: |
+      External fields (JSON, database, events) are contracts; their casing is defined in 16 and 17 and does not change with the backend language.
+    sources: [S02]
+    see: ["10-15", "16", "17"]
+  - id: COD-003
+    title: New public names use common English words and widely recognized abbreviations, not arbitrary pinyin, mixed Chinese-English spellings, or invented abbreviations
+    level: soft
+    check: manual
+    how: Review new public interfaces, fields, and module names; proper nouns (such as place names or regulation names) are registered in the glossary as exceptions
+    applies: [all]
+    why: Pinyin and invented abbreviations are unreadable to anyone else and cannot be reliably detected automatically, so only review can catch them.
+    detail: |
+      - Do not rename already-public legacy names just to change style; follow the compatibility rules in 16 and 17.
+      - Recognized abbreviations such as `id`, `url`, and `config` are fine; explain unfamiliar abbreviations where they first appear, or use the full word.
+    sources: [S03]
+    see: ["16", "17"]
+  - id: COD-004
+    title: Put the unit of a quantity into its name or type, such as `timeout_ms` or `size_bytes`, or use the language's built-in duration type
+    level: soft
+    check: semi
+    how: During review, check new duration, size, and ratio fields and parameters; prefer strong types (such as duration types) where available
+    applies: [all]
+    why: A `1000` without a unit is read as milliseconds by some and seconds by others, and tests rarely catch this kind of bug.
+    sources: [S04, S05]
+  - id: COD-005
+    title: Define numbers and strings with business meaning as named constants, stating their meaning, unit, and origin
+    level: soft
+    check: semi
+    how: Enable each language's magic-number rule to flag candidates (such as ESLint `no-magic-numbers`, Ruff `PLR2004`), then confirm in review
+    applies: [all]
+    why: A `86400`, `0.06`, or `"VIP2"` scattered through the code has no visible meaning, and you can never find every occurrence when changing it.
+    detail: |
+      - No need to handle: `0`, `1`, `-1`, array indexes, sample data in tests, self-evident mathematical constants.
+      - For values set by external rules (rates, limits, protocol constants), note the source next to the constant.
+      - Values that may vary by deployment are configuration (see COD-022), not constants.
+    sources: [S06, S07]
+  # ── Comments ──
+  - id: COD-006
+    title: Comments explain reasons, trade-offs, constraints, and risks rather than restating code line by line; update comments when behavior changes
+    level: soft
+    check: manual
+    how: During review, check whether comments explain "why" and whether comments at changed locations still match the code
+    applies: [all]
+    why: Comments that restate the code carry no information; outdated comments are more misleading than no comments.
+    sources: [S01]
+  - id: COD-007
+    title: In libraries used by others, public interfaces must have doc comments covering purpose, parameters and return values, possible errors, preconditions, and side effects
+    level: hard
+    check: semi
+    how: Use each language's missing-docs check to find undocumented public interfaces (tools in 10–15); completeness of content is checked in review
+    applies: [kind:library]
+    why: Callers cannot see the implementation; the doc comment is part of the interface specification.
+    detail: Doc comment formats (Go Doc, TSDoc, docstring, rustdoc, Javadoc/KDoc) follow each language's conventions.
+    sources: [S02]
+    see: ["05", "10-15"]
+  - id: COD-008
+    title: TODO and FIXME comments must state a reason and link a task ID or owner; do not leave placeholder implementations posing as finished work
+    level: soft
+    check: auto
+    how: Use lint or a script to check that TODOs carry a task ID (such as Ruff's TD rules or ESLint `no-warning-comments`); during review, check for empty implementations and hard-coded return values
+    applies: [all]
+    why: An unclaimed TODO is never addressed; a placeholder implementation becomes a defect once it ships.
+  - id: COD-009
+    title: Generated code states in its file header which tool generated it and that it must not be edited by hand; hand-written code does not live in generated directories
+    level: soft
+    check: auto
+    how: Check for the marker in generated file headers (such as Go's `// Code generated ... DO NOT EDIT.` convention); formatters and linters skip these files
+    applies: [all]
+    why: Hand edits to generated code are lost the next time it is regenerated.
+    sources: [S08]
+  # ── Error handling and propagation ──
+  - id: COD-010
+    title: "Never swallow errors: no empty catch blocks, no catching and doing nothing, and no merely printing the error and continuing as if it succeeded"
+    level: hard
+    check: semi
+    how: Enable the relevant lint rules in each language (such as empty catch, bare except, unchecked returned errors); in review, check that intentionally ignored errors state a reason
+    applies: [all]
+    why: Swallowed errors resurface elsewhere as corrupted data or inconsistent state, and are very hard to trace back to their origin.
+    detail: For errors that genuinely should be ignored (such as failing to close a read-only file), state in the code why ignoring them is safe.
+    see: ["10-15"]
+  - id: COD-011
+    title: When passing an error upward, keep the original error and add context such as the operation, object identifier, and stage; do not overwrite the original error with a new one
+    level: hard
+    check: semi
+    how: Use the language's built-in error chaining (Go `%w` and `errors.Is/As`, Python `raise ... from`, JS `new Error(msg, { cause })`, passing a cause when constructing exceptions in Java/Kotlin, Rust `source()`); in review, check whether the original error was lost
+    applies: [all]
+    why: When all that remains is "save failed" and the underlying cause is gone, troubleshooting becomes guesswork.
+    detail: Put only safe identifiers (order numbers, stage names) in the context, never passwords, tokens, or full request bodies.
+    sources: [S09, S10, S11]
+  - id: COD-012
+    title: Catch errors only where you can handle or recover from them, need to convert the error type, or can add useful context; otherwise propagate them upward
+    level: soft
+    check: manual
+    how: During review, check which of these cases each catch point falls into
+    applies: [all]
+    why: Catching everywhere causes errors to be handled twice, logged twice, or altered beyond recognition along the way.
+  - id: COD-013
+    title: "Distinguish three classes of errors: those the caller can correct (invalid input, no permission, conflict), transient failures (timeout, rate limiting, downstream unavailable), and program defects; mark retryability separately"
+    level: soft
+    check: manual
+    how: Review the error type definitions and the mapping table
+    applies: [all]
+    why: Only by knowing the class can you tell whether to inform the user, retry, or raise an alert; "expected" does not mean "ignorable".
+    see: ["16"]
+  - id: COD-014
+    title: Callers decide based on error type or error code, not by matching error message text
+    level: soft
+    check: semi
+    how: Search the code for string comparisons or regex matches on error messages, and confirm in review
+    applies: [all]
+    why: Error messages are for humans and may be reworded or translated at any time; logic based on the text breaks as soon as it changes.
+    sources: [S09]
+  - id: COD-015
+    title: At service or process boundaries, convert internal errors into stable error codes and safe descriptions; never return stack traces, SQL, internal paths, or secrets to the caller
+    level: hard
+    check: semi
+    how: Review error mappings at boundaries; use security scanning to find places that return exception details directly; write sample tests for error responses
+    applies: [kind:service, kind:library, kind:cli]
+    why: Stack traces and SQL expose internal structure and give attackers clues; callers cannot rely on this content for decisions either.
+    detail: For the concrete format of external error responses (such as RFC 9457), see 16.
+    sources: [S12]
+    see: ["16", "25"]
+  # ── Logging ──
+  - id: COD-016
+    title: Production application logs use a structured format (such as one JSON object per line), not concatenated sentences only humans can read
+    level: hard
+    check: auto
+    how: Sample logs in test or staging environments and check that every line parses into fields
+    applies: [kind:service, kind:cli]
+    why: Only structured logs can be reliably searched, aggregated, and alerted on, and they are also harder to forge through injection.
+    sources: [S13, S14]
+    see: ["26"]
+  - id: COD-017
+    title: Every log entry has a timestamp, level, service name, event name, and message; when handling a request, include the trace ID and request ID, and on errors include the error code
+    level: hard
+    check: auto
+    how: Define a list of log fields and validate required fields against log samples
+    applies: [kind:service]
+    why: Without these fields, logs cannot be correlated by time, service, or request.
+    detail: |
+      - Timestamps use UTC in RFC 3339 format (see COD-026).
+      - Event names are stable identifiers (such as `order.payment_failed`); the message can be a human-readable sentence.
+      - Use one set of field names across the whole project; do not fabricate a trace ID when there is none.
+      - Example: `{"timestamp":"2026-11-13T09:00:00Z","level":"ERROR","service":"order-api","event":"order.persistence_failed","trace_id":"…","request_id":"req_123","error_code":"STORAGE_UNAVAILABLE","duration_ms":42}`
+    sources: [S14]
+    see: ["26"]
+  - id: COD-018
+    title: "Use one meaning for log levels across the project: DEBUG for diagnostic detail, INFO for important normal events, WARN for anomalies that were recovered or degraded, ERROR for a failed operation, FATAL when the process cannot continue"
+    level: soft
+    check: manual
+    how: Review the level of new log statements; spot-check that every ERROR in production logs corresponds to a real failure
+    applies: [all]
+    why: "Misused levels break alerting: when ERROR is everywhere, nobody looks at ERROR."
+    detail: |
+      These meanings are a common industry convention, not mandated by any standard. Syslog (RFC 5424) only defines level names and numeric values, and the OpenTelemetry Logs Data Model only defines numeric ranges for severity, used to align different logging libraries.
+      Do not log caller input errors as ERROR (they are normal business outcomes; use INFO or WARN).
+    sources: [S15, S14]
+  - id: COD-019
+    title: Never log passwords, tokens, secrets, cookies, full connection strings, bank card numbers, or personal data without a legitimate purpose; log fields from an allowlist rather than printing whole request bodies
+    level: hard
+    check: semi
+    how: Scan log samples with secret and personal-data detection (tools in 25); review fields in new log statements
+    applies: [all]
+    why: Logs are usually accessible to more people than business data and are kept longer; a leak into logs is a leak to everyone who can read them.
+    detail: Identifiers such as user IDs may also count as personal data; before logging them, confirm there is a purpose and access is controlled.
+    sources: [S13]
+    see: ["25", "27"]
+  - id: COD-020
+    title: External input written to logs must be encoded, with newlines and other control characters removed or escaped, and its length limited
+    level: hard
+    check: semi
+    how: Prefer structured logging libraries that encode fields automatically; use security scanning to find places where external input is concatenated directly into log messages
+    applies: [all]
+    why: Without handling newlines, log lines can be forged; without a length limit, storage can be exhausted.
+    sources: [S13]
+  - id: COD-021
+    title: Log a given error in full only once, at the layer that handles it; intermediate layers pass it on without printing it again
+    level: soft
+    check: manual
+    how: During review, count how many places on an error path write logs; check log samples for the same error appearing multiple times
+    applies: [all]
+    why: Logging at every layer turns one failure into five ERROR entries, distorting both alerts and statistics.
+  # ── Configuration ──
+  - id: COD-022
+    title: Configuration that varies by deployment is not hard-coded; load it in one place and validate it by type; when missing or invalid, fail at startup, reporting the key name and reason without printing the value
+    level: hard
+    check: semi
+    how: Unit tests for the configuration loader cover missing and invalid values; during review, search business code for scattered reads of environment variables
+    applies: [kind:service, kind:cli]
+    why: Starting with bad configuration often leads to strange failures in the middle of the night; centralized validation stops the problem at startup.
+    detail: |
+      - Handle secrets separately from ordinary configuration; secrets never go into code, examples, logs, or command-line arguments. See 25 for details.
+      - "Separating configuration from code" comes from the Twelve-Factor App; it is an industry methodology, not a standard.
+    sources: [S16]
+    see: ["25"]
+  - id: COD-023
+    title: For each configuration item, document its type, unit, valid range, default, whether it is required, and whether it is sensitive; document the override order among multiple sources and whether hot reload is supported
+    level: soft
+    check: semi
+    how: Generate documentation and validation code from a configuration schema; review new configuration items
+    applies: [kind:service, kind:cli]
+    why: Without clear documentation, the same setting gets interpreted differently in different environments.
+    detail: A common override order is "command line > environment variables > config file > defaults"; this is a convention, not a standard. Once the project chooses one, document it.
+  # ── Complexity and readability ──
+  - id: COD-024
+    title: Complexity thresholds use each language tool's defaults and are enforced only on new and changed code; record existing code in a baseline rather than blocking the whole repository at once
+    level: soft
+    check: auto
+    how: In CI, run complexity checks only on the changed parts; when exceeded, require an explanation or simplification (tools in 10–15)
+    applies: [all]
+    why: Thresholds are rules of thumb, not laws of nature; applying them wholesale to existing code only breeds lots of meaningless exceptions.
+    ref_value: "Reference values: Sonar's cognitive complexity default is 15 (25 for C, C++, and Objective-C), which its maintainers describe as an empirically tuned value; the Google Python Style Guide suggests considering whether to split a function once it exceeds about 40 lines, and explicitly sets no hard limit."
+    sources: [S17, S02]
+    see: ["10-15"]
+  - id: COD-025
+    title: Do not set a cross-language limit on function or file line counts; do not mechanically split out meaningless small functions just to meet a line count
+    level: soft
+    check: manual
+    how: During review, check whether a function does one thing, rather than only looking at its line count
+    applies: [all]
+    why: The same number of lines costs very different effort to read in a state machine, declarative configuration, or generated code; mechanical splitting only adds more jumping around.
+    detail: |
+      - Use early returns to reduce nesting; lint can flag nesting depth.
+      - Do not write hard-to-read expressions, implicit side effects, or obscure metaprogramming just to save a few lines.
+    sources: [S02, S01]
+  # ── Time, money, encoding, numbers ──
+  - id: COD-026
+    title: Points in time passed between systems use RFC 3339 format with a time zone offset; store and compare in UTC
+    level: hard
+    check: auto
+    how: Declare time fields in interface schemas with the date-time format and validate them; during review, check for time strings without an offset
+    applies: [all]
+    why: A "2026-11-13 10:00" without an offset represents different instants on different machines.
+    detail: |
+      - `2026-11-13` is a calendar date, not a point in time; use a separate date type.
+      - RFC 9557 updates RFC 3339: `Z` now means only "the UTC time is known, the local offset is unknown". When you need to express the local offset, write the actual offset (such as `+08:00`).
+    sources: [S18, S19]
+  - id: COD-027
+    title: For data with local-time meaning (shift schedules, 9 a.m. local time every day, appointments on a future date), also store the IANA time zone name, not just an offset
+    level: hard
+    check: semi
+    how: Review whether such fields also store the time zone name; use the standard library or a mature time library for time zone calculations, never compute daylight saving time yourself
+    applies: [all]
+    why: Offsets change with daylight saving time and policy; if only the offset is stored, future local times will be off by an hour or more.
+    detail: |
+      - Time zone names use names from the IANA Time Zone Database, such as `Asia/Shanghai` or `Europe/Paris`; when it must be written together with the time, you can use the RFC 9557 suffix syntax `2026-01-01T09:00+01:00[Europe/Paris]`.
+      - The time zone database is updated, and the runtime environment must be able to update with it.
+    sources: [S19, S20]
+  - id: COD-028
+    title: Durations and timeouts state their unit; measure elapsed time with a monotonic clock, not by subtracting system wall-clock times
+    level: hard
+    check: semi
+    how: Review the clock API used for elapsed-time measurement; some languages have lint rules that can flag this (tools in 10–15)
+    applies: [all]
+    why: System time can jump due to time synchronization or manual changes; using it to measure elapsed time may yield negative or huge values.
+    detail: The monotonic clock corresponds to POSIX `CLOCK_MONOTONIC`, and every language has an equivalent API (such as Go's `time.Since`, Python's `time.monotonic`, JS's `performance.now`).
+    sources: [S21, S04, S05]
+  - id: COD-029
+    title: Never compute or store money with binary floating point; use a decimal type or an integer in the smallest currency unit, together with an ISO 4217 currency code and an explicit rounding rule
+    level: hard
+    check: semi
+    how: Review the types of money fields and calculation code; money fields in interface schemas do not use number/float
+    applies: [all]
+    why: Binary floating point cannot exactly represent decimal fractions such as 0.1; after summing and rounding, you end up a cent off and reconciliation fails.
+    detail: |
+      - Currencies have different numbers of decimal places (for example, 0 for the Japanese yen, 2 for the Chinese yuan, 3 for the Kuwaiti dinar); take them from the ISO 4217 "minor unit", do not hard-code 2.
+      - An `amount=19.99` with only a number and no currency must not be used for settlement.
+    sources: [S22, S23, S24, S25]
+  - id: COD-030
+    title: Compare floating-point numbers according to the tolerance the business requires; do not compare directly with `==`, and do not apply one global tolerance everywhere
+    level: soft
+    check: semi
+    how: Enable each language's floating-point equality warning (such as Rust Clippy `float_cmp`), and confirm the source of the tolerance in review
+    applies: [all]
+    why: Floating-point arithmetic has rounding error, so direct comparison gives unstable results; a reasonable tolerance depends on the magnitude and purpose of the data.
+    sources: [S24, S25]
+  - id: COD-031
+    title: Source files and exchanged text data default to UTF-8; truncate, measure length, and compare by character, not by byte
+    level: hard
+    check: auto
+    how: Set `charset = utf-8` in `.editorconfig` and have CI check file encoding; review implementations of string truncation and length validation
+    applies: [all]
+    why: Mixing encodings produces garbled text; truncating by byte can cut a Chinese character in half.
+    detail: |
+      - JSON exchanged between systems must use UTF-8 (required by RFC 8259).
+      - Before comparing user-entered text (such as usernames), apply Unicode normalization (usually NFC or NFKC); otherwise strings that look identical may not be equal.
+    sources: [S26, S27, S28, S29]
+  - id: COD-032
+    title: When passing integers in JSON that may exceed 2^53 (such as long integer IDs), use strings; document the integer range in the interface, and whether "field is null" and "field is absent" mean different things
+    level: hard
+    check: semi
+    how: Review the types and ranges of integer fields in interface schemas; run contract tests with very large values
+    applies: [all]
+    why: Many JSON parsers (including JavaScript in browsers) treat numbers as double-precision floats, silently losing precision above 2^53.
+    detail: For other details of interface contracts, see 16.
+    sources: [S26, S30]
+    see: ["16"]
+  # ── Timeouts, retries, concurrency ──
+  - id: COD-033
+    title: Every network call and external call sets a timeout or deadline and passes the remaining time to downstream calls
+    level: hard
+    check: semi
+    how: Review client configuration for external calls; search for client construction without a timeout (some languages have lint rules that can flag this)
+    applies: [all]
+    why: A call without a timeout holds a connection and thread indefinitely when the downstream hangs; one slow dependency can bring down the whole service.
+    sources: [S31, S32]
+  - id: COD-034
+    title: Retry only transient failures, always with a retry limit and exponential backoff with random jitter; do not automatically retry non-idempotent writes without an idempotency design
+    level: hard
+    check: semi
+    how: Review retry configuration (limit, backoff, retryable error types); use an existing retry library or the client's built-in retries, not a hand-written loop
+    applies: [all]
+    why: Unlimited retries amplify a brief failure into a cascading outage; retrying non-idempotent writes causes duplicate charges and duplicate orders.
+    detail: |
+      - The HTTP standard (RFC 9110) states that a client should not automatically retry a request with a non-idempotent method unless it knows the request is actually idempotent or can confirm the original request was not applied.
+      - For API-level idempotency design such as idempotency keys, see 16; for rate limiting, see 18.
+    sources: [S33, S32]
+    see: ["16", "18"]
+  - id: COD-035
+    title: Every background task, thread, or coroutine that is started has a clear owner and a way to stop it (cancellation or a deadline), and releases its resources on exit
+    level: soft
+    check: semi
+    how: Review the start and stop paths of tasks; check for leaks in tests (such as Go's goleak)
+    applies: [all]
+    why: Tasks nobody is responsible for stopping pile up in the process, leaking memory and connections, and lose data on shutdown.
+    sources: [S31]
+  - id: COD-036
+    title: Mutable data shared by multiple execution units must have an explicit synchronization mechanism; in languages that support race detection, enable it in tests
+    level: hard
+    check: semi
+    how: Enable race detection in tests (such as Go's `-race`, ThreadSanitizer for C/C++/Rust); review how shared state is accessed
+    applies: [all]
+    why: The outcome of a data race is nondeterministic; it rarely shows up in testing and occurs sporadically in production, making it hard to reproduce.
+    detail: Where immutable data or message passing will do, do not share mutable state.
+    sources: [S34, S35]
+  # ── Reuse and dependencies ──
+  - id: COD-037
+    title: For functionality with many edge cases, such as time, money, JSON, UUIDs, cryptography, and retries, use the standard library or a mature library instead of writing your own; state the reason for each new dependency
+    level: soft
+    check: manual
+    how: Review changes to the dependency list and newly added utility functions
+    applies: [all]
+    why: Others have long since hit the pitfalls in these areas; home-grown versions tend to fail on time zones, precision, or security.
+    detail: Two similar pieces of code do not necessarily need to be extracted into shared code; extract only when what is duplicated is the same business rule, to avoid forcing different flows into one abstraction (see 01).
+    see: ["01", "25"]
+  # ── Formatting and linting ──
+  - id: COD-038
+    title: Use exactly one formatter per language, commit its configuration file, and verify with check mode in CI; review no longer discusses whitespace or import order
+    level: hard
+    check: auto
+    how: CI runs the formatter in check mode (such as `--check`) and fails on any difference (tools in 10–15)
+    applies: [all]
+    why: Once formatting is left to tools, review effort can go to design, correctness, and security; two coexisting formatters keep rewriting each other's output.
+    detail: Put an `.editorconfig` at the repository root to unify encoding, line endings, indentation, and the final newline so that all editors behave consistently.
+    sources: [S29, S01]
+    see: ["10-15"]
+  - id: COD-039
+    title: When disabling lint in code, you must name the specific rule and give a reason; disabling for a whole file or without naming a rule is not allowed
+    level: hard
+    check: auto
+    how: Enforce with the linter's own checks (such as ESLint's reporting of unused disable directives and descriptions on disable comments, Ruff `PGH004`, golangci-lint's nolintlint requiring an explanation)
+    applies: [all]
+    why: Disabling without naming a rule also hides new problems that appear later; without a reason, those who come after cannot tell whether it can be removed.
+    sources: [S36, S37]
+  - id: COD-040
+    title: Long-lived lint exceptions (baseline files, disabling a whole rule) record a reason, an owner, and an expiry date, and are reviewed when they expire
+    level: soft
+    check: semi
+    how: A script checks that every item in the exception list has an owner and an expiry date, and sends a reminder on expiry
+    applies: [all]
+    why: Exceptions without an expiry date live forever; the rule is nominally on but in practice no longer applies.
+choices:
+  - category: Formatting
+    pick: One official or mainstream formatter per language + an .editorconfig at the repository root
+    alternatives:
+      - { name: "Keep the project's existing formatter", when: "An existing project already uses one formatter consistently" }
+    avoid:
+      - { name: "Relying on manual review to keep spaces and quotes consistent", why: "Wastes review effort and is inconsistent" }
+      - { name: "Using two formatters for the same language", why: "They rewrite each other, producing meaningless changes" }
+    notes: For specific tools, see 10–15.
+    sources: [S29]
+  - category: Lint exceptions
+    pick: Inline disables target a specific rule with a reason; existing issues go into the tool's built-in baseline file
+    avoid:
+      - { name: "Disabling for a whole file or without naming a rule", why: "Hides new problems that appear later" }
+      - { name: "Lowering thresholds in CI to make checks pass", why: "The rule is nominally on but in practice no longer applies" }
+    sources: [S36, S37]
+  - category: Error propagation
+    pick: The language's built-in error chaining (cause) + error code mapping at boundaries
+    avoid:
+      - { name: "Converting the original error to a string and concatenating it into a new error", why: "Loses the original error type, so callers cannot make decisions" }
+      - { name: "Determining error type by matching error message text", why: "Breaks as soon as the wording changes" }
+    sources: [S09, S10, S11]
+  - category: Application logging
+    pick: The language's mainstream structured logging library, outputting JSON lines
+    alternatives:
+      - { name: "Key-value text logs", when: "Only for viewing during local development" }
+    avoid:
+      - { name: "Ad hoc print statements or string concatenation", why: "Not searchable and easy to inject into" }
+    notes: For log collection and distributed tracing, see 26.
+    sources: [S13, S14]
+  - category: Time
+    pick: The standard library or a mature time library, with the IANA Time Zone Database for time zones; RFC 3339 for transport
+    avoid:
+      - { name: "Parsing time strings or computing daylight saving time yourself", why: "Too many edge cases" }
+      - { name: "Passing local time strings without an offset between systems", why: "They represent different instants on different machines" }
+    sources: [S18, S20]
+  - category: Money
+    pick: A decimal type (such as each language's Decimal/BigDecimal) or an integer in the smallest currency unit, paired with an ISO 4217 currency code
+    avoid:
+      - { name: float/double, why: "Cannot exactly represent decimal fractions" }
+    sources: [S22, S24]
+  - category: Retries
+    pick: An existing retry library or the client's built-in retry mechanism, with a limit, exponential backoff, and random jitter
+    avoid:
+      - { name: "Hand-written while loops for retries", why: "Easy to miss the limit, backoff, and retryability check" }
+    sources: [S32, S33]
+antipatterns:
+  - { bad: "Using camelCase or snake_case uniformly across all languages", instead: "Unify semantics; casing follows each language's conventions; external fields follow 16" }
+  - { bad: "Pinyin or meaningless names (`yonghuId`, `tmp2`)", instead: "English words from the glossary (`userId`, `user_id`)" }
+  - { bad: "Numbers like `86400` and `0.06` scattered through the code", instead: "Define named constants stating their unit and origin" }
+  - { bad: "`catch {}` or `except: pass`", instead: "Handle, convert, or propagate; when ignoring is truly needed, state the reason" }
+  - { bad: "Catching and printing the same error at every layer", instead: "Intermediate layers pass it on with context; log it once at the handling boundary" }
+  - { bad: "Returning exception stack traces or SQL errors directly to the caller", instead: "Return a stable error code and a safe description; keep the details in internal logs" }
+  - { bad: "Handing the entire request body to the logger", instead: "Log the needed fields from an allowlist" }
+  - { bad: "Reading and parsing environment variables all over the business code", instead: "Load configuration in one place and validate it by type" }
+  - { bad: "\"Functions over 30 lines must be split\", \"files over 300 lines must be split\"", instead: "Treat line counts only as a reminder; review whether responsibilities are single" }
+  - { bad: "Extracting any two similar pieces of code into a shared library", instead: "Extract only when the same business rule is duplicated" }
+  - { bad: "Storing money in a double", instead: "Use a decimal type or an integer in the smallest unit, with a currency and rounding rule" }
+  - { bad: "Measuring elapsed time by subtracting system times", instead: "Use a monotonic clock" }
+  - { bad: "Retrying without a limit or backoff, or automatically retrying order or payment requests", instead: "Set a limit and backoff with jitter; non-idempotent writes need an idempotency design first" }
+  - { bad: "Disabling checks wholesale with `// eslint-disable` or `# noqa`", instead: "Target the specific rule with a reason; register an expiry date for long-lived exceptions" }
+sources:
+  - { id: S01, title: "Google Engineering Practices: What to look for in a code review", url: "https://google.github.io/eng-practices/review/reviewer/looking-for.html", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S02, title: "Google Python Style Guide", url: "https://google.github.io/styleguide/pyguide.html", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "AIP-140: Field names", url: "https://google.aip.dev/140", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "AIP-141: Quantities", url: "https://google.aip.dev/141", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "AIP-142: Time and duration", url: "https://google.aip.dev/142", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "ESLint: no-magic-numbers", url: "https://eslint.org/docs/latest/rules/no-magic-numbers", publisher: ESLint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Ruff: magic-value-comparison (PLR2004)", url: "https://docs.astral.sh/ruff/rules/magic-value-comparison/", publisher: Astral, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "go command: Generate Go files by processing source", url: "https://pkg.go.dev/cmd/go#hdr-Generate_Go_files_by_processing_source", publisher: Go, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "Working with Errors in Go 1.13", url: "https://go.dev/blog/go1.13-errors", publisher: Go, date: 2019-10-17, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: "Python Tutorial: Exception Chaining", url: "https://docs.python.org/3/tutorial/errors.html#exception-chaining", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "MDN: Error.prototype.cause", url: "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/cause", publisher: MDN, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "OWASP Error Handling Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S13, title: "OWASP Logging Cheat Sheet", url: "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S14, title: "OpenTelemetry: Logs Data Model", url: "https://opentelemetry.io/docs/specs/otel/logs/data-model/", publisher: OpenTelemetry, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S15, title: "RFC 5424: The Syslog Protocol", url: "https://www.rfc-editor.org/rfc/rfc5424.html", publisher: IETF, date: 2009-03, kind: standard, checked: 2026-11-14 }
+  - { id: S16, title: "The Twelve-Factor App: Config", url: "https://12factor.net/config", publisher: Heroku, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S17, title: "S3676: Reason for the current default value of 15", url: "https://community.sonarsource.com/t/s3776-reason-for-the-current-default-value-of-15/127103", publisher: Sonar Community, date: "2024", kind: community, checked: 2026-11-14 }
+  - { id: S18, title: "RFC 3339: Date and Time on the Internet: Timestamps", url: "https://www.rfc-editor.org/rfc/rfc3339.html", publisher: IETF, date: 2002-07, kind: standard, checked: 2026-11-14 }
+  - { id: S19, title: "RFC 9557: Date and Time on the Internet: Timestamps with Additional Information", url: "https://www.rfc-editor.org/rfc/rfc9557.html", publisher: IETF, date: 2024-04, kind: standard, checked: 2026-11-14 }
+  - { id: S20, title: "IANA Time Zone Database", url: "https://www.iana.org/time-zones", publisher: IANA, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S21, title: "POSIX: clock_getres, clock_gettime, clock_settime", url: "https://pubs.opengroup.org/onlinepubs/9699919799/functions/clock_gettime.html", publisher: The Open Group, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S22, title: "ISO 4217: Currency codes", url: "https://www.iso.org/iso-4217-currency-codes.html", publisher: ISO, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S23, title: "SIX: ISO 4217 currency code lists (maintenance agency)", url: "https://www.six-group.com/en/products-services/financial-information/market-reference-data/data-standards.html", publisher: SIX, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: "IEEE 754-2019: Standard for Floating-Point Arithmetic", url: "https://standards.ieee.org/ieee/754/6210/", publisher: IEEE, date: 2019-07, kind: standard, checked: 2026-11-14 }
+  - { id: S25, title: "Python Tutorial: Floating-Point Arithmetic: Issues and Limitations", url: "https://docs.python.org/3/tutorial/floatingpoint.html", publisher: Python Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: "RFC 8259: The JavaScript Object Notation (JSON) Data Interchange Format", url: "https://www.rfc-editor.org/rfc/rfc8259.html", publisher: IETF, date: 2017-12, kind: standard, checked: 2026-11-14 }
+  - { id: S27, title: "RFC 3629: UTF-8, a transformation format of ISO 10646", url: "https://www.rfc-editor.org/rfc/rfc3629.html", publisher: IETF, date: 2003-11, kind: standard, checked: 2026-11-14 }
+  - { id: S28, title: "Unicode Standard Annex #15: Unicode Normalization Forms", url: "https://unicode.org/reports/tr15/", publisher: Unicode Consortium, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S29, title: "EditorConfig Specification", url: "https://spec.editorconfig.org/", publisher: EditorConfig, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S30, title: "RFC 7493: The I-JSON Message Format", url: "https://www.rfc-editor.org/rfc/rfc7493.html", publisher: IETF, date: 2015-03, kind: standard, checked: 2026-11-14 }
+  - { id: S31, title: "gRPC: Deadlines", url: "https://grpc.io/docs/guides/deadlines/", publisher: gRPC, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: "Timeouts, retries, and backoff with jitter", url: "https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/", publisher: Amazon Web Services, date: null, kind: case, checked: 2026-11-14 }
+  - { id: S33, title: "RFC 9110: HTTP Semantics", url: "https://www.rfc-editor.org/rfc/rfc9110.html", publisher: IETF, date: 2022-06, kind: standard, checked: 2026-11-14 }
+  - { id: S34, title: "Go: Data Race Detector", url: "https://go.dev/doc/articles/race_detector", publisher: Go, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: "Clang: ThreadSanitizer", url: "https://clang.llvm.org/docs/ThreadSanitizer.html", publisher: LLVM, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: "ESLint: Configure Rules (disable comments and descriptions)", url: "https://eslint.org/docs/latest/use/configure/rules", publisher: ESLint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: "Ruff: blanket-noqa (PGH004)", url: "https://docs.astral.sh/ruff/rules/blanket-noqa/", publisher: Astral, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - "Research needed: industry practice for magic numbers (which values can be exempt, false-positive rates of each language's lint rules); COD-005 is currently written as soft guidance based on common practice"
+  - "Research needed: cross-language conventions for file and directory naming and import grouping"
+  - "Research needed: whether there are cross-language tools worth recommending for complexity and duplicate-code detection; for now we only use each language's own tools"
+  - "Research needed: whether log field names should use OpenTelemetry semantic convention names or project-defined snake_case names"
+  - Whether to recommend a cross-language custom rule engine (such as Semgrep), and the licensing position, to be decided jointly by 25 and 27
+  - Whether internal comments may be written in Chinese and whether public SDK documentation must be in English, to be decided by 05
+  - After RFC 9557 changed the meaning of `Z` to "local offset unknown", whether the output of each language's time libraries needs adjusting has not been verified one by one
+  - The configuration option names for golangci-lint nolintlint have not been verified

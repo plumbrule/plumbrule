@@ -1,0 +1,485 @@
+id: "08"
+slug: design-system
+title: Design Systems and Visual Design
+summary: "How visual tokens (color, font size, spacing, radius, shadow, layering, motion) are named, layered, stored and generated; dark mode and theming, fonts, icon sets, brand icons, and how design files and code stay in sync."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - "Visual tokens: color, font size and line height, spacing, radius, shadow, z-index, motion duration and easing, density"
+    - Token format, naming, layering and multi-platform generation
+    - Dark mode and multiple themes
+    - Font selection and licensing
+    - Icon set selection, brand logos and app icon masters
+    - Token sync between design tools and code
+  excludes:
+    - { what: "Contrast thresholds, not relying on color alone, reduced motion, visible focus, touch target size", see: "09" }
+    - { what: "Component libraries and their theme implementation, Storybook, Stylelint and other frontend tooling", see: "07" }
+    - { what: "Visual regression testing methods, generating and approving screenshot baselines", see: "04" }
+    - { what: Chart type selection and data visualization standards, see: "22" }
+    - { what: "Open-source licensing policy and scanning tools for fonts, icons and illustrations; cross-border transfer of personal data in design files", see: "27" }
+    - { what: Packaging and store submission details for app icons on each platform, see: "28-31" }
+    - { what: Agents must not approve baselines or relax checks on their own, see: "23" }
+overview: |
+  1. **Token files are the single source of truth.** Tokens live in the Git repository in DTCG format (the Design Tokens Community Group interchange format; first stable version published 2025-10-28; it is a W3C Community Group report, not an official W3C standard). Figma and Penpot are only sync endpoints; changes must be exported as file diffs and go through a PR.
+  2. **Three token tiers.** Primitive (`color.blue.600`) → semantic (`color.text.danger`) → component (`button.primary.background`). Product UI uses only semantic or component tokens; no raw colors or magic numbers.
+  3. **Generate per-platform outputs with an existing transformation tool.** Style Dictionary by default; it officially states that DTCG 2025.10 is not yet fully supported, so write compatibility cases for the features you use. Never hand-edit generated directories.
+  4. **Dark mode is a separate mapping, not an inversion.** Each theme fully covers the semantic keys; OKLCH is good for generating color scales, but the L value is not contrast, so every pairing in every theme must be actually computed (thresholds in 09).
+  5. **What is unified across platforms is names and intent.** px, pt and dp values need not match; native platforms follow platform conventions.
+  6. **Use system fonts first.** If you must bundle fonts, use ones that allow redistribution (e.g. Source Han Sans / Noto Sans CJK, SIL OFL 1.1) and ship the license with the package.
+  7. **One primary icon set per project.** Lucide (ISC) by default for web and desktop; native platforms use platform icons.
+  8. **Values are reference; structure is the rule.** Numbers such as the type scale, spacing and durations are just starting points; the hard requirements are a valid format, resolvable references, reproducible generation, and UI that uses only tokens.
+rules:
+  # ── Token format and storage ──
+  - id: DSN-001
+    title: Token source files live in the Git repository and go through PR review; changes made in design tools are exported as file diffs before merging
+    level: soft
+    check: semi
+    how: In review, check that token changes come from file diffs in the repository; design-tool sync records can be traced to a specific PR
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Variables that exist only in a design tool have no versioning, no review and no rollback, and are locked into a single tool.
+    sources: [S01, S20]
+  - id: DSN-002
+    title: "Token files use the DTCG format: every token has a `$value`, its type is determined by its own `$type` or that of its group, and files are validated against JSON Schema"
+    level: hard
+    check: auto
+    how: CI validates all `*.tokens.json` with a JSON Schema validator (e.g. AJV)
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: For tokens with an unclear type, transformation tools guess the wrong unit or format, and outputs diverge across platforms.
+    sources: [S01, S02, S04]
+  - id: DSN-003
+    title: Tokens must not contain circular aliases or references to tokens that do not exist
+    level: hard
+    check: auto
+    how: CI resolves all references and traverses the graph, failing on cycles or dangling references
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Circular or dangling references break the build, or are silently replaced with wrong values in some tools.
+    sources: [S01]
+  - id: DSN-004
+    title: "Every supported theme combination must resolve completely: no required semantic key (text, background, border, status) may be missing, and the build must not silently fall back to the default theme"
+    level: hard
+    check: auto
+    how: CI enumerates the supported theme combinations, builds each one, and checks it against the required-key list; any missing key fails the build
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: With a silent fallback on missing keys, light backgrounds or unreadable text show up in dark mode.
+    sources: [S03]
+  - id: DSN-005
+    title: Use only DTCG features that the transformation tool has been tested to support; every kind of token the project uses (color objects, composite tokens, theme resolution, etc.) has a compatibility case
+    level: soft
+    check: auto
+    how: Maintain a set of sample tokens covering the features in use, with expected outputs, and compare them in CI
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: "\"Supports DTCG\" does not mean every feature of the latest version is supported; Style Dictionary itself states that 2025.10 is not yet fully supported."
+    sources: [S05]
+  - id: DSN-006
+    title: Generated outputs (CSS variables, Swift, Kotlin, XML resources, etc.) are never hand-edited; after CI regenerates them they must match the repository contents
+    level: hard
+    check: auto
+    how: After running the token build, CI runs `git diff --exit-code` on the generated directories
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Hand-edited generated files are overwritten on the next build, and from then on the sources and outputs no longer match.
+  - id: DSN-007
+    title: Before upgrading the token transformation tool, compare old and new outputs on sample tokens and confirm each difference
+    level: soft
+    check: semi
+    how: The upgrade PR includes the diff between old and new outputs for the sample tokens
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Major versions of transformation tools often change default formats and unit handling; without a comparison, visual changes slip quietly into a release.
+    sources: [S05]
+    see: ["03"]
+  # ── Naming and tiers ──
+  - id: DSN-008
+    title: "Tokens have three tiers: primitive, semantic, component; the platform adaptation layer only maps and adds no new meaning"
+    level: soft
+    check: manual
+    how: Review the token directory structure to check that the semantic tier references only primitives and the component tier references only semantic tokens or primitives
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: With tiers in place, switching themes or brands only changes mappings, not every component one by one.
+    detail: |
+      | Tier | Example | Used by |
+      |---|---|---|
+      | Primitive | `color.blue.600`, `space.4` | Referenced only inside the design system |
+      | Semantic | `color.text.primary`, `color.surface.raised` | First choice for product UI |
+      | Component | `button.primary.background` | Inside components, maintained by the component owner |
+    sources: [S07, S21]
+  - id: DSN-009
+    title: In projects that adopt design tokens, product UI uses only semantic or component tokens and adds no new raw colors, spacing, radius, shadow, z-index or motion values; exceptions must be registered
+    level: hard
+    check: auto
+    how: Style lint forbids literals for these properties (Stylelint rules on the web, ESLint rules for CSS-in-JS); any hit outside the exception list fails CI
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Scattered literals turn theme changes and brand tweaks into global search-and-replace, and the visuals drift little by little.
+    detail: Tool configuration is in 07. Places that genuinely need literals, such as image overlays or third-party embeds, go into the exception list (see DSN-033).
+    sources: [S07]
+    see: ["07"]
+  - id: DSN-010
+    title: "Token names express purpose, not value: use `color.text.danger`, not `color.red`; use lowercase dot-separated names throughout"
+    level: soft
+    check: auto
+    how: A naming script checks that names in the semantic and component tiers contain no color names or numeric values
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: A name that encodes a value becomes a lie as soon as the theme changes; with purpose-based names, agents and newcomers can pick the right token from the name alone.
+    detail: Recommended structure is `category.purpose.variant.state`, e.g. `color.background.button.hover`. Do not put brand names or theme names into component APIs.
+    sources: [S07]
+  - id: DSN-011
+    title: Semantic and component tokens have a `$description` explaining when to use them
+    level: soft
+    check: auto
+    how: A script lists tokens missing descriptions and CI emits a warning
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: From names alone it is hard to tell `surface.raised` from `surface.overlay`; descriptions reduce misuse.
+    sources: [S01]
+  # ── Color and themes ──
+  - id: DSN-012
+    title: "Dark themes map their own set of semantic values; do not invert the whole page with `filter: invert()`"
+    level: hard
+    check: auto
+    how: "Style lint forbids `filter: invert(...)` on the root element or large containers"
+    applies: [platform:web]
+    why: Inversion also inverts images, brand colors and status colors, and flips the layering hierarchy.
+    detail: In dark mode, distinguish layers by surface lightness (canvas, surface, overlay, selected); shadows must be paired with borders or surface colors rather than relying on blur radius alone.
+    sources: [S07]
+  - id: DSN-013
+    title: Define themes along separate dimensions (e.g. light/dark, density), list the supported combinations, and do not allow arbitrary free combination
+    level: soft
+    check: manual
+    how: Review the theme configuration to check that there is an explicit list of combinations and that every combination on it is in the DSN-004 build test
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Stacking dimensions makes the number of combinations explode, and unlisted combinations have never been tested.
+    sources: [S03]
+  - id: DSN-014
+    title: Color scales may be generated in OKLCH, but published values must be gamut-mapped; when outputting wide-gamut colors, also provide an sRGB fallback
+    level: soft
+    check: semi
+    how: The build script checks that every color is within sRGB or has a fallback value, and the hue shift at the light and dark ends is reviewed
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: OKLCH lightness changes more uniformly, which suits generating color scales; but values outside the display gamut render differently on different devices.
+    detail: Use a mature color library for conversion and gamut mapping; do not write your own color-scale algorithm.
+    sources: [S02, S08]
+  - id: DSN-015
+    title: Maintain a foreground/background pairing table for each theme, and have CI compute every pair against the contrast thresholds in 09; do not judge compliance from the OKLCH L value
+    level: hard
+    check: auto
+    how: A script reads the pairing table and each theme's resolved values, computes contrast with the WCAG formula, and fails if any pair is below the threshold in 09
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: OKLCH L is perceived lightness, which is not the same as the relative luminance formula used for WCAG contrast; the same L value may fail.
+    sources: [S08, S09]
+    see: ["09"]
+  - id: DSN-016
+    title: Status colors are defined by semantic family (neutral, info, success, warning, danger), not by color name
+    level: soft
+    check: auto
+    how: A naming script checks that status tokens use semantic family names
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Only semantic definitions let the actual colors change across themes; the requirement to add text or icons in addition to color is in 09.
+    sources: [S07]
+    see: ["09"]
+  - id: DSN-017
+    title: Chart colors use categorical, sequential and diverging palette tokens; do not generate random colors on the fly for new data series
+    level: soft
+    check: semi
+    how: Check that colors in chart configurations reference palette tokens
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Random colors may change on every render and adjacent series may collide; a fixed palette is reproducible and its contrast can be checked.
+    sources: [S13]
+    see: ["22"]
+  # ── Fonts and typography ──
+  - id: DSN-018
+    title: Font size and line height are defined in pairs as typography tokens; components use only typography tokens and do not invent new font sizes
+    level: soft
+    check: auto
+    how: Style lint forbids literals for `font-size` and `line-height`
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: A fixed type scale keeps the hierarchy clear; if every component sets its own font size, a page soon has a dozen different sizes.
+    ref_value: "Reference values (information-dense Chinese admin UIs, font size/line height, px): 12/18, 13/20, 14/22, 16/24, 18/26, 22/30, 28/36. Portals, educational products and mobile should scale up overall; there is no standard source, so adjust based on screenshots of real Chinese and English text."
+  - id: DSN-019
+    title: Use the system font stack by default; the stack must include Chinese fonts and end with a generic font family
+    level: soft
+    check: semi
+    how: Check the fallback chain in the font tokens; take screenshots on target systems to confirm which font Chinese text actually renders in
+    applies: [platform:web, platform:desktop]
+    why: System fonts add nothing to bundle size and better match each platform's reading habits; without a Chinese font, the browser picks an uncontrolled font.
+    detail: |
+      Web example (confirm the fonts actually exist on the target systems):
+      `system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`
+  - id: DSN-020
+    title: Fonts bundled with the product must allow redistribution and ship with their license files; do not extract commercial fonts from the operating system or the web for bundling
+    level: hard
+    check: semi
+    how: The asset inventory lists the source, license and hash of every font file; it is manually verified before release
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Commercial fonts that ship with an OS (e.g. Microsoft YaHei, PingFang) are licensed only for use by the system itself; distributing them with a product risks infringement.
+    detail: "Source Han Sans and Noto Sans CJK are two release names of the same font family, both under SIL OFL 1.1: they may be distributed with software, the copyright notice and license must be kept, and modified versions may not be republished under the reserved font names (Source / Noto)."
+    sources: [S10, S11]
+    see: ["27"]
+  - id: DSN-021
+    title: After subsetting Chinese fonts, take screenshots in an offline environment to check that no characters are missing
+    level: soft
+    check: semi
+    how: Use a sample page covering common characters and domain-specific characters, take screenshots offline and check them manually
+    applies: [platform:web, platform:desktop]
+    why: Chinese fonts are large and subsetting saves a lot, but characters that were cut out show up as boxes or in a fallback font.
+  - id: DSN-022
+    title: "Numeric columns, amounts and timers use tabular figures (`font-variant-numeric: tabular-nums`)"
+    level: soft
+    check: semi
+    how: Check the styles of tables and numeric components; check in screenshots that columns line up
+    applies: [platform:web, platform:desktop]
+    why: Proportional figures have uneven widths, so columns jump and misalign whenever the numbers change.
+    sources: [S12]
+  # ── Spacing, radius, shadow, layering, density ──
+  - id: DSN-023
+    title: Spacing uses one named scale, and pages and components take values only from that scale
+    level: soft
+    check: auto
+    how: Style lint forbids literals for `margin`, `padding` and `gap`
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: A unified scale keeps visual rhythm consistent; mature design systems all use named spacing systems, but there is no standard saying "it must be 8px".
+    ref_value: "Reference scale (px): 0, 2, 4, 6, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80; prefer multiples of 4 and 8 for layout, and use 2px only for fine-tuning small elements. There is no standard source; this is common practice."
+    sources: [S14]
+  - id: DSN-024
+    title: Define only a few levels of radius and shadow tokens; name shadows by layering meaning, not by blur radius
+    level: soft
+    check: auto
+    how: Style lint forbids literals for `border-radius` and `box-shadow`
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Few levels keep things consistent; naming by layer lets dark themes express the same meaning with borders or surface colors instead.
+    ref_value: "Reference values: radius 0, 4, 8, 12, 16, full (px); shadows none, sm, md, lg. There is no standard source."
+  - id: DSN-025
+    title: z-index uses only the project's layer list; layers of third-party overlay components are included in the same list
+    level: soft
+    check: auto
+    how: Scan `z-index` in styles and report values not on the list as errors
+    applies: [platform:web]
+    why: When everyone writes their own `99999`, in the end nothing can cover anything else; the stacking order of dialogs, dropdowns and tooltips must be defined in one place.
+    ref_value: "Reference list: base 0, sticky 100, dropdown 200, popover 300, modal 400, toast 500. This is just a project convention; the browser top layer (e.g. native dialog) is not affected by z-index and must be verified separately."
+  - id: DSN-026
+    title: "Compact mode adjusts sizes and spacing with density tokens, not by scaling the whole page with `transform: scale` or `zoom`"
+    level: soft
+    check: auto
+    how: Style lint checks for `scale` and `zoom` on the root element and page containers
+    applies: [platform:web, platform:desktop]
+    why: Whole-page scaling makes text blurry, misaligns pixels and shrinks click targets.
+    ref_value: "Reference values: data table row height 44px comfortable, 36px compact; font size generally does not shrink in compact mode. There is no standard source."
+    sources: [S21]
+  # ── Motion ──
+  - id: DSN-027
+    title: Motion durations and easing curves use motion tokens, not literals in components
+    level: soft
+    check: auto
+    how: Style lint forbids literals for durations and easing in `transition` and `animation`
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Unified durations and curves keep motion rhythm consistent and make it easy to turn motion off centrally for "reduced motion" (behavior requirements in 09).
+    ref_value: "Reference values: instant 0ms, fast 120ms (hover, color transitions), normal 180ms (control expand/collapse), slow 280ms (panels, layout changes); standard easing `cubic-bezier(0.2, 0, 0, 1)`, exit easing `cubic-bezier(0.4, 0, 1, 1)`. There is no standard source for the durations; native platforms should prefer system animation parameters."
+    see: ["09"]
+  - id: DSN-028
+    title: Transitions should preferably change only `transform` and `opacity`; large-area blurs and infinitely looping shimmer skeletons need a justification
+    level: soft
+    check: semi
+    how: Review motion code; for suspicious pages, record a performance profile and look at layout and repaint
+    applies: [platform:web]
+    why: Changing width, height or position triggers reflow, and blurs and looping animations keep the renderer busy, causing jank on low-end devices.
+    see: ["07"]
+  # ── Icons and brand assets ──
+  - id: DSN-029
+    title: Each project chooses one primary icon set; native platform icons are mapped exceptions
+    level: soft
+    check: semi
+    how: Check icon sources in the dependency list and resource directories
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Different icon sets differ in stroke width, line caps and optical size; mixed together, they look misaligned even at the same 20px.
+    ref_value: Reference sizes 16, 20, 24px, with a uniform stroke width within one icon set.
+    sources: [S15]
+  - id: DSN-030
+    title: "Icons, illustrations and fonts distributed with the product are registered in the asset inventory: source, license, version or hash"
+    level: hard
+    check: semi
+    how: CI checks that every file in the resource directories is in the inventory; a person verifies the license of each new entry
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Design assets are also third-party components being distributed; assets of unknown origin carry infringement risk and cannot be traced when problems arise.
+    detail: Licensing policy and scanning tools are in 27. Before bundling SVGs, check for external links, scripts and remote font references.
+    sources: [S10, S15, S16]
+    see: ["27"]
+  - id: DSN-031
+    title: Products deployed offline or on an intranet must not load fonts, icons or illustrations from external addresses at runtime
+    level: hard
+    check: auto
+    how: Run page tests in an offline environment; on the web, restrict font and image sources with CSP and check the network request log
+    applies: [kind:onprem]
+    why: External resources fail to load on an intranet, leaving the UI with missing glyphs and images; outbound requests also leak usage information.
+    detail: Commonly missed are Google Fonts, icon CDNs and online badges. Self-hosted design tools must also be checked for their default external services and update checks.
+    sources: [S19]
+    see: ["25", "32"]
+  - id: DSN-032
+    title: Keep vector masters for brand logos and app icons, and export separately for each platform according to its official guidelines; do not use one bitmap everywhere
+    level: soft
+    check: semi
+    how: A script checks the sizes and formats of each platform's icons; review checks that the master is in the repository or asset library
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Platforms differ in icon size, safe zone and layering requirements; scaling one image everywhere makes it blurry or cropped.
+    detail: |
+      - Web: SVG master + multi-size `favicon.ico` + manifest icons (including maskable).
+      - Apple: 1024×1024 layered master, handed to Xcode to generate downstream sizes.
+      - Android: adaptive icon, 108×108dp layered, with the subject inside the 66×66dp safe zone, plus a monochrome layer.
+      - Windows: multi-size ICO and MSIX assets.
+      Packaging and store submission details are in 28–31.
+    sources: [S22, S23, S24, S25]
+    see: ["28-31"]
+  # ── Cross-platform and design–code consistency ──
+  - id: DSN-033
+    title: Visual exceptions are registered in one list stating scope, reason, owner and review date; CI flags expired ones
+    level: soft
+    check: auto
+    how: The exception list is validated with a schema for required fields, and CI checks whether the review date has passed
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Allowing controlled exceptions is what makes rules workable; exceptions without an expiry date quietly become the norm.
+    see: ["02"]
+  - id: DSN-034
+    title: Across platforms, unify token names and semantics without requiring px, pt and dp values to match one by one; native platforms follow platform conventions for fonts, icons and materials
+    level: soft
+    check: manual
+    how: In design review, check each platform by semantics, not by pixel comparison
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Platforms differ in units, system fonts and interaction conventions; forcing pixel parity makes native platforms feel awkward.
+    sources: [S17, S26]
+    see: ["28"]
+  - id: DSN-035
+    title: When the project uses a component library, generate the library's theme configuration from the tokens; do not maintain two token sets in parallel
+    level: soft
+    check: manual
+    how: Review where the theme configuration comes from and confirm the component library's theme values come from the token build output
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Component libraries come with their own tokens (e.g. Ant Design's seed, map and alias tokens); if the two sets are edited independently, they drift apart.
+    sources: [S21]
+    see: ["07"]
+  - id: DSN-036
+    title: PRs with visual changes state the token diff (or that there are no token changes), the affected components and themes, and include before-and-after screenshots
+    level: soft
+    check: semi
+    how: The PR template has fixed sections for these; when token or style directories are changed, CI checks that the sections are not empty
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Reviewers need to see which tokens changed and what is affected; rules for generating and approving screenshot baselines are in 04.
+    see: ["04", "23"]
+choices:
+  - category: Token format
+    pick: "DTCG design token format (Format, Color, Resolver modules)"
+    alternatives:
+      - { name: Project-defined simplified JSON, when: "Very few tokens and only one platform, but the mapping to DTCG must be documented" }
+    avoid:
+      - { name: Using only private variables in a design tool, why: "No versioning or review, and lost when switching tools" }
+    license: "Community Group specification text, published under the W3C Community Group agreement; free to implement"
+    notes: "The first stable version, 2025.10, was published on 2025-10-28; it is a Community Group report, not a W3C Recommendation."
+    sources: [S01, S02, S03, S04]
+  - category: Token transformation and multi-platform generation
+    pick: Style Dictionary
+    alternatives:
+      - { name: Terrazzo, when: "When Style Dictionary does not support DTCG features the project needs; validate on a small scope first" }
+      - { name: Simple generation script, when: "Only one platform, very few tokens" }
+    avoid:
+      - { name: Building a full token language or parser in-house, why: "High maintenance cost, and falls behind whenever the standard is updated" }
+    license: Style Dictionary is Apache-2.0
+    notes: "Officially, support for DTCG 2025.10 is still being completed; write compatibility cases for the features you use (DSN-005)."
+    sources: [S05, S06]
+  - category: Token validation
+    pick: "JSON Schema + AJV, plus scripts that check circular references and required keys"
+    alternatives:
+      - { name: Other JSON Schema validators, when: When the project does not use Node }
+    avoid:
+      - { name: Relying only on TypeScript types to check tokens, why: "Cannot check references, cycles or theme completeness" }
+    license: AJV is MIT
+    sources: [S01]
+  - category: Design tools
+    pick: Figma Variables (internet-connected teams)
+    alternatives:
+      - { name: Self-hosted Penpot, when: "When design files cannot leave the network, or intranet deployment or an open-source tool is required; offline installation must be verified separately" }
+      - { name: Tokens Studio plugin, when: When DTCG tokens need to be managed in Figma and synced with Git }
+    avoid:
+      - { name: Treating a plugin or design tool as the single source of truth, why: Hard to diff and roll back }
+    license: Figma is a commercial service; Penpot is MPL-2.0
+    notes: "A product designed with a design tool can itself run fully offline; whether the design tool is self-hosted is a separate question."
+    sources: [S18, S19, S20]
+  - category: Color scale generation and contrast calculation
+    pick: "Design in OKLCH + a mature color library for conversion, gamut mapping and contrast calculation"
+    alternatives:
+      - { name: Material 3 HCT dynamic color, when: Android-style projects or projects that need dynamic color extraction }
+    avoid:
+      - { name: Assuming contrast passes because HSL lightness is fixed, why: HSL lightness does not correspond to contrast }
+      - { name: "Writing your own \"universal color-scale algorithm\"", why: "Unpredictable results, high maintenance cost" }
+    sources: [S08, S26]
+  - category: Chinese fonts
+    pick: System font stack; Source Han Sans / Noto Sans CJK when bundling is needed
+    alternatives:
+      - { name: Commercial fonts with a purchased redistribution license, when: The brand specifies a font }
+    avoid:
+      - { name: Extracting commercial fonts from the OS and distributing them with the product, why: No redistribution license }
+      - { name: Loading from a font CDN online, why: "Missing glyphs on intranets, slow first paint" }
+    license: Source Han Sans / Noto Sans CJK are SIL OFL 1.1
+    sources: [S10, S11]
+  - category: Icon set (web and desktop)
+    pick: Lucide
+    alternatives:
+      - { name: Material Symbols, when: The product uses Material style or mainly targets Android }
+      - { name: Phosphor, when: When multiple weight styles are needed }
+    avoid:
+      - { name: Mixing multiple icon sets without review, why: Inconsistent stroke width and optical size }
+    license: "Lucide is ISC (some icons derive from Feather, so the MIT notice must also be kept); Material Symbols is Apache-2.0"
+    sources: [S15, S16]
+  - category: Native icons
+    pick: SF Symbols on iOS / macOS; Material Symbols on Android
+    alternatives:
+      - { name: Project-owned vector icon set, when: The brand requires a unified icon style across platforms }
+    avoid:
+      - { name: Using SF Symbols on the web or Android, why: "Platform-specific assets with restricted licensing" }
+    sources: [S16, S17]
+antipatterns:
+  - { bad: "Calling the DTCG stable version an \"official W3C standard\"", instead: "Say \"W3C Community Group stable report\"" }
+  - { bad: "Assuming a transformation tool that \"supports DTCG\" handles all new features losslessly", instead: "Use only features tested to be supported, and write compatibility cases" }
+  - { bad: "Writing `#1677ff` and `12px` directly on each page", instead: Use semantic or component tokens }
+  - { bad: Inverting the whole page for dark mode, instead: "Map a separate set of semantic values and verify contrast pair by pair" }
+  - { bad: Claiming contrast compliance because OKLCH L values are equal, instead: Actually compute foreground and background with the WCAG formula }
+  - { bad: "Writing `z-index: 99999` everywhere", instead: Use the layer list }
+  - { bad: "Implementing compact mode with a whole-page `scale(0.85)`", instead: Use density tokens }
+  - { bad: "Mixing Lucide, Material and Heroicons without reviewing style", instead: One primary icon set per project }
+  - { bad: Intranet systems still loading fonts and icons from a CDN, instead: "Self-host resources, test offline + CSP" }
+  - { bad: Uploading screenshots or design files containing real customer data to external SaaS, instead: "De-identify first; handle cross-border transfer of personal data according to 27" }
+  - { bad: Building a real-time two-way token sync platform for a handful of pages, instead: "Token files + transformation tool + PR review" }
+sources:
+  - { id: S01, title: Design Tokens Format Module 2025.10, url: "https://www.designtokens.org/tr/2025.10/format/", publisher: W3C Design Tokens Community Group, date: 2025-10-28, kind: standard, checked: 2026-11-14 }
+  - { id: S02, title: Design Tokens Color Module 2025.10, url: "https://www.designtokens.org/tr/2025.10/color/", publisher: W3C Design Tokens Community Group, date: 2025-10-28, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: Design Tokens Resolver Module 2025.10, url: "https://www.designtokens.org/tr/2025.10/resolver/", publisher: W3C Design Tokens Community Group, date: 2025-10-28, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: Design Tokens specification reaches first stable version, url: "https://www.w3.org/community/design-tokens/2025/10/28/design-tokens-specification-reaches-first-stable-version/", publisher: W3C Design Tokens Community Group, date: 2025-10-28, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "Style Dictionary: DTCG support", url: "https://styledictionary.com/info/dtcg/", publisher: Style Dictionary, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: Style Dictionary repository, url: "https://github.com/style-dictionary/style-dictionary", publisher: Style Dictionary, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Atlassian Design: Design tokens", url: "https://atlassian.design/tokens/design-tokens/", publisher: Atlassian, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S08, title: "MDN: oklch()", url: "https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Values/color_value/oklch", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: Web Content Accessibility Guidelines (WCAG) 2.2, url: "https://www.w3.org/TR/WCAG22/", publisher: W3C, date: 2023-10-05, kind: standard, checked: 2026-11-13 }
+  - { id: S10, title: "Noto CJK: Sans LICENSE", url: "https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: Source Han Sans, url: "https://github.com/adobe-fonts/source-han-sans", publisher: Adobe, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "MDN: font-variant-numeric", url: "https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/font-variant-numeric", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "Carbon: Data visualization color palettes", url: "https://www.carbondesignsystem.com/building-blocks/data-visualization/color-palettes", publisher: IBM, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S14, title: "Carbon: Spacing", url: "https://www.carbondesignsystem.com/building-blocks/foundations/spacing/overview", publisher: IBM, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S15, title: Lucide repository and LICENSE, url: "https://github.com/lucide-icons/lucide", publisher: Lucide, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: Material Symbols guide, url: "https://developers.google.com/fonts/docs/material_symbols", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: SF Symbols, url: "https://developer.apple.com/sf-symbols/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: Penpot repository, url: "https://github.com/penpot/penpot", publisher: Penpot, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "Penpot: Cloud or self-host", url: "https://help.penpot.app/user-guide/first-steps/cloud-selfhost/", publisher: Penpot, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Figma REST API: Variables endpoints", url: "https://developers.figma.com/docs/rest-api/variables-endpoints/", publisher: Figma, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "Ant Design: Customize theme", url: "https://ant.design/docs/react/customize-theme/", publisher: Ant Design, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S22, title: "MDN: Web app manifest icons", url: "https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Manifest/Reference/icons", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Human Interface Guidelines: App icons", url: "https://developer.apple.com/design/human-interface-guidelines/app-icons", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: Adaptive icons, url: "https://developer.android.com/develop/ui/compose/system/icon_design_adaptive", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: App icon construction, url: "https://learn.microsoft.com/zh-cn/windows/apps/design/iconography/app-icon-construction", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: Android color for mobile design, url: "https://developer.android.com/design/ui/mobile/guides/styles/color", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - "Not verified: whether the reference motion easing `cubic-bezier(0.2, 0, 0, 1)` matches the value of Material 3's standard easing"
+  - "Latest terms not verified: whether the write endpoints of the Figma Variables REST API are limited to the Enterprise plan"
+  - "The licenses of the Tokens Studio plugin, Terrazzo and Phosphor have not been verified against their official LICENSE files"
+  - "The original license terms for the scope of SF Symbols usage (whether limited to Apple platforms) have not been verified"
+  - "Which notices must be kept for Lucide icons derived from Feather (ISC and MIT coexisting) is unresolved in official discussions"
+  - "Full offline installation of Penpot and how to disable its external services have not been tested"
+  - "Research pending: reference practices and sizes for visual states such as empty states, loading and skeleton screens"
+  - "Research pending: reference approaches for illustration style and asset sources"
+  - "Research pending: comparison of how well Terrazzo and Style Dictionary support new DTCG features"
+  - "Research pending: delivery specifications for Linux desktop app icons"
+  - "Research pending: how to wire tokens into the theme mechanism of the chosen component library (to be decided together with 07)"

@@ -1,0 +1,567 @@
+id: "27"
+slug: compliance
+title: Compliance, Privacy, and Licensing
+summary: "Turns regulatory and license requirements into concrete engineering work: how to manage open-source licenses separately for \"tools\" and \"components\", which license materials a release must carry, how to classify, retain, and delete personal information and when to trigger review before cross-border transfer, and what Chinese and EU regulations require of engineering. Covers only engineering practice and sources; legal applicability is confirmed by legal counsel."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+legal_notice: true
+scope:
+  includes:
+    - "Open-source license policy: how standalone tools and components distributed with the product are managed differently"
+    - License scanning, license information in the SBOM, third-party notices (NOTICE), and license materials for offline delivery
+    - License registration for fonts, icons, images, datasets, and model weights
+    - Classification, minimization, retention periods, and deletion of personal information and data, and handling of individual requests
+    - Trigger checks for sending data to third parties and for cross-border data transfer
+    - "Engineering requirements from China (Personal Information Protection Law, Data Security Law, Cybersecurity Law, Regulations on Network Data Security Management, measures on generative AI and content labeling, cross-border data transfer rules) and the EU (GDPR, AI Act, CRA)"
+  excludes:
+    - { what: "SAST, SCA vulnerability scanning, SBOM tooling in general, signing and provenance", see: "25" }
+    - { what: "Technical security measures such as encryption, network isolation, and access control", see: "25" }
+    - { what: "Login, authorization, and audit access control", see: "19" }
+    - { what: "Technical accessibility requirements (WCAG / EN 301 549 practice corresponding to regulations such as the EAA)", see: "09" }
+    - { what: "Vulnerability response, incident response processes, and on-call", see: "26" }
+    - { what: "Mobile platform details (permissions, SDK integration, store submission)", see: "28" }
+    - { what: "Model selection, model gateways, and the technical implementation of outbound data", see: "24" }
+    - { what: "Modeling data retention and deletion in the database, and backup and restore", see: "17" }
+overview: |
+  > This page only covers what engineering must do, with sources cited. It **does not constitute legal advice**. Whether a law applies, and which provision, is confirmed by legal counsel.
+
+  1. **Legal judgments belong to humans.** Automated checks can only find "may be triggered"; they cannot decide "is satisfied". Questions such as filing, cross-border transfer mechanisms, copyleft scope, and GDPR roles are always marked "needs legal confirmation" and signed off by a named owner; an Agent may not mark them as passed on its own.
+  2. **For licenses, look at how something is used before what license it has.** The same AGPL software is handled completely differently when it runs standalone in CI versus when it is built into the product image. The dependency register must state the usage.
+  3. **License policy (default position):**
+
+     | License category | Standalone tools (used only for development, build, or operations; not distributed with the product) | Components distributed with the product, linked into the product, or provided as part of the product's service |
+     |---|---|---|
+     | Permissive: MIT, BSD, Apache-2.0, ISC, Zlib, PostgreSQL, etc. | Allowed | Allowed; keep copyright notices, license texts, and upstream NOTICE |
+     | Weak copyleft: MPL-2.0, LGPL, EPL-2.0, etc. | Allowed | Needs review: record the linking method, whether modified, and how source is provided |
+     | Strong copyleft: GPL | Allowed (unmodified, not distributed) | Prohibited in closed-source distributions; exceptions need legal confirmation |
+     | AGPL | Allowed (unmodified, internal use only); needs review if modified and offered as a network service | Prohibited; exceptions need legal confirmation |
+     | Source-available and commercial add-on terms: SSPL, BSL, FSL, ELv2, Commons Clause, and various "open source + additional terms" | Needs review: check for restrictions on production use, scale, or competing use | Needs review, blocked until approved; prohibited when the product itself is hosting that software's functionality |
+     | Commercial licenses, closed-source tools | Needs review: subscription terms and usage scale | Needs review: the procurement contract must cover the distribution method |
+     | No license, unknown license, conflicting licenses | Needs review | Prohibited |
+
+     Once a tool is built into the product image or installer, or copies its own code (runtime libraries, templates) into the artifact, it is treated as a component. "Putting it in a separate container" is not an exemption.
+  4. **An SBOM is not a license delivery package.** For every release, generate an SBOM with license information for the actual artifact, and include third-party notices, license texts, and the corresponding source when triggered; these must be viewable in the offline delivery package without network access.
+  5. **Register assets and models separately.** Licenses for fonts, icons, images, datasets, and model weights differ from code licenses; CC-NC/ND assets and assets of unknown origin do not go into commercial releases.
+  6. **Personal information has a time limit by default.** Each data object registers its purpose, classification, owner, retention period, and deletion method; deletion must cover indexes, caches, Agent memory, exports, and vendor copies; logs get separate retention periods by category.
+  7. **Sending data out and cross-border transfer are separate decisions.** Customer data is not sent to external models by default; a recipient located abroad triggers cross-border review, and relaying through a domestic gateway does not mean the data did not leave the country; the number of people whose data is transferred is counted as deduplicated natural persons.
+  8. **Key dates (verified):** China's Measures for Labeling AI-Generated Synthetic Content take effect 2025-09-01; the decision amending the Cybersecurity Law takes effect 2026-01-01; the Measures for Certification of Personal Information Cross-Border Transfer take effect 2026-01-01. EU AI Act as amended by the Digital Omnibus: Article 50 transparency applies from 2026-08-02 (machine-readable marking for generative systems already on the market by 2026-12-02), Annex III high-risk from 2027-12-02, Annex I high-risk from 2028-08-02; CRA reporting obligations apply from 2026-09-11, remaining obligations from 2027-12-11.
+rules:
+  # ── Process: who decides, and how it is recorded ──
+  - id: LGL-001
+    title: Each delivery project maintains a compliance profile stating jurisdictions, delivery method, roles of each party, data categories processed, whether external models are used, whether AI content is provided to the public, and owners
+    level: soft
+    check: auto
+    how: CI validates with JSON Schema that the profile exists and required fields are non-empty; release is blocked if missing
+    applies: [all]
+    why: Almost every later rule is premised on "does it apply"; without a profile you can only guess each time.
+    detail: |
+      - Example fields: `jurisdictions`, `delivery` (internal use / private deployment / offline / SaaS / mobile / public AI service), `roles` (controller, processor, AI provider, deployer), `data_classes`, `external_models`, `ai_publication`, `owners`.
+      - Fill uncertain fields with "needs legal confirmation", not "not applicable".
+      - The profile must be re-reviewed whenever the target market, data categories, external models, or public AI features change.
+  - id: LGL-002
+    title: Questions of legal applicability (filing, cross-border transfer mechanisms, copyleft scope, GDPR roles, AI Act risk classification) are marked "needs legal confirmation" and signed off by a named owner; Agents and automated checks may not mark them as passed
+    level: hard
+    check: semi
+    how: "Compliance check results have only three values: passed / failed / needs legal confirmation; CI checks that every \"needs legal confirmation\" item is linked to a sign-off record, otherwise release is blocked"
+    applies: [all]
+    why: Legal applicability depends on facts, roles, and contracts; machines can only find candidate issues. Handing the judgment to an Agent means nobody is accountable.
+    detail: The sign-off record states the conclusion, basis (regulation name, article, version date), scope, and review date. Agent output must distinguish official facts, engineering recommendations, and items pending legal confirmation.
+    see: ["23"]
+  - id: LGL-003
+    title: Compliance exceptions state the approver, reason, evidence, scope, and expiry date; expired exceptions block release and are not inherited across projects or versions
+    level: soft
+    check: auto
+    how: Exception files are validated against a schema for required fields; CI compares expiry dates and fails when expired
+    applies: [all]
+    why: Exceptions without an expiry date quietly become long-term defaults.
+  - id: LGL-004
+    title: Before each release, compare dependency licenses, model and service terms, subprocessors, data storage regions, and processing purposes against the previous release; any change triggers review
+    level: soft
+    check: auto
+    how: The release pipeline diffs against the baseline inventory and creates review tasks for changed items
+    applies: [all]
+    why: Upstream license changes and vendor region changes are never announced to you; only comparing every time catches them.
+  - id: LGL-005
+    title: Compliance documentation states its basis (regulation name, article, version or effective date), last review date, and next review date
+    level: soft
+    check: auto
+    how: Lint the document header fields
+    applies: [all]
+    why: Regulations change quickly; undated documentation gets treated as currently valid.
+    ref_value: "Suggested review cycle: regulations at least quarterly, before each release, and before entering a new market; third-party model terms monthly or whenever the vendor changes. This is an engineering recommendation from the original research, with no statutory source."
+
+  # ── Open-source licenses ──
+  - id: LGL-006
+    title: "Each dependency registers its usage: a standalone tool, or a component distributed with the product, linked into the product, or provided as part of the product's service"
+    level: hard
+    check: semi
+    how: The `usage` field in the dependency inventory is required; review checks whether anything marked "tool" appears in images, installers, or frontend bundles
+    applies: [all]
+    why: Most license obligations are triggered by "distribution", "combining into one program", or "providing a service over a network"; without registering usage, the license policy cannot be applied.
+    detail: |
+      - **Standalone tool**: runs only during development, testing, build, CI, or operations; does not enter artifacts delivered to customers and is not offered as a product feature. Examples: scanners in CI, linters, load-testing tools, dependency update bots.
+      - **Component**: enters installers, container images, offline media, apps, desktop clients, frontend code sent to browsers, or SDKs; or runs as part of the product in a SaaS backend.
+      - Mere aggregation of independent programs is different from combining them into one program, and for inter-process communication the degree of coupling also matters; if you cannot decide, mark it "needs legal confirmation".
+    sources: [S18]
+  - id: LGL-007
+    title: "Components distributed with or linked into the product follow the license policy: permissive licenses allowed; weak copyleft needs review; GPL and AGPL prohibited, exceptions need legal confirmation; source-available licenses need review and are blocked until approved"
+    level: hard
+    check: auto
+    how: Configure allowed, needs-review, and prohibited tiers in the license scanner's (ScanCode / ORT) policy file; CI fails when needs-review or prohibited items have no linked approval record
+    applies: [all]
+    why: Once a component ships with the product, license obligations (keeping notices, providing source, usage restrictions) fall on the publisher, and remediation after the fact is very costly.
+    detail: |
+      - Permissive licenses have obligations too: keep copyright notices and license texts; Apache-2.0 requires including the upstream NOTICE and stating modifications.
+      - MPL-2.0 is file-level copyleft; source must be provided for modified MPL files. For LGPL, record whether linking is dynamic or static, whether it was modified, and how users can replace the library; static linking is more complex.
+      - GPL with exception clauses (such as the Classpath Exception or the GCC Runtime Library Exception) is reviewed separately, not treated the same as plain GPL.
+      - For pure SaaS without distribution, GPL generally does not trigger source obligations through remote access, but delivering images, clients, or plugins is distribution; AGPL has an additional source obligation when modified versions interact with users over a network.
+      - The full table of license categories is in this page's summary.
+    sources: [S18, S19, S20, S21, S30]
+  - id: LGL-008
+    title: "Standalone tools follow the license policy: permissive, weak copyleft, GPL, and AGPL may be used directly; modified AGPL tools offered as a network service to outside users, source-available or commercially licensed tools, and unlicensed tools need review"
+    level: hard
+    check: semi
+    how: License scanning applies a separate policy to dependencies marked "tool"; needs-review items must have an approval record
+    applies: [all]
+    why: Tools that only run internally and are not distributed usually do not trigger copyleft source obligations; blocking all AGPL development tools causes false positives (such as Renovate and k6).
+    detail: |
+      - "Unmodified, internal use only" is the precondition; if you modify an AGPL tool and let external users use it over a network, review it under AGPL Section 13.
+      - Source-available and commercially licensed tools may carry restrictions even for internal use: production use, scale limits (such as per vCPU), competing use, or subscription terms priced by company size.
+    sources: [S18, S19, S20, S21]
+  - id: LGL-009
+    title: When a tool is built into the product image or installer, or copies its own code (runtime libraries, templates, fixed fragments in generated code) into the artifact, re-evaluate its license as a component
+    level: hard
+    check: semi
+    how: Scan the release artifact's SBOM and alert on any entry marked "tool"; review the license of code generator output when the generator is introduced
+    applies: [all]
+    why: The line between tool and component is decided by "does it enter the deliverable", not by what it is called.
+    detail: "Typical cases: debugging tools left in production images; scanners or database clients packed into offline installers; parser generators writing their bundled runtime code into generated files."
+    sources: [S18]
+  - id: LGL-010
+    title: Code with no license, an unknown license, or conflicting licenses may not enter releases, and may not be presumed to be MIT or any other permissive license
+    level: hard
+    check: auto
+    how: CI fails when license scanning reports NOASSERTION, Unknown, no LICENSE, or a conflicting expression
+    applies: [all]
+    why: Being publicly readable is not a license to copy and distribute; without an explicit grant there is no grant.
+    sources: [S18, S22]
+  - id: LGL-011
+    title: Source-available licenses such as SSPL, BSL, FSL, and ELv2 are not called open source; register the specific terms (additional use grant, change date, competing use, hosting restrictions) and approve per version
+    level: hard
+    check: semi
+    how: The license policy lists these identifiers as needs-review; the approval record states the version and a summary of the terms, and the old approval is invalidated when the version changes
+    applies: [all]
+    why: "Each of these licenses restricts different uses: SSPL Section 13 targets offering the software as a service, ELv2 prohibits hosted services, BSL depends on each project's additional use grant and change date, and FSL prohibits competing use and only converts to MIT or Apache after two years."
+    detail: |
+      - "It will become MIT later" does not mean you can use it as MIT now.
+      - The same software may have multiple distributions under multiple licenses (for example, source under AGPL as an option while the official distribution is ELv2); check against the distribution you actually use.
+      - Neither prohibit them all nor allow them all: using an SSPL database as the backend of an ordinary business application and offering that database as a hosted service lead to different review conclusions.
+    sources: [S19, S20, S21, S30]
+  - id: LGL-012
+    title: Dependencies register the exact version, origin (purl, or repository URL plus commit), SPDX license expression, usage, distribution method, and whether modified
+    level: hard
+    check: auto
+    how: Generate the inventory from lock files and the artifact SBOM; CI fails when fields are missing
+    applies: [all]
+    why: License obligations follow the specific version; upstream license changes often apply only from a certain version onward.
+    detail: |
+      - Use SPDX identifiers and expressions (`AND`, `OR`, `WITH`) for licenses, not ad-hoc forms like "MIT-ish"; use `LicenseRef-` for licenses not on the SPDX list.
+      - For multi-licensed components (`A OR B`), record the one actually chosen; do not default to the most permissive.
+      - Keep patches for modified open-source components so source obligations can be assessed.
+    sources: [S22, S27]
+  - id: LGL-013
+    title: When copying third-party code snippets or assets, record the source link, commit or version, license, and attribution; do not copy unlicensed code or competitors' source code
+    level: hard
+    check: semi
+    how: The PR template has a "third-party sources" field; when license scanning identifies snippets matching known open-source code, registration is required
+    applies: [all]
+    why: Copied code carries the original author's license obligations, and the same goes for Agent-generated code.
+    detail: |
+      - You may study publicly available features, interfaces, and general design ideas, but do not copy, translate, or adapt their source code.
+      - When building a similar product, a researcher first writes a behavioral specification, and the implementer looks only at the specification, not at the other party's source.
+      - Agent-generated code that is highly similar to known open-source code gets human review; low similarity does not mean there is no problem.
+    sources: [S18]
+    see: ["23"]
+  - id: LGL-014
+    title: The repository's own source files state copyright and license with SPDX headers or REUSE declarations
+    level: soft
+    check: auto
+    how: CI runs `reuse lint`
+    applies: [kind:library, kind:cli]
+    why: File-level declarations let downstream scanners identify licenses accurately, and keep vendor directories, test data, and images from being mistaken as having the same license as the main repository.
+    sources: [S26]
+
+  # ── Scanning, SBOM, third-party notices ──
+  - id: LGL-015
+    title: CI runs license scanning and blocks according to the license policy; the policy file is under version control, and changes require approval from a designated owner
+    level: hard
+    check: auto
+    how: Run license scanning on every PR; put the policy file path in CODEOWNERS
+    applies: [all]
+    why: Dependencies change every day, and only automated scanning can keep up; if the policy file gets loosened casually, scanning becomes meaningless.
+    detail: Language-specific license checkers (such as license-checker, go-licenses, pip-licenses, cargo-deny) can give quick hints during development; the release gate relies on unified scanning plus the artifact SBOM.
+    sources: [S23, S24]
+    see: ["03", "AGT-011"]
+  - id: LGL-016
+    title: Generate an SBOM with license information for the actual release artifacts (container images, installers, apps), bind it to the artifact digest, and regenerate it for every release
+    level: hard
+    check: auto
+    how: The release pipeline generates the SBOM by image digest and validates that it parses, covers the artifact, and has a license field for every component
+    applies: [all]
+    why: Source dependency lists miss base images, system packages, and files added during packaging, and these carry license obligations too.
+    detail: General requirements for SBOM tools, formats, and signing are in 25; this rule covers only the license information in it.
+    sources: [S25, S27]
+    see: ["25"]
+  - id: LGL-017
+    title: Releases include a third-party notices file, the license text of each component, and upstream NOTICE files; when source obligations are triggered, include the corresponding source or a written offer
+    level: hard
+    check: semi
+    how: Release validation checks that the notices file covers all components in the SBOM and that upstream NOTICE texts are not lost; source obligations are confirmed by the license reviewer
+    applies: [all]
+    why: Keeping notices and license texts on redistribution is an obligation even under permissive licenses; GPL, LGPL, MPL, and others also require providing source.
+    detail: |
+      - Suggested layout: `THIRD-PARTY-NOTICES`, `licenses/<component>/<version>/`, `sources-required/` (only for components that actually trigger source obligations), `model-licenses/`, and an asset attribution list.
+      - Notices are generated by tools, then reviewed by a human and locked to the version; do not just concatenate all LICENSE files into one file and call it done.
+    sources: [S18, S24, S35]
+  - id: LGL-018
+    title: Private-deployment and offline delivery packages include all license texts, third-party notices, and the SBOM, viewable locally without network access
+    level: hard
+    check: auto
+    how: Install the delivery package in an air-gapped environment and automatically check that these files open and match the artifact version
+    applies: [kind:onprem]
+    why: Customers on an intranet cannot open online license pages, which is the same as not delivering these materials.
+    sources: [S35]
+
+  # ── Assets and models ──
+  - id: LGL-019
+    title: Fonts, icons, images, audio and video, datasets, and model weights register license, origin, version, and attribution requirements separately from code
+    level: hard
+    check: auto
+    how: "Asset inventory lint: every asset file in the repository is in the inventory, and the license field is non-empty"
+    applies: [all]
+    why: Assets carry different kinds of rights from code, and package-manager LICENSE scanning cannot find them.
+    detail: |
+      - Prefer SIL OFL for fonts; mind the reserved font name restrictions and embedding terms.
+      - Register each icon set separately; brand logos and trademarks in SVGs are not licensed along with the icon library.
+      - For images, watch for portrait rights, trademarks, and identifiable locations.
+    sources: [S28, S29]
+    see: ["08"]
+  - id: LGL-020
+    title: Assets under CC-NC or CC-ND licenses, and assets of unknown origin, do not enter commercial releases
+    level: hard
+    check: auto
+    how: The asset license policy sets NC, ND, and origin-less entries to prohibited; release validation fails on a match
+    applies: [all]
+    why: NC restricts commercial use and ND restricts adaptation; with unknown origin you cannot prove you have a license.
+    detail: CC-BY and CC-BY-SA allow commercial use but require attribution; SA also requires adaptations to be shared under the same license.
+    sources: [S28]
+  - id: LGL-021
+    title: Model weights, tokenizers, and training and evaluation datasets each register license, usage policy, exact version, and hash; do not presume the weights are permissively licensed because the framework code is
+    level: hard
+    check: semi
+    how: Model inventory lint checks required fields; when a new model is introduced, the license reviewer confirms the usage policy
+    applies: [kind:llm]
+    why: Model repositories often license code, weights, data, and outputs separately, and attach acceptable use policies and restrictions on purpose, scale, or region.
+    detail: For public datasets, also check personal information and website terms; "the website is accessible" does not mean scraping for training is allowed.
+    sources: [S32]
+    see: ["24"]
+
+  # ── Personal information and data ──
+  - id: LGL-022
+    title: Each persisted data object registers its purpose, data category and classification level, owner, origin, storage region, recipients, retention period and the event that starts it, and deletion method
+    level: hard
+    check: auto
+    how: Data inventory schema lint; CI fails when a database migration or new storage introduces an unregistered object
+    applies: [all]
+    why: Classification and grading, purpose limitation, retention limits, and notifying about recipients all require first knowing "what data there is, where it is, and who it was given to".
+    detail: |
+      - Example default levels: public, internal, confidential (private code, contracts, unreleased designs), restricted (sensitive personal information, data identified as important data, data with special contractual protection).
+      - Internal classification is not the legal determination of "important data"; important data is defined by the competent authorities and industry catalogs and needs legal confirmation.
+      - The record of processing activities must be exportable for personal information protection compliance audits.
+    sources: [S01, S02, S31, S07]
+    see: ["17"]
+  - id: LGL-023
+    title: Personal information fields may not be kept forever by default; each category is bound to a finite retention period, and data that must be retained by law states the basis
+    level: hard
+    check: auto
+    how: "Schema lint: objects marked as personal information must have a retention policy key, and it cannot be \"permanent\""
+    applies: [all]
+    why: The Personal Information Protection Law requires the retention period to be the shortest necessary to achieve the processing purpose, and GDPR has the same storage limitation principle.
+    sources: [S01, S10]
+  - id: LGL-024
+    title: New personal information fields state their purpose and collect only what that purpose needs; adding sensitive personal information, minors' data, important data, or high-risk uses triggers an impact assessment review
+    level: hard
+    check: semi
+    how: CI detects new sensitive categories in the schema or data inventory and automatically creates a review task; before merging there must be an assessment record or a signed "not required" conclusion
+    applies: [all]
+    why: Minimum necessity is a basic principle of both the Personal Information Protection Law and GDPR; for sensitive personal information, automated decision-making, entrusted processing, providing data to others, cross-border transfer, and similar cases, the regulations require a prior impact assessment.
+    detail: CI can only hint "an assessment may be triggered"; whether it is required and how to do it is confirmed by the privacy owner and legal counsel.
+    sources: [S01, S10, S32]
+  - id: LGL-025
+    title: Record the legal basis for processing per purpose, and do not treat "user consent" as the only basis for all processing; scenarios that require consent or separate consent are modeled separately and support withdrawal
+    level: soft
+    check: semi
+    how: The legal basis field in the data inventory is required; review checks that consent scenarios are recorded and withdrawable
+    applies: [all]
+    why: Article 13 of the Personal Information Protection Law and Article 6 of GDPR both list legal bases other than consent; one checkbox covering all processing is neither accurate nor easy to withdraw.
+    sources: [S01, S10]
+  - id: LGL-026
+    title: Deletion covers the primary database, search indexes, object storage, caches, Agent memory, exported copies, and vendor copies; backups state their expiry time and how data is deleted again after restore; deletion status is queryable
+    level: hard
+    check: auto
+    how: "Multi-store integration test: after deleting a user, their data cannot be found in any store; backups are added to the pending-expiry list"
+    applies: [all]
+    why: Declaring deletion complete after deleting only from the primary table is the most common kind of fake deletion.
+    detail: |
+      - Deletion is an asynchronous task; example statuses: requested, primary data deleted, derived data cleared, waiting for backup expiry, done or exception.
+      - Do not promise immediate erasure of immutable backups; data that must be retained by law has its processing restricted, with the reason stated.
+      - A refusal to delete must show the reason and the appeal channel; exceptions may not be inferred by an Agent on its own.
+    sources: [S01, S10]
+    see: ["17"]
+  - id: LGL-027
+    title: Products that process personal information provide request channels and owners for access, copy, rectification, deletion, portability, and similar requests, and record each request's status, deadline, and outcome; deadlines are configured per applicable regulation, not hard-coded
+    level: hard
+    check: semi
+    how: End-to-end tests confirm the request channel works; request handling records have a status, deadline, and outcome
+    applies: [all]
+    why: Both the Personal Information Protection Law and GDPR define individual rights and the processor's response obligations; GDPR usually requires a response within one month, and deadlines differ by jurisdiction.
+    sources: [S01, S10, S14]
+  - id: LGL-028
+    title: Logs get separate retention periods by category; do not cover network logs, records of providing data to third parties, and AI labeling exception records with a single expiry time
+    level: hard
+    check: auto
+    how: "Retention policy lint: each of these log categories has its own policy, no shorter than the minimum periods below"
+    applies: [kind:service]
+    why: Different regulations set different minimum periods for these records; a single TTL either fails a minimum period or retains too much.
+    detail: |
+      - Network operation logs: the Cybersecurity Law requires retention for no less than six months.
+      - Processing records for providing personal information or important data to other processors, or entrusting its processing: the Regulations on Network Data Security Management require retention for at least three years.
+      - When AI-generated content without explicit labels is provided at a user's request: the Labeling Measures require keeping logs such as the recipient for no less than six months.
+      - These are minimum periods; the upper bound is still constrained by the "necessity" principle. For article numbers, see the open questions.
+    sources: [S08, S02, S06]
+    see: ["26"]
+  - id: LGL-029
+    title: Customers' code, documents, sessions, and personal information must have policy approval before being sent to external models or third-party services; off by default, allowed by allowlist of vendor, region, and data category
+    level: hard
+    check: auto
+    how: "Outbound policy unit tests: all outbound traffic is denied under offline and private-deployment configurations; unregistered vendors or regions are denied"
+    applies: [all]
+    why: Handing data to a third party for processing involves entrusted processing, providing data to others, and contractual confidentiality obligations; a vendor "claiming not to train" does not mean zero retention, in-country processing, or deletability.
+    detail: The technical implementation of outbound controls is in 24 and 25; this rule only sets the "deny by default, allow after approval" position.
+    sources: [S01, S02]
+    see: ["24", "25"]
+  - id: LGL-030
+    title: Third-party services and model vendors register service region, subprocessors, training use, data retention, and human review access, and keep a snapshot of the terms; any change triggers re-review
+    level: soft
+    check: semi
+    how: Enabling is blocked when the vendor inventory is missing fields; the terms snapshot is compared with the previous one, and differences create a review task
+    applies: [all]
+    why: Vendor terms can change at any time; without a snapshot you cannot say what was approved at the time.
+    ref_value: Suggested review frequency is monthly or whenever the model or vendor changes; this is an engineering recommendation from the original research.
+    see: ["24"]
+  - id: LGL-031
+    title: The data flow register states the actual location of recipients (including backups, logs, and technical support access); any receipt or access from abroad triggers cross-border review, recording the applicable mechanism or exemption determination with an owner's sign-off
+    level: hard
+    check: semi
+    how: When a foreign region appears in the data flow inventory, a cross-border review task is created automatically; a sign-off record is required before enabling
+    applies: [all]
+    why: Whether data crosses the border depends on who actually receives and accesses it and where, not on the API domain name; relaying through a domestic gateway does not mean the data did not leave the country.
+    detail: |
+      - Mechanisms for cross-border transfer of personal information from China: security assessment, standard contract, certification (the Measures for Certification of Personal Information Cross-Border Transfer take effect 2026-01-01), and the exemptions in the Provisions on Promoting and Regulating Cross-Border Data Flows.
+      - Being exempt from a mechanism does not exempt other obligations such as notice, separate consent (where applicable), and impact assessments.
+      - Critical information infrastructure operators and cross-border transfer of important data have additional requirements and need legal confirmation.
+      - For mechanisms for transferring EU personal data out of the European Economic Area, see LGL-033.
+    sources: [S01, S03, S04]
+  - id: LGL-032
+    title: The number of people whose personal information is transferred abroad is accumulated from January 1 of the current year and deduplicated by natural person, with sensitive personal information counted separately; do not substitute request counts, and do not split to circumvent thresholds
+    level: hard
+    check: semi
+    how: Write unit tests for the counting logic (multiple requests from the same person count as one); the compliance owner reviews the results
+    applies: [all]
+    why: Cross-border mechanism thresholds are set by number of people, not number of requests, and circumventing them by splitting volumes is explicitly prohibited.
+    detail: "Thresholds (for non-critical information infrastructure operators, with no important data): fewer than 100,000 people's non-sensitive personal information may be exempt from the mechanisms; 100,000 to fewer than 1,000,000 people's non-sensitive, or fewer than 10,000 people's sensitive personal information goes through a standard contract or certification; more than that goes through security assessment. Specific applicability needs legal confirmation."
+    sources: [S03, S04]
+  - id: LGL-033
+    title: Products that process EU personal data record the controller or processor role, legal basis, records of processing activities, recipients, and third-country transfer mechanisms with evidence
+    level: hard
+    check: semi
+    how: When the compliance profile's jurisdictions include the EU, CI checks that these records exist; transfer mechanisms are confirmed by legal counsel
+    applies: [all]
+    why: GDPR Article 6 (legal basis), Article 28 (processor contracts), Article 30 (records of processing activities), and Chapter V (transfers to third countries) all require a documented basis; Standard Contractual Clauses must be implemented for the actual data flows.
+    sources: [S10, S14, S15]
+
+  # ── AI and product safety regulations ──
+  - id: LGL-034
+    title: Before providing generative AI services or features to the public in mainland China, trigger an applicability review for filing, registration, and security assessment; filing numbers and launch numbers may only come from actual registration results
+    level: hard
+    check: manual
+    how: The release approval checklist contains the applicability conclusion and sign-off; review checks that the numbers displayed on pages match the registration records
+    applies: [kind:llm]
+    why: Article 2 of the Interim Measures for the Management of Generative AI Services excludes research, development, and applications not offered to the public in China, but public services have filing and other requirements; other laws such as those on personal information and data security still apply to internal applications.
+    detail: '"We call an already-filed large model" does not mean your own application needs no registration; the specific path follows the competent authorities'' announcements and needs legal confirmation.'
+    sources: [S05]
+  - id: LGL-035
+    title: Services subject to the Measures for Labeling AI-Generated Synthetic Content add both explicit labels and implicit labels in file metadata, and these are not lost on copy, download, or export
+    level: hard
+    check: auto
+    how: "Automated tests with export samples: both the UI and exported files carry explicit labels, and file metadata carries implicit labels"
+    applies: [kind:llm]
+    why: The Measures for Labeling AI-Generated Synthetic Content take effect 2025-09-01, together with the accompanying mandatory national standard "Cybersecurity Technology — Labeling Method for Content Generated by Artificial Intelligence", and require both explicit and implicit labels.
+    detail: Internal assistive drafts and content distributed to the public are treated differently, so determine applicability first. Machine-readable marking under EU AI Act Article 50 is covered in LGL-036 and can share one metadata-writing implementation.
+    sources: [S06]
+  - id: LGL-036
+    title: When providing or using AI systems in the EU, record the role (provider, deployer, general-purpose model provider) and the use-case risk classification, and prepare interaction notices, generated content marking, and high-risk obligations according to each phase's application date
+    level: hard
+    check: semi
+    how: When the compliance profile's jurisdictions include the EU and there are AI features, CI checks the role and risk classification fields; the classification conclusion is confirmed by legal counsel
+    applies: [kind:llm]
+    why: AI Act obligations are layered by role and use-case risk, and not every chatbot is high-risk; the phase dates changed after the Digital Omnibus amendments, so the old timeline cannot be reused.
+    detail: |
+      - 2025-02-02: prohibited practices and AI literacy requirements start to apply.
+      - 2025-08-02: obligations for general-purpose AI models start to apply.
+      - 2026-08-02: Article 50 transparency obligations apply (users must be told when interacting with AI, and generated content must carry machine-readable marking); for generative systems placed on the market before 2026-08-02, the Article 50(2) marking obligation applies from 2026-12-02.
+      - 2026-12-02: the newly added prohibitions on non-consensual deepfakes and child sexual abuse material apply.
+      - 2027-12-02: Annex III standalone high-risk systems (such as recruitment screening and credit scoring) apply.
+      - 2028-08-02: Annex I high-risk systems embedded in regulated products apply.
+      - For features used to screen employees, evaluate students, score credit, or operate critical infrastructure, check the high-risk list first.
+    sources: [S11, S12, S13]
+  - id: LGL-037
+    title: Manufacturers placing products with software on the EU market are prepared to report actively exploited vulnerabilities and severe security incidents to the ENISA Single Reporting Platform within 24 hours
+    level: hard
+    check: manual
+    how: "Drill records: the process from discovering an exploited vulnerability to submitting the early warning, the owner, and the platform account are all ready"
+    applies: [all]
+    why: The reporting obligations of the EU Cyber Resilience Act (CRA) apply from 2026-09-11 and cover products already on the market on that date; the remaining obligations (including CE marking) apply from 2027-12-11.
+    detail: Whether something is a "product with digital elements" within the scope of the CRA, and whether you are the manufacturer, needs legal confirmation. Vulnerability handling and incident response processes are in 25 and 26.
+    sources: [S16]
+    see: ["25", "26"]
+
+  # ── Other ──
+  - id: LGL-038
+    title: Public-facing apps in mainland China determine App filing applicability before store release; store privacy disclosures (Apple privacy details, Google Play Data safety form) match the actual SDK data flows
+    level: hard
+    check: semi
+    how: The release checklist checks the filing conclusion; reconcile the SDK inventory against the store declarations item by item
+    applies: [platform:mobile]
+    why: The MIIT notice requires apps providing services in China to complete filing; Apple and Google require disclosures to match actual behavior, and mismatches get apps removed.
+    detail: Apps distributed internally within an enterprise are treated differently and need legal confirmation. Platform details are in 28–30.
+    sources: [S09, S33, S34]
+    see: ["28"]
+  - id: LGL-039
+    title: "Services for California residents trigger CCPA review: requests to delete, know, correct, and opt out, and Global Privacy Control signals; automated decision-making technology obligations are checked phase by phase"
+    level: soft
+    check: semi
+    how: When the compliance profile's jurisdictions include California, USA, create a review task; run end-to-end tests on the opt-out flow
+    applies: [kind:service]
+    why: The California Privacy Protection Agency's new regulations take effect 2026-01-01, with automated decision-making technology obligations applying in phases; not every AI call counts as automated decision-making.
+    sources: [S17]
+  - id: LGL-040
+    title: Products and services for EU consumers trigger a European Accessibility Act (EAA) applicability review; technical requirements follow 09
+    level: soft
+    check: manual
+    how: When the compliance profile's jurisdictions include the EU and the product is consumer-facing, the release checklist includes the EAA applicability conclusion
+    applies: [platform:web, platform:mobile, platform:desktop]
+    why: Accessibility is a regulatory requirement, not just a user experience issue; scope is confirmed by legal counsel, and how to implement it is defined in 09.
+    see: ["09"]
+choices:
+  - category: License scanning (source, dependencies, and vendored code)
+    pick: ScanCode Toolkit
+    when: Default. Detects file-level licenses and copyrights, finds vendored code and files not managed by a package manager; can run offline
+    alternatives:
+      - { name: OSS Review Toolkit (ORT), when: "Multiple languages and repositories, when you need unified license policy, approval workflows, and reports; can call ScanCode underneath" }
+      - { name: "Language-specific license checkers (license-checker, go-licenses, pip-licenses, cargo-deny)", when: "Quick hints during development; the release gate still relies on unified scanning and the artifact SBOM" }
+    avoid:
+      - { name: Only reading the license field in manifests such as package.json, why: "Misses vendored code, file-level licenses, and multi-license expressions" }
+      - { name: Writing your own license detection engine, why: "Existing tools already cover the common capabilities; write only a thin layer of policy and reporting yourself" }
+    license: ScanCode Toolkit and ORT are Apache-2.0 (ScanCode's license data has a separate license); both are used as standalone tools
+    sources: [S23, S24]
+  - category: License information in the artifact SBOM
+    pick: Syft scans the actual images and installers; license fields use SPDX identifiers and expressions
+    when: Default. The general choice of SBOM tools, formats, and signing is in 25; this entry only requires complete license fields written in SPDX form
+    alternatives:
+      - { name: Export the SBOM from ORT, when: "When ORT is already used for license governance, to avoid two inventories" }
+    avoid:
+      - { name: "Ad-hoc license notation (such as \"MIT-ish\" or \"Apache?\")", why: Downstream tools and customers cannot parse it }
+    license: Syft is Apache-2.0, used as a standalone tool
+    sources: [S22, S25, S27]
+  - category: Copyright and license declarations for repository source
+    pick: The REUSE specification and the REUSE tool
+    when: "Open-source libraries, SDKs, and projects that publish their source"
+    alternatives:
+      - { name: Only a LICENSE file in the root directory, when: "Small internal projects with no third-party files mixed in" }
+    avoid:
+      - { name: Purely manual checking, why: New files are easily missed }
+    license: The REUSE tool is GPL-3.0-or-later; it is used as a standalone tool and does not affect the license of the project being checked
+    sources: [S26]
+  - category: Third-party notices (NOTICE) generation
+    pick: Generate with ORT report templates, then review manually and bind to the version
+    alternatives:
+      - { name: ScanCode output with a custom template, when: When ORT is not used }
+    avoid:
+      - { name: Concatenating every dependency's LICENSE into one file, why: "Misses upstream NOTICE files, the actual choice among multiple licenses, and source obligations" }
+    sources: [S24, S35]
+antipatterns:
+  - { bad: Blocking all AGPL or GPL development tools, instead: "Register usage first; standalone tools follow the tool policy" }
+  - { bad: "Believing GPL or AGPL components are fine \"as long as they run in a separate container\"", instead: "Review by the actual combination and distribution method; needs legal confirmation" }
+  - { bad: "We only do SaaS, so AGPL doesn't matter", instead: AGPL has an additional source obligation for modified versions provided as a network service }
+  - { bad: "Prohibiting all of SSPL, ELv2, and BSL, or allowing all of them", instead: "Approve item by item based on the specific terms, version, and usage scenario" }
+  - { bad: Assuming every file has the license of the LICENSE file in the repository root, instead: "Scan at file level; register assets, fonts, and weights separately" }
+  - { bad: "Using \"zero high-severity\" vulnerability scan results to prove licenses are fine", instead: Set separate gates for vulnerabilities and licenses }
+  - { bad: Letting an Agent copy code directly because it is public on GitHub, instead: "No license means no grant; copying requires registering the source and license" }
+  - { bad: Declaring deletion complete after deleting one row from the primary table, instead: "Deletion orchestration covers indexes, caches, memory, copies, and backups" }
+  - { bad: Keeping all logs forever or giving them all one expiry time, instead: Set separate retention periods by category }
+  - { bad: Counting the number of people transferred abroad by request count, instead: "Deduplicate by natural person, and count sensitive information separately" }
+  - { bad: Claiming data did not leave the country because it was relayed to a foreign model through a domestic gateway, instead: Decide by the actual location of receipt and access }
+  - { bad: "Treating every generative AI feature as requiring filing, or assuming no registration is needed because an already-filed model is called", instead: "First determine whether it is provided to the public, then have legal counsel confirm the path" }
+  - { bad: "An Agent replying \"compliance complete\"", instead: "Check results are only passed, failed, or needs legal confirmation" }
+sources:
+  - { id: S01, title: Personal Information Protection Law of the People's Republic of China, url: "https://www.samr.gov.cn/zw/zfxxgk/fdzdgknr/bgt/art/2023/art_f374e8245320413181742e6d1baf4366.html", publisher: "Standing Committee of the National People's Congress (republished by the State Administration for Market Regulation)", date: 2021-08-20, kind: standard, checked: 2026-11-13 }
+  - { id: S02, title: "Regulations on Network Data Security Management (State Council Decree No. 790)", url: "https://xzfg.moj.gov.cn/front/law/detail?LawID=1734", publisher: "State Council (Ministry of Justice administrative regulations database)", date: 2024-09-24, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: Provisions on Promoting and Regulating Cross-Border Data Flows, url: "https://www.cac.gov.cn/2024-03/22/c_1712776611775634.htm", publisher: Cyberspace Administration of China, date: 2024-03-22, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: "CAC and SAMR jointly publish the Measures for Certification of Personal Information Cross-Border Transfer", url: "https://www.cac.gov.cn/2025-10/17/c_1762449728518762.htm", publisher: Cyberspace Administration of China, date: 2025-10-17, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: Interim Measures for the Management of Generative Artificial Intelligence Services, url: "https://cqca.miit.gov.cn/zwgk/zcwj/flfg/art/2026/art_27b7613aa2b8419384caa6c31fbdd7f0.html", publisher: "Cyberspace Administration of China and six other departments (republished by the Chongqing Communications Administration)", date: 2023-07-10, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: Measures for Labeling AI-Generated Synthetic Content, url: "https://www.cac.gov.cn/2025-03/14/c_1743654684782215.htm", publisher: "Cyberspace Administration of China, Ministry of Industry and Information Technology, Ministry of Public Security, National Radio and Television Administration", date: 2025-03-14, kind: standard, checked: 2026-11-14 }
+  - { id: S07, title: Administrative Measures for Personal Information Protection Compliance Audits, url: "https://www.cac.gov.cn/2025-02/14/c_1741233507681519.htm", publisher: Cyberspace Administration of China, date: 2025-02-14, kind: standard, checked: 2026-11-13 }
+  - { id: S08, title: "Cybersecurity Law of the People's Republic of China (2025 Amendment)", url: "https://sdca.miit.gov.cn/zwgk/fgbz/art/2026/art_4815dd4ec11d454783b83a91502a3cc7.html", publisher: "Standing Committee of the National People's Congress (republished by the Shandong Communications Administration)", date: 2025-10-28, kind: standard, checked: 2026-11-14 }
+  - { id: S09, title: Notice of the Ministry of Industry and Information Technology on Carrying Out Filing of Mobile Internet Applications, url: "https://www.miit.gov.cn/zwgk/zcwj/wjfb/tz/art/2023/art_920db564162e4312916a01bed6540ad8.html", publisher: Ministry of Industry and Information Technology, date: 2023-08-04, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "Regulation (EU) 2016/679 (GDPR)", url: "https://eur-lex.europa.eu/eli/reg/2016/679", publisher: European Union, date: 2016-04-27, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: AI Act implementation timeline, url: "https://ai-act-service-desk.ec.europa.eu/en/ai-act/eu-ai-act-implementation-timeline", publisher: European Commission AI Act Service Desk, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "AI Act Article 50: Transparency obligations", url: "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-50", publisher: European Commission AI Act Service Desk, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "The AI Act Implementation Timeline: What Changes Under the AI Omnibus?", url: "https://fpf.org/blog/the-ai-act-implementation-timeline-what-changes-under-the-ai-omnibus", publisher: Future of Privacy Forum, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S14, title: "Dealing with requests from individuals", url: "https://commission.europa.eu/law/law-topic/data-protection/information-business-and-organisations/dealing-requests-individuals_en", publisher: European Commission, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Standard Contractual Clauses (SCC), url: "https://commission.europa.eu/law/law-topic/data-protection/international-dimension-data-protection/standard-contractual-clauses-scc_en", publisher: European Commission, date: 2021-06-04, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Cyber Resilience Act: reporting obligations", url: "https://digital-strategy.ec.europa.eu/en/policies/cra-reporting", publisher: European Commission, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: "CCPA Updates, Cybersecurity Audits, Risk Assessments, ADMT Regulations", url: "https://cppa.ca.gov/regulations/ccpa_updates.html", publisher: California Privacy Protection Agency, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: Frequently Asked Questions about the GNU Licenses, url: "https://www.gnu.org/licenses/gpl-faq.en.html", publisher: Free Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: Elastic License 2.0 FAQ, url: "https://www.elastic.co/licensing/elastic-license/faq", publisher: Elastic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: Business Source License 1.1, url: "https://mariadb.com/bsl11/", publisher: MariaDB, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Functional Source License 1.1 (MIT future license) template, url: "https://github.com/getsentry/fsl.software/blob/main/FSL-1.1-MIT.template.md", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: SPDX License List, url: "https://spdx.org/licenses/", publisher: SPDX, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S23, title: ScanCode Toolkit, url: "https://github.com/aboutcode-org/scancode-toolkit", publisher: AboutCode, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: OSS Review Toolkit, url: "https://github.com/oss-review-toolkit/ort", publisher: OSS Review Toolkit, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Syft, url: "https://github.com/anchore/syft", publisher: Anchore, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: REUSE tool, url: "https://github.com/fsfe/reuse-tool", publisher: FSFE, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: SPDX Specification, url: "https://spdx.github.io/spdx-spec/", publisher: SPDX, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S28, title: Creative Commons Attribution 4.0 International, url: "https://creativecommons.org/licenses/by/4.0/deed.en", publisher: Creative Commons, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: SIL Open Font License, url: "https://openfontlicense.org/", publisher: SIL International, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: Server Side Public License FAQ, url: "https://www.mongodb.com/legal/licensing/server-side-public-license/faq", publisher: MongoDB, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: Data Security Law of the People's Republic of China, url: "https://nmca.miit.gov.cn/zwgk/zcwj/flfg/art/2021/art_f0fd1d0e1fc3430ca23c274bcf8d28fb.html", publisher: "Standing Committee of the National People's Congress (republished by the Inner Mongolia Communications Administration)", date: 2021-06-10, kind: standard, checked: 2026-11-13 }
+  - { id: S32, title: "EDPB Opinion 28/2024 on AI models", url: "https://www.edpb.europa.eu/news/edpb-opinion-on-ai-models-gdpr-principles-support-responsible-ai_en", publisher: European Data Protection Board, date: 2024-12-18, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: App Review Guidelines, url: "https://developer.apple.com/app-store/review/guidelines/", publisher: Apple, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: Google Play User Data policy, url: "https://support.google.com/googleplay/android-developer/answer/10144311?hl=en", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: "Apache License 2.0 (copy of the text in the ORT repository)", url: "https://github.com/oss-review-toolkit/ort/blob/main/LICENSE", publisher: Apache Software Foundation, date: 2004-01-01, kind: standard, checked: 2026-11-13 }
+open_questions:
+  - "After the Cybersecurity Law amendment, the article number containing the network log requirement of \"no less than six months\" (formerly Article 21; numbering may have changed after new articles were added) has not been checked against the full amended text."
+  - "Whether the Regulations on Network Data Security Management's \"keep processing records for at least three years\" is Article 12, and whether the Labeling Measures' \"exception logs kept no less than six months\" is Article 9, are carried over from the original research and have not been checked article by article against the original text."
+  - "The Q&A on Cross-Border Data Transfer Security Management Policies and Regulations (September 2026) and the CAC announcement of 2026-09-14 on the two paths of generative AI filing and registration are cited in the original research and have not been verified."
+  - "Among the AI Act's newly added prohibitions, secondary sources disagree on whether the prohibition related to child sexual abuse material applies from 2026-07-27 or 2026-12-02; the official EU timeline page lists 2026-12-02. The text of Regulation (EU) 2026/1744 has not been opened and checked directly."
+  - "That the CCPA regulations' automated decision-making technology obligations apply from 2027-01-01 and that cybersecurity audits are submitted in phases from 2028 to 2030 are carried over from the original research and have not been verified; the original research gives the CPPA approval date as both 2025-09-22 and 2025-09-23."
+  - The number of the mandatory national standard accompanying generative AI labeling has not been verified.
+  - "The licenses and maintenance status of the language-specific license checkers (license-checker, go-licenses, pip-licenses, cargo-deny) have not been verified; the specific license of ScanCode's license data has not been verified."
+  - The Apache-2.0 text source cites the copy in the ORT repository and should be replaced with a link to the original text on apache.org.
+  - "Research to add: privacy tool selection (personal information detection such as Presidio, data catalogs, consent management, individual request handling workflows)."
+  - "Research to add: engineering requirements of the provisions on algorithmic recommendation management and algorithm filing, and the provisions on deep synthesis management."
+  - "Research to add: the Measures on Standard Contracts for Cross-Border Transfer of Personal Information and the filing process, and engineering preparation for cross-border transfer security assessment applications."
+  - "Research to add: engineering requirements of the Regulations on the Protection of Minors Online, the Basic Security Requirements for Generative AI Services, and the national standard for data classification and grading."
+  - "Research to add: a cross-topic component license register (component licenses named in topics such as 18, 20, 22, 03, 04, and 07 defer to the register)."

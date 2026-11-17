@@ -1,0 +1,520 @@
+id: "28"
+slug: mobile
+title: Mobile Strategy
+summary: "Shared decisions for mobile apps across Android and iOS: choosing between native, cross-platform frameworks and Web/PWA, engineering standards for cross-platform work, offline and sync, push notifications, crash and performance monitoring, the boundaries of releases and over-the-air updates, engineering practices for permissions and privacy, and mobile E2E tooling."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - Selection thresholds for native, cross-platform (React Native, Flutter, Kotlin Multiplatform), PWA and mini programs
+    - Engineering standards and code-sharing strategy for cross-platform frameworks
+    - Offline-first data flow and sync
+    - Push clients and Chinese device-vendor push channels
+    - Crash and performance monitoring
+    - The boundaries of over-the-air (OTA) updates and app store policies
+    - Engineering practices for mobile authentication, credential storage and permission requests
+    - Mobile E2E testing tools
+  excludes:
+    - { what: "Android platform details (Gradle, signing, background work, Data safety form)", see: "29" }
+    - { what: "iOS platform details (Keychain, BGTask, privacy manifest, enterprise distribution)", see: "30" }
+    - { what: "General principles for test layering, flaky tests and acceptance evidence", see: "04" }
+    - { what: "General requirements for contrast, touch target size, screen readers and internationalization", see: "09" }
+    - { what: Design tokens, see: "08" }
+    - { what: "API versioning, breaking changes, idempotency semantics", see: "16" }
+    - { what: "OIDC, token rotation, sessions", see: "19" }
+    - { what: "Server-side push interfaces (how to call APNs and FCM)", see: "21" }
+    - { what: Event tracking and product analytics, see: "22" }
+    - { what: "Certificates, secret scanning, SBOM, supply chain security", see: "25" }
+    - { what: "App filing (ICP registration), personal information protection regulations, SDK compliance list", see: "27" }
+    - { what: Web-side details of PWA and Service Workers, see: "07" }
+overview: |
+  1. **Check capabilities first, then pick a framework.** When background location, Bluetooth, real-time camera processing or system extensions are core features, validate the native capabilities on target devices first; only discuss cross-platform once that passes.
+  2. **Defaults.** For a TypeScript team building a business app for both platforms, default to React Native + Expo; evaluate Flutter when visuals matter and you want unified rendering; use Kotlin Multiplatform when you only want to share business logic and keep native UI (Compose Multiplatform's iOS support is stable, so UI can be shared too); use two native apps when system integration is deep. PWA and mini programs are distribution-channel choices, not substitutes for a native app.
+  3. **React Native has only the New Architecture.** The legacy architecture has been removed; before adding a native dependency, confirm it supports the New Architecture.
+  4. **Share contracts, don't force shared code.** Generate API types from OpenAPI and export design tokens from one source; the sharing ratio is not a metric.
+  5. **Offline-first is an architecture.** The local database is the read model; writes go first into a persistent outbox, every operation has an idempotency key, conflicts are resolved by a per-data-type strategy, and deletes must sync. The OS does not guarantee background tasks run on time.
+  6. **Push delivery is not guaranteed.** Important workflows need an in-app to-do list and active pulling as a fallback; Android in mainland China must integrate vendor channels; push payloads carry only identifiers.
+  7. **OTA updates change only scripts and assets.** Changes to native code, permissions or major features must ship as a new install package and pass store review. App Center CodePush has been shut down; React Native should use EAS Update or a self-hosted compatible service.
+  8. **Credentials go into the system secure storage.** Sign-in uses the system browser + PKCE; the client holds no permanent secrets; biometrics only unlock locally.
+  9. **Request permissions when they are needed.** Explain the purpose first and degrade gracefully when denied; do not initialize third-party SDKs before user consent.
+  10. **Run the Release build on real devices before shipping.** Add cases for offline, poor network and migration of old data to critical flows.
+rules:
+  # ── Selection ──
+  - id: MOB-001
+    title: Before choosing a mobile tech stack, write a decision record stating the candidates, the rationale for the trade-offs and the conditions for reversing the decision
+    level: soft
+    check: semi
+    how: CI checks that the decision record file exists; review checks that native, cross-platform and Web/PWA were compared
+    applies: [platform:mobile]
+    why: Switching a mobile tech stack is very expensive; an unrecorded decision can't be explained afterwards, and nobody knows when it should be re-evaluated.
+    see: ["05"]
+  - id: MOB-002
+    title: When background location, Bluetooth, real-time camera processing or system extensions are core features, validate the native capabilities on target devices first, and do not commit to a cross-platform implementation until validation passes
+    level: soft
+    check: manual
+    how: "Review checks for a capability list and real-device validation records (device model, OS version, permissions, foreground/background switching)"
+    applies: [platform:mobile]
+    why: These capabilities are the most tightly constrained by system permissions and lifecycle, cross-platform framework plugins often cover only part of them, and discovering late in a project that something can't be done is the hardest to recover from.
+  - id: MOB-003
+    title: Use PWA and mini programs only as lightweight entry points; when reliable push, background execution or deep hardware access is needed, do not use them in place of a native app
+    level: soft
+    check: manual
+    how: During selection review, check against the requirements for background execution, push, hardware and storage capacity
+    applies: [platform:mobile]
+    why: Browsers and mini program hosts restrict background execution, push and storage eviction more strictly than native, with especially large differences on iOS; promising feature parity will fall through.
+    see: ["07"]
+  - id: MOB-004
+    title: Share API contracts, design tokens and pure domain logic across platforms; do not treat the code-sharing ratio as a metric, and do not insist on pixel-identical UIs across platforms
+    level: soft
+    check: manual
+    how: "Review shared modules: they do not depend on platform objects such as the DOM, Node or Android Context; interactions follow each platform's design guidelines"
+    applies: [platform:mobile]
+    why: Across languages, sharing interface definitions pays off better than sharing source code; pushing the sharing ratio makes the code bend to the framework and worsens the user experience.
+    detail: |
+      - API types: generate each platform's code from the same OpenAPI or JSON Schema; do not hand-write data structures per platform.
+      - Design: share semantic tokens such as color, typography and spacing (see 08); do not copy the web's CSS components.
+      - Interaction: share product intent and acceptance criteria; navigation, back gestures and system dialogs follow Material Design and Apple HIG.
+    see: ["08", "16"]
+  - id: MOB-005
+    title: When building a native HarmonyOS app, establish separate ArkTS engineering standards and a separate build pipeline, sharing only API contracts, assets and design tokens
+    level: soft
+    check: manual
+    how: Review checks that the HarmonyOS app has its own dependency, signing, permission and push plans, plus an item-by-item replacement list for Android dependencies
+    applies: [platform:mobile]
+    why: Native HarmonyOS apps do not run Android packages; dependencies such as Google services, push, maps and payments must each be replaced, and you cannot assume a cross-platform framework covers them directly.
+  # ── Cross-platform framework engineering standards ──
+  - id: MOB-006
+    title: React Native projects use the New Architecture; before adding a native dependency, confirm it supports the New Architecture
+    level: hard
+    check: auto
+    how: Expo projects run `npx expo-doctor` in CI; bare React Native projects check the New Architecture flag in React Native Directory
+    applies: [platform:mobile]
+    why: The legacy architecture was removed as of React Native 0.82, and as of Expo SDK 55 the New Architecture is always on and cannot be disabled; libraries that don't support it cannot be used.
+    sources: [S01, S02]
+  - id: MOB-007
+    title: Pin dependencies with a lockfile and use frozen installs in CI; Expo projects add dependencies with `npx expo install` and run `npx expo install --check` in CI
+    level: hard
+    check: auto
+    how: CI uses `npm ci` / `pnpm install --frozen-lockfile` / `flutter pub get --enforce-lockfile`; Expo projects additionally run `npx expo install --check`
+    applies: [platform:mobile]
+    why: Mobile build chains are long and have many native dependencies, so version drift makes the same code produce different install packages at different times; Expo dependency versions must match the SDK.
+    detail: Also don't use `@latest` templates when creating a project; pin to an SDK version the team has reviewed. General dependency rules are in 10.
+    sources: [S02]
+    see: ["10"]
+  - id: MOB-008
+    title: Before adding a cross-platform plugin or native module, check its maintenance status, its support on both Android and iOS, and its license
+    level: soft
+    check: semi
+    how: "Dependency review checklist: last release date, open issues, whether both platforms are implemented, license; React Native Directory and pub.dev scores can assist"
+    applies: [platform:mobile]
+    why: Problems with an abandoned or single-platform plugin often surface only in real-device testing just before release; native code inside plugins is subject to licenses too.
+    see: ["27"]
+  - id: MOB-009
+    title: Use only one solution each for navigation, state management and the local database; adding a second requires a written justification
+    level: soft
+    check: semi
+    how: A dependency review script lists libraries of the same kind and requires a decision record when more than one is found
+    applies: [platform:mobile]
+    why: Two navigation libraries or two databases cause inconsistent state and a larger bundle, and migrations end up half done.
+  - id: MOB-010
+    title: Store business data in a structured database such as SQLite; do not store primary business data in key-value stores like AsyncStorage
+    level: soft
+    check: semi
+    how: Scan code for key-value store writes and review whether list or entity data is being stored
+    applies: [platform:mobile]
+    why: Key-value stores have no transactions, indexes or migrations; they slow down as data grows and cannot be partially recovered on errors.
+  # ── Authentication and credentials ──
+  - id: MOB-011
+    title: Sign-in uses the system browser + authorization code + PKCE; do not collect user passwords in a WebView
+    level: hard
+    check: semi
+    how: Scan code to check that the sign-in flow uses a system authentication session (AppAuth, expo-auth-session, ASWebAuthenticationSession, Custom Tabs); E2E covers sign-in
+    applies: [platform:mobile]
+    why: An embedded WebView lets the app read the user's password and bypasses the browser's existing sign-in state; RFC 8252 requires native apps to use an external user agent.
+    sources: [S03]
+    see: ["19"]
+  - id: MOB-012
+    title: Store credentials such as access tokens and refresh tokens only in system secure storage (wrappers over Keychain and Android Keystore); never write them to disk in plaintext or to logs
+    level: hard
+    check: semi
+    how: Scan code for calls that write tokens to ordinary storage or logs; log assertion tests search for token formats
+    applies: [platform:mobile]
+    why: Ordinary files and key-value stores can be read from backups or on jailbroken or rooted devices, and logs get collected and forwarded.
+    detail: Platform storage details are in 29 and 30.
+    see: ["25", "29", "30"]
+  - id: MOB-013
+    title: The client does not embed permanent API keys or server-side secrets; calls to third-party services go through your own server or exchange for short-lived credentials
+    level: hard
+    check: auto
+    how: Run secret scanning on the repository and the build artifacts
+    applies: [platform:mobile]
+    why: Anyone can download and decompile an install package; a secret bundled into it is effectively public.
+    see: ["25"]
+  - id: MOB-014
+    title: Biometrics are used only to unlock credentials stored on the device, never as the basis for server-side authentication
+    level: hard
+    check: manual
+    how: "Review the authentication design: the server trusts only tokens or signatures, not a client-reported \"passed biometrics\""
+    applies: [platform:mobile]
+    why: A boolean reported by the client can be tampered with; biometrics only prove that "someone on this device passed verification".
+  - id: MOB-015
+    title: On sign-out, account switching or tenant switching, clear credentials, sensitive local caches and the push token binding
+    level: hard
+    check: semi
+    how: "E2E case: after sign-out, check that secure storage, the local database and the image cache are empty and that the server has unbound the push token"
+    applies: [platform:mobile]
+    why: On shared devices or after switching accounts, leftover data lets the next user see the previous person's content, and leftover bindings push notifications to the old device.
+    detail: When the system rotates the push token or the user turns off notifications, update the server-side binding promptly as well (server-side handling is in 21).
+    see: ["21"]
+  - id: MOB-016
+    title: When enabling certificate pinning, pin multiple public keys (including backups) and have a rotation and emergency recovery plan; without these, don't enable it
+    level: hard
+    check: manual
+    how: Security review checks the number of pinned public keys, the rotation process and the recovery mechanism when pinning fails (disable via remote config or force upgrade)
+    applies: [platform:mobile]
+    why: Once the certificate changes, every client pinned to the old one fails to connect at the same time and only a new release can fix it; CA rotation by on-premises customers is even harder to predict.
+    see: ["25"]
+  # ── Offline and sync ──
+  - id: MOB-017
+    title: When offline writes are needed, first write the local entity together with the pending operation into a persistent queue (outbox), and mark it "pending sync" in the UI rather than showing it as submitted
+    level: hard
+    check: semi
+    how: "Integration test: write while offline, kill and restart the process, check that the data and pending operation are still there and get submitted once back online"
+    applies: [platform:mobile]
+    why: Writes kept only in memory or relying only on a request cache are lost as soon as the system kills the process; showing pending sync as submitted misleads users.
+    detail: |
+      Minimal data structures (illustrative):
+      - Entity: id, server version, updated time, deleted time, content
+      - Pending operation: operation id, entity id, operation type, base version, content, created time, retry count, status
+      - Sync cursor: scope, cursor, last successful time
+    sources: [S04]
+    see: ["17"]
+  - id: MOB-018
+    title: Each offline operation carries a unique idempotency key that the server uses to deduplicate; retries use exponential backoff with random jitter
+    level: hard
+    check: semi
+    how: "Contract test: the same operation submitted repeatedly or out of order takes effect only once on the server"
+    applies: [platform:mobile]
+    why: Mobile networks often have "the request arrived but the response was lost"; retries without an idempotency key create duplicate orders or duplicate approvals.
+    see: ["16"]
+  - id: MOB-019
+    title: Document the conflict strategy per data type; amounts, approvals and irreversible operations must not use "last writer wins"
+    level: hard
+    check: manual
+    how: "Review the sync design document: the conflict strategy for each entity type (reject overwrite, field-level merge, escalate to a human) and the corresponding tests"
+    applies: [platform:mobile]
+    why: '"Last writer wins" silently overwrites other people''s changes, which for amounts and approvals means incorrect data.'
+  - id: MOB-020
+    title: Sync deletions with tombstone records; when the incremental sync cursor becomes invalid, fall back to a full sync
+    level: soft
+    check: semi
+    how: Sync tests cover deletions, expired cursors, clock skew, and duplicate and out-of-order events
+    applies: [platform:mobile]
+    why: With direct physical deletion, offline devices don't know what to delete and will sync old data back.
+  - id: MOB-021
+    title: Do not promise fixed-interval background sync in requirements or acceptance criteria; sync on entering the foreground, network recovery and user actions
+    level: hard
+    check: manual
+    how: Review requirements and acceptance criteria for wording like "background sync every N minutes"
+    applies: [platform:mobile]
+    why: Both Android and iOS defer or skip background tasks based on battery and usage frequency, and cross-platform framework timers do not fire on time in the background.
+    detail: Usage of background task APIs (WorkManager, BGTask) is in 29 and 30.
+    sources: [S04]
+    see: ["29", "30"]
+  - id: MOB-022
+    title: For apps with a local database, test migrations with data samples from old versions on every upgrade
+    level: hard
+    check: auto
+    how: Keep data samples for every historical schema version in CI, migrate each to the current version and validate
+    applies: [platform:mobile]
+    why: A failed server-side migration can be fixed in the database, but a failed data migration on a user's phone often means wiping everything and starting over.
+    see: ["17"]
+  # ── Push ──
+  - id: MOB-023
+    title: Do not promise guaranteed push delivery; important workflows provide an in-app to-do or message list and pull actively when the app opens
+    level: hard
+    check: manual
+    how: "Acceptance document check: with notification permission off, offline, or the app terminated by the system, the user still sees pending items when opening the app"
+    applies: [platform:mobile]
+    why: Users may turn off notifications, the system may throttle, and intranet environments may not reach APNs and FCM; push can only serve as a reminder.
+    sources: [S05]
+    see: ["21"]
+  - id: MOB-024
+    title: For Android users in mainland China, integrate the major vendor push channels (Huawei, Honor, Xiaomi, OPPO, vivo, etc.) or an evaluated aggregated push SDK; native HarmonyOS uses Push Kit
+    level: soft
+    check: manual
+    how: Before release, verify notification delivery and tap-through navigation on real devices from each vendor
+    applies: [platform:mobile]
+    why: Most Android devices in mainland China lack Google services and cannot receive FCM; each vendor channel must be applied for and adapted separately.
+    detail: An aggregated push SDK is a third-party SDK and must be included in the privacy policy and SDK list (see 27). Expo's push service alone cannot cover Chinese vendor channels.
+    sources: [S05]
+    see: ["27"]
+  - id: MOB-025
+    title: Push titles and bodies contain no sensitive business content, only identifiers and neutral prompts; fetch details after the app opens
+    level: hard
+    check: semi
+    how: Schema validation of push payloads forbids body-content fields; security tests check what is shown on the lock screen
+    applies: [platform:mobile]
+    why: Anyone can see lock-screen notifications, and push content also passes through third-party push services.
+    see: ["21"]
+  # ── Monitoring ──
+  - id: MOB-026
+    title: Integrate crash reporting covering native crashes and uncaught JS/Dart exceptions; upload symbol files and source maps on release
+    level: soft
+    check: auto
+    how: The release pipeline checks that symbol files and source maps were uploaded and verifies stack traces can be symbolicated using a test crash
+    applies: [platform:mobile]
+    why: Crashes on users' phones cannot be reproduced, and unsymbolicated stack traces are basically unreadable.
+  - id: MOB-027
+    title: Redact crash and performance data before upload, excluding tokens, user content and raw location values; for on-premises deployments, third-party reporting can be disabled or pointed at a customer-hosted service
+    level: hard
+    check: semi
+    how: Outbound traffic tests or packet capture check the reported content; configuration checks confirm the reporting endpoint is configurable
+    applies: [platform:mobile, kind:onprem]
+    why: Crash logs often include request contents and user input; on-premises customers usually do not allow data to be sent to public SaaS.
+    see: ["26", "27"]
+  - id: MOB-028
+    title: Monitor startup time, jank and Application Not Responding (ANR), sync backlog and outbox failure rate on Release builds
+    level: soft
+    check: semi
+    how: Monitoring dashboards include these metrics; performance tests use Release builds, not Debug builds
+    applies: [platform:mobile]
+    why: Debug build performance differs greatly from Release; sync backlog is a failure signal specific to offline apps.
+    see: ["26"]
+  # ── Releases and OTA updates ──
+  - id: MOB-029
+    title: OTA updates change only scripts and assets; changes to native code or new permissions or native dependencies must ship as a new install package and pass store review
+    level: hard
+    check: semi
+    how: The release pipeline compares the fingerprint of the native part and blocks OTA when it has changed
+    applies: [platform:mobile]
+    why: Apple App Review Guideline 2.5.2 prohibits downloading code that introduces or changes features; Google Play prohibits downloading executable code such as dex or so files from outside Play, allowing only code that runs in a virtual machine or interpreter; pushing native changes to old install packages also crashes them outright.
+    sources: [S06, S07, S08]
+    see: ["29", "30"]
+  - id: MOB-030
+    title: OTA updates must not change the app's primary purpose or ship new major features that bypass review
+    level: hard
+    check: manual
+    how: Release review checks the change notes of every OTA; anything involving new features ships as an install package release
+    applies: [platform:mobile]
+    why: App stores allow interpreted scripts to fix bugs and adjust content, but sneaking in feature changes via OTA gets the app removed.
+    sources: [S06, S07]
+  - id: MOB-031
+    title: When using EAS Update, constrain compatibility with runtimeVersion; changes to the native part must change runtimeVersion
+    level: hard
+    check: auto
+    how: Set `runtimeVersion.policy` to `fingerprint` so the tool computes it automatically from the native part
+    applies: [platform:mobile]
+    why: If runtimeVersion stays the same while the native part changes, updates get delivered to incompatible install packages and crash on startup.
+    sources: [S08]
+  - id: MOB-032
+    title: Roll out OTA updates in stages with rollback available, and record the corresponding install package version, runtimeVersion and commit for each update
+    level: soft
+    check: semi
+    how: Release records are checked for these three items; a rollback has been rehearsed at least once
+    applies: [platform:mobile]
+    why: An OTA push reaches all online users at once, so when something goes wrong you need to locate and withdraw it quickly.
+    see: ["03"]
+  - id: MOB-033
+    title: Do not use the App Center CodePush hosted service
+    level: hard
+    check: auto
+    how: Dependency scanning looks for `react-native-code-push` and configuration pointing at App Center
+    applies: [platform:mobile]
+    why: Microsoft App Center was retired on 2025-03-31, taking hosted CodePush with it, so clients no longer receive updates.
+    sources: [S09]
+  - id: MOB-034
+    title: Before the server removes an endpoint or changes its semantics, make a compatibility plan based on client versions still in use, and keep a forced-upgrade channel available
+    level: hard
+    check: semi
+    how: CI uses an OpenAPI diff tool to detect breaking changes and requires the PR to include a compatibility plan; the client has a minimum version check
+    applies: [platform:mobile, kind:service]
+    why: Installed clients don't upgrade simultaneously, so a server change breaks old versions; without a forced-upgrade channel you can only wait for users to update themselves.
+    detail: How many old versions to support is agreed with product and customers; negotiate capabilities via the API rather than guessing from the User-Agent. API versioning strategy is in 16.
+    see: ["16"]
+  - id: MOB-035
+    title: When fully offline builds are required, perform dependency restore, compilation, signing and install verification from a clean state in an isolated environment
+    level: hard
+    check: auto
+    how: Run a complete build on a CI runner without internet access and install it on a test device
+    applies: [platform:mobile, kind:onprem]
+    why: '"Business APIs go over the intranet" does not mean the build can run offline; `eas build --local` still verifies the Expo account, and Gradle, CocoaPods and npm all download from the network.'
+    sources: [S10]
+    see: ["26"]
+  # ── Testing ──
+  - id: MOB-036
+    title: Before release, run E2E for critical flows on real devices with a Release build, including offline, poor network, recovery after the app is killed and upgrades with old data
+    level: hard
+    check: semi
+    how: The release checklist requires an attached real-device test report (device model, OS version, build number)
+    applies: [platform:mobile]
+    why: "Debug builds and emulators don't represent the production package: code minification, signing, and vendor OS permission and background management only show up on Release builds on real devices."
+    see: ["04"]
+  - id: MOB-037
+    title: E2E locates elements by accessibility identifiers or test IDs, not by screen coordinates, and does not use screenshot comparison in place of assertions
+    level: soft
+    check: semi
+    how: "Review E2E scripts: look for coordinate taps and steps that only take screenshots without assertions"
+    applies: [platform:mobile]
+    why: Coordinates vary with device model and font size, and screenshot comparison doesn't show whether a feature is correct; accessibility identifiers also serve screen readers.
+    see: ["04", "09"]
+  - id: MOB-038
+    title: Verify core flows on real devices with the system's largest font size and with screen readers (TalkBack, VoiceOver)
+    level: soft
+    check: manual
+    how: Accessibility check records before release
+    applies: [platform:mobile]
+    why: Cross-platform framework controls don't always map correctly to system accessibility APIs; only real-device screen reader testing reveals this.
+    detail: General requirements are in 09; platform APIs are in 29 and 30.
+    see: ["09", "29", "30"]
+  # ── Permissions and privacy ──
+  - id: MOB-039
+    title: Request system permissions when the corresponding feature is used, explaining the purpose beforehand; when denied, degrade the feature instead of exiting or repeatedly prompting
+    level: hard
+    check: manual
+    how: Review the first-launch flow and the request timing for each permission; E2E covers the paths after a permission is denied
+    applies: [platform:mobile]
+    why: Asking for all permissions at once on launch usually gets everything denied; Apple's App Review Guidelines require respecting users' permission settings and forbid manipulating or forcing consent.
+    sources: [S06]
+    see: ["27"]
+  - id: MOB-040
+    title: Request only the permissions a feature needs; do not initialize third-party SDKs that collect data before the user agrees to the privacy policy
+    level: hard
+    check: semi
+    how: Compare the permission list in the build artifact against the requirements; capture traffic during startup to check there is no third-party reporting before consent
+    applies: [platform:mobile]
+    why: Unnecessary permissions and collection before consent are common findings in app store and regulatory checks; specific regulatory requirements are in 27.
+    detail: Before using sensitive APIs such as device identifiers, clipboard, location and contacts, confirm they are necessary; logs do not record raw location values.
+    see: ["27"]
+choices:
+  - category: Framework for business apps on both platforms
+    pick: React Native + Expo
+    when: "TypeScript / React teams; forms, approvals and content apps"
+    alternatives:
+      - { name: Flutter, when: "Visuals matter and rendering must be consistent across platforms, or the team knows Dart" }
+      - { name: Kotlin Multiplatform + native UI, when: "Only business logic should be shared, with each platform keeping a native UI" }
+      - { name: "Two native apps (Kotlin + Swift)", when: "System integration is deep, or background and hardware capabilities are core" }
+      - { name: "React Native CLI (without Expo)", when: "You have substantial in-house native projects and don't need the Expo toolchain" }
+    avoid:
+      - { name: Pure WebView wrapper, why: "Limited system capabilities; experience and review both tend to run into problems" }
+    license: "The core of React Native, Expo and Flutter is permissively licensed (MIT / BSD-3-Clause); check plugins one by one"
+    notes: React Native has only the New Architecture left; Expo local builds still require Expo account verification, so fully offline builds must be validated separately.
+    sources: [S01, S02, S10]
+  - category: Shared business logic
+    pick: Kotlin Multiplatform
+    alternatives:
+      - { name: "Compose Multiplatform (shared UI)", when: "You accept a non-native control look on iOS and want to share UI too; iOS support is stable" }
+      - { name: TypeScript workspace packages, when: Sharing pure logic between Web and React Native }
+    avoid:
+      - { name: Calling platform objects or vendor SDKs directly in shared modules, why: "The shared layer gets locked to a platform and can't be tested" }
+    license: Apache-2.0
+    sources: [S11, S12]
+  - category: Lightweight entry point
+    pick: PWA
+    when: "An existing web app that only needs a lightweight mobile entry point"
+    alternatives:
+      - { name: Capacitor, when: "Existing web code that needs store listing or a small amount of native capability" }
+      - { name: Official WeChat mini program framework, when: Targeting the WeChat channel only }
+      - { name: Taro / uni-app, when: "Multiple mini program channels with reuse of TypeScript code; validate first" }
+    avoid:
+      - { name: "Using a PWA for heavy background work, reliable push or deep hardware features", why: "Browsers impose many restrictions, especially on iOS" }
+  - category: React Native navigation and state
+    pick: Expo Router; TanStack Query for server data; Zustand for local UI state
+    alternatives:
+      - { name: React Navigation, when: Not using Expo or needing its specific configuration style }
+    avoid:
+      - { name: Home-grown router, why: "Deep links, state restoration and back gestures all have to be rebuilt" }
+      - { name: Using the request cache as the primary data source, why: Data is lost on offline writes and process restarts }
+  - category: Flutter navigation and state
+    pick: go_router + Riverpod
+  - category: Local database
+    pick: "SQLite (expo-sqlite for React Native; drift for Flutter; SQLDelight or Room for KMP)"
+    alternatives:
+      - { name: Key-value libraries such as MMKV, when: Storing only a small amount of configuration }
+    avoid:
+      - { name: AsyncStorage for business data, why: "No transactions, indexes or migrations" }
+    license: SQLite is in the public domain; check surrounding libraries separately
+  - category: Credential storage
+    pick: "Wrappers over system secure storage (expo-secure-store, flutter_secure_storage)"
+    avoid:
+      - { name: "Plaintext files, key-value stores, code constants", why: Can be read and decompiled }
+  - category: Mobile E2E
+    pick: Maestro
+    when: "Black-box E2E across React Native, Flutter and native, with flows written in YAML and runnable locally"
+    alternatives:
+      - { name: Detox, when: "React Native projects that need gray-box synchronization (automatically waiting for the app to be idle)" }
+      - { name: Patrol, when: Flutter projects that need to interact with system dialogs and permissions in tests }
+      - { name: Appium, when: "Tests written in multiple programming languages, existing WebDriver infrastructure, or a real-device cloud" }
+    avoid:
+      - { name: Screenshots without assertions, why: "Doesn't show whether a feature is correct" }
+      - { name: Uploading builds containing customer data to public real-device clouds, why: Cross-border data transfer and leakage risk }
+    license: "Maestro is Apache-2.0 (Maestro Cloud is a separately paid service); the licenses of Detox, Patrol and Appium are to be verified"
+    sources: [S13]
+  - category: Push client
+    pick: APNs for iOS; FCM for Android outside China; vendor channels for Android in mainland China; Push Kit for HarmonyOS
+    alternatives:
+      - { name: "Aggregated push SDK (e.g. JPush, Getui)", when: "Many vendor channels and the team doesn't want to adapt each one; requires an SDK compliance assessment" }
+      - { name: Foreground persistent connection + incremental pull + in-app to-do list, when: "On-premises intranet deployments that can't reach public push networks" }
+    avoid:
+      - { name: Relying only on the Expo push service to cover devices in China, why: "Doesn't include Chinese vendor channels" }
+    notes: expo-notifications can obtain APNs / FCM device tokens directly without going through the Expo push service.
+    sources: [S05]
+  - category: OTA updates (React Native)
+    pick: "EAS Update (runtimeVersion with the fingerprint policy)"
+    alternatives:
+      - { name: Self-hosted update service compatible with the expo-updates protocol, when: "On-premises deployments or when Expo cloud services can't be used" }
+    avoid:
+      - { name: App Center CodePush, why: Retired on 2025-03-31 }
+      - { name: Using OTA to change native capabilities, why: "Violates store policies and crashes old install packages" }
+    sources: [S08, S09]
+  - category: Crash and performance monitoring
+    pick: Sentry SDK
+    alternatives:
+      - { name: Self-hosted Sentry, when: "Data must not leave the customer network; mind the server license" }
+      - { name: Firebase Crashlytics, when: Targeting only users outside China who have Google services }
+      - { name: Local crash dumps + an enterprise-owned collector, when: Fully offline or very small scale }
+    avoid:
+      - { name: Uploading to public SaaS by default in on-premises projects, why: Customer data leaves the network }
+    license: "The Sentry client SDKs are MIT; the self-hosted server is FSL, which is not an OSI-approved open source license"
+    sources: [S14]
+antipatterns:
+  - { bad: Calling it offline-first after adding just a request-cache plugin, instead: Local database + persistent outbox + idempotency keys + conflict strategy + delete sync }
+  - { bad: Using a timer to guarantee background sync every 5 minutes, instead: "Sync on entering the foreground, network recovery and user actions" }
+  - { bad: One public push SDK to cover all Android devices in China, instead: Verify each vendor channel on real devices }
+  - { bad: Working around a broken cross-platform plugin with a WebView, instead: "Validate native capabilities and permission boundaries first; write a native module if needed" }
+  - { bad: "Treating `eas build --local` as a fully offline build", instead: Test a complete build from a clean state in an environment without internet access }
+  - { bad: Forcing Web and mobile to share UI components, instead: "Share semantics and design tokens; interactions follow each platform's conventions" }
+  - { bad: "Enabling certificate pinning by default, pinning only one certificate", instead: "Off by default; if enabled, pin multiple public keys and prepare a rotation plan" }
+  - { bad: Using OTA to ship new features or change native capabilities, instead: "Ship native changes as new install packages; OTA only fixes scripts and assets" }
+  - { bad: Requesting all permissions at once on app launch, instead: "Request when needed, explaining the purpose first" }
+  - { bad: Verifying compatibility only on emulators, instead: "Test critical flows on Release builds on real devices, covering major vendors' models" }
+  - { bad: "Implementing OAuth sign-in, token storage and QR scanning yourself", instead: "Use AppAuth, system secure storage and well-maintained framework modules" }
+sources:
+  - { id: S01, title: "Expo: React Native's New Architecture", url: "https://docs.expo.dev/guides/new-architecture/", publisher: Expo, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Expo SDK 55 changelog", url: "https://expo.dev/changelog/sdk-55", publisher: Expo, date: 2026-02-25, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "RFC 8252: OAuth 2.0 for Native Apps", url: "https://datatracker.ietf.org/doc/html/rfc8252", publisher: IETF, date: 2017-10, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: "Build an offline-first app", url: "https://developer.android.com/topic/architecture/data-layer/offline-first", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "Expo: Send notifications with FCM and APNs", url: "https://docs.expo.dev/push-notifications/sending-notifications-custom/", publisher: Expo, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "App Review Guidelines", url: "https://developer.apple.com/app-store/review/guidelines/", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Google Play: Device and Network Abuse", url: "https://support.google.com/googleplay/android-developer/answer/9888379", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "Expo: Runtime versions and updates", url: "https://docs.expo.dev/eas-update/runtime-versions/", publisher: Expo, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "How to replace App Center and CodePush", url: "https://expo.dev/blog/how-to-replace-app-center-and-codepush", publisher: Expo, date: null, kind: case, checked: 2026-11-14 }
+  - { id: S10, title: "Expo: Run EAS Build locally", url: "https://docs.expo.dev/build-reference/local-builds/", publisher: Expo, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "Kotlin Multiplatform", url: "https://developer.android.com/kotlin/multiplatform", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "Compose Multiplatform 1.8.0 Released: Compose Multiplatform for iOS Is Stable and Production-Ready", url: "https://blog.jetbrains.com/kotlin/2025/05/compose-multiplatform-1-8-0-released-compose-multiplatform-for-ios-is-stable-and-production-ready/", publisher: JetBrains, date: 2025-05, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "Maestro", url: "https://github.com/mobile-dev-inc/maestro", publisher: mobile.dev, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "Sentry self-hosted LICENSE", url: "https://github.com/getsentry/self-hosted/blob/master/LICENSE.md", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "The current latest Expo SDK and corresponding React Native version (the original report said SDK 58 / RN 0.88; this review only verified that the New Architecture is mandatory as of SDK 55 and the legacy architecture was removed as of RN 0.82)"
+  - "The current stable Flutter release and the state of its rendering engine (the original report said 3.50 / Dart 3.14; not verified)"
+  - "The current text of Apple Developer Program License Agreement 3.3.1(B) on interpreted code (this review only verified the gist of App Review Guideline 2.5.2)"
+  - "The applicable boundaries of Flutter OTA solutions (e.g. Shorebird) under app store policies"
+  - "The scope of official support for self-hosting EAS Update; whether the self-hosted CodePush server repository has been archived"
+  - "Licenses and maintenance status of Detox, Patrol and Appium (per the LICENSE in the official repositories)"
+  - "The current terms of the FSL license for self-hosted Sentry (carried over from the original report; not re-verified)"
+  - "Version naming and stable baseline of the HarmonyOS development kit (the original report said 26.0.1 Beta1; the naming is questionable)"
+  - "Further research needed: the current state of the Unified Push Alliance and support from each vendor"
+  - "Further research needed: crash and performance monitoring solutions in China (including ones that can be deployed on-premises), and listing materials for Chinese app stores (Huawei, Xiaomi, OPPO, vivo)"
+  - "Further research needed: selection of in-app analytics/event tracking SDKs (coordinate with 22)"
+  - "Further research needed: engineering templates and maintenance status for mini programs (Taro, uni-app) and HarmonyOS"

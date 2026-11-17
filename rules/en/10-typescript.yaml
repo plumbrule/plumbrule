@@ -1,0 +1,584 @@
+id: "10"
+slug: typescript
+title: TypeScript and Node
+summary: Language-level conventions for TypeScript / JavaScript / Node — runtime version policy, package manager and lockfile, strict tsconfig options, module format, linting and formatting, unit and property-based testing, runtime validation, and the choice of query layer, migration tool and OpenAPI generator.
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Node runtime version policy; conditions for using Bun / Deno
+    - Concrete configuration of the package manager, lockfile, install scripts and release cooldown
+    - Strict tsconfig options, type checking, and the limits of running .ts directly in Node
+    - Module format (ESM / CJS), import paths, library publishing format
+    - Linting and formatting tools, and type-aware rules
+    - Unit testing, property-based testing, mutation testing, HTTP mocking libraries
+    - Runtime validation libraries, configuration parsing
+    - How to write async code, cancellation, concurrency and child processes in Node
+    - Query builders / ORMs, database migration tools, PostgreSQL drivers
+    - TypeScript generators for OpenAPI, server-side HTTP frameworks, logging libraries
+  excludes:
+    - { what: "General principles of formatting and linting, naming, error propagation, log fields", see: "02" }
+    - { what: "Test layering, coverage definitions, flaky tests, acceptance evidence", see: "04" }
+    - { what: Browser E2E tools, see: "04" }
+    - { what: "Frontend frameworks, component libraries, styling, frontend builds", see: "07" }
+    - { what: "API style, OpenAPI contract semantics, error format, idempotency semantics", see: "16" }
+    - { what: "Migration principles, transactions, optimistic locking, outbox, backups", see: "17" }
+    - { what: "Task queues, caching, scheduling, workflow engines", see: "18" }
+    - { what: "Login, token validation, password hashing, authorization models", see: "19" }
+    - { what: "Parsing libraries for documents, spreadsheets and PDFs", see: "20" }
+    - { what: "Overall supply-chain rules, secret scanning, SAST, SBOM, web security", see: "25" }
+    - { what: "Container images, health checks, graceful shutdown, OpenTelemetry", see: "26" }
+    - { what: Open-source license policy and license scanning tools, see: "27" }
+    - { what: Local sandboxing and isolation of untrusted code, see: "32" }
+overview: |
+  1. **Use a Node LTS that is still under maintenance.** Do not use end-of-life versions, odd-numbered short-term releases or pre-releases. Bun and Deno go to production only after compatibility has been verified.
+  2. **One package manager, one lockfile, frozen installs in CI.** pnpm by default; `packageManager` pins an exact version. Dependency install scripts do not run by default — only an allowlist is permitted; enable a release cooldown.
+  3. **Write `strict` out explicitly.** TypeScript 7 (the native Go compiler) has been released and its defaults have changed, so relying on defaults is unreliable. Also add `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, and others.
+  4. **Running is not the same as type-correct.** Running `.ts` directly in Node only strips types; it does no type checking. The same goes for esbuild, tsx and Vite. CI must run `tsc --noEmit` separately.
+  5. **Types do not exist at runtime.** HTTP requests, environment variables, messages, database JSON, and data returned by third parties and models must be parsed with a library such as Zod before entering business logic — not papered over with `as`.
+  6. **Standardize on ESM.** Relative imports include the file extension; libraries publish ESM only by default and declare entry points with `exports`.
+  7. **Biome for formatting and linting by default.** When you need the full set of type-aware rules (such as a missing `await`), add typescript-eslint, but use only its type rules; formatting still belongs to a single tool.
+  8. **Vitest for tests by default; add fast-check property-based tests for code with invariants.**
+  9. **Data layer:** Kysely + node-postgres by default, with migrations via the chosen tool's own CLI and human review of the SQL; choose Drizzle if you want the schema written in TypeScript. For OpenAPI clients, openapi-typescript + openapi-fetch by default, with generated output treated as read-only.
+  10. **The TypeScript 7 ecosystem is still catching up.** Tools that depend on the compiler's programmatic API (typescript-eslint's type rules, ts-morph, etc.) must for now be paired with the TypeScript 6 API; before upgrading a major version, run a version matrix first.
+rules:
+  # ── Runtime and package management ──
+  - id: TS-001
+    title: In production, use only a Node LTS line that is still under maintenance and keep up with security patches; do not use end-of-life versions, odd-numbered short-term releases or pre-releases
+    level: hard
+    check: auto
+    how: CI prints `node --version` and compares it against the official release schedule; container image scanning flags end-of-life runtimes
+    applies: [lang:ts]
+    why: End-of-life versions no longer receive security fixes; short-term releases and pre-releases have support windows that are too short or are unstable.
+    detail: |
+      - New projects choose the current Active LTS; existing projects may stay on another LTS line that is still under maintenance, but must upgrade before it reaches end of life.
+      - Before Bun or Deno goes to production, verify the behavior of the native addons, signals, child processes and file system you use on the target platform.
+    sources: [S01]
+  - id: TS-002
+    title: Commit only one kind of lockfile, and install in CI with a frozen lockfile (`pnpm install --frozen-lockfile` or `npm ci`)
+    level: hard
+    check: auto
+    how: CI checks that the repository contains only one kind of lockfile; the install command uses the frozen flag and fails when the lockfile and manifest disagree
+    applies: [lang:ts]
+    why: With mixed package managers or unfrozen installs, every install may resolve different dependencies, problems cannot be reproduced, and a door is left open for poisoned versions.
+    sources: [S08]
+  - id: TS-003
+    title: package.json declares the supported Node range in `engines` and the exact package manager version in `packageManager`
+    level: soft
+    check: auto
+    how: A script checks that both fields exist and that the versions in CI and images fall within the declared range
+    applies: [lang:ts]
+    why: Nobody reads versions written only in the README; once they are in the manifest, version managers and CI read the same source.
+    detail: Locally, use a version manager such as mise that reads the same declaration, rather than writing the version separately in several places.
+  - id: TS-004
+    title: Do not install `latest` tools on the fly in builds and CI, and do not use unpinned invocations such as `npx package@latest`
+    level: hard
+    check: semi
+    how: Search CI configuration, Dockerfiles and scripts for `@latest`, `npm install -g` and `npx` without a version, and confirm in review
+    applies: [lang:ts]
+    why: Unpinned tools can change on every build and bypass the lockfile and the cooldown; they are a common entry point for supply-chain attacks.
+    see: ["25"]
+  - id: TS-005
+    title: Dependency install scripts do not run by default; allow reviewed packages one by one; never allow them wholesale
+    level: hard
+    check: auto
+    how: Keep pnpm's `strictDepBuilds` enabled and list the allowlist in `allowBuilds`; CI checks there is no `dangerouslyAllowAllBuilds`; the allowlist file is covered by CODEOWNERS
+    applies: [lang:ts]
+    why: Install scripts can execute arbitrary code on developer machines and CI; most npm poisoning incidents in recent years stole credentials through them.
+    detail: |
+      - Recent pnpm versions do not run install scripts that have not been allowed, and installing a package that has not been allowed fails; do not turn this off for convenience.
+      - Projects using npm install with `--ignore-scripts`, then run the scripts separately for packages that need compiling.
+      - CI steps that install dependencies do not hold publish tokens or production credentials.
+    sources: [S06, S07, S08]
+    see: ["25"]
+  - id: TS-006
+    title: "Enable a release cooldown: newly published versions may be installed only after some time has passed; urgent security fixes are allowed individually by exact version"
+    level: soft
+    check: auto
+    how: Check that `minimumReleaseAge` in the pnpm configuration is not set to 0; exceptions go in `minimumReleaseAgeExclude` and are reviewed
+    applies: [lang:ts]
+    why: Poisoned versions are usually discovered and pulled within hours of publication; a cooldown avoids that window.
+    ref_value: Recent pnpm versions default to 1440 minutes (1 day); high-risk projects may set it longer. This is a reference practice, not a uniform standard.
+    sources: [S06, S07]
+    see: ["25"]
+  - id: TS-007
+    title: Packages published to npm use OIDC trusted publishing and generate provenance attestations; CI does not store long-lived npm tokens
+    level: hard
+    check: auto
+    how: Check that the publish workflow uses the trusted publishing configuration with provenance; there are no long-lived npm tokens in the repository or CI secrets
+    applies: [lang:ts, kind:library]
+    why: Once a long-lived token leaks, an attacker can publish malicious versions in your name.
+    sources: [S09, S16]
+    see: ["25"]
+  - id: TS-008
+    title: Before publishing a library, package it with `npm pack`, install it in a clean project, and verify imports, types and the minimum supported Node version
+    level: soft
+    check: auto
+    how: "CI job: pack, install into an empty directory, test ESM import and type checking separately, and run once each on the minimum and latest Node versions"
+    applies: [lang:ts, kind:library]
+    why: Working inside the monorepo does not mean it works once published; missing packaged files or a wrong `exports` only surface in a real consumer.
+  # ── TypeScript configuration and type checking ──
+  - id: TS-009
+    title: tsconfig sets `strict` to true explicitly rather than relying on defaults; strict sub-options must not be turned off to make checks pass
+    level: hard
+    check: auto
+    how: A script checks that strict is true in the effective tsconfig (`tsc --showConfig`) and that no sub-option such as `strictNullChecks` is set to false
+    applies: [lang:ts]
+    why: TypeScript 7 changed several defaults, and different versions and tools may read different defaults; turning off strict sub-options pushes null and implicit-any errors to runtime.
+    sources: [S02]
+  - id: TS-010
+    title: New projects enable `noUncheckedIndexedAccess`, `noImplicitOverride`, `noFallthroughCasesInSwitch` and `verbatimModuleSyntax` in addition to strict, and set `types` explicitly
+    level: soft
+    check: auto
+    how: A script checks these options in tsconfig
+    applies: [lang:ts]
+    why: These options catch common mistakes — out-of-bounds indexing, missing override, switch fallthrough, type imports leaking into runtime — at very little cost.
+    detail: |
+      - In the new version, `types` no longer includes all `@types` packages automatically by default; Node projects set `["node"]`, and test directories add the test library's types as needed.
+      - `exactOptionalPropertyTypes` is stricter; enabling it in an existing project touches a lot of code, so it can be turned on module by module.
+      - Large projects may keep `skipLibCheck: true` to control check time, but be aware that it skips errors in dependencies' declaration files.
+    sources: [S02]
+  - id: TS-011
+    title: CI must run type checking as a separate step (`tsc --noEmit`); running .ts directly in Node or a successful esbuild, tsx or Vite compile does not count as passing type checks
+    level: hard
+    check: auto
+    how: CI has a dedicated type-checking step whose failure blocks the merge
+    applies: [lang:ts]
+    why: These tools only strip types and then run; they do not check types. Without a separate check, type errors make it all the way to production.
+    sources: [S03]
+  - id: TS-012
+    title: Projects that run .ts directly in Node must enable `erasableSyntaxOnly` and `verbatimModuleSyntax`, must not use enums, namespaces with runtime code, or parameter properties, and must write type imports as `import type`
+    level: hard
+    check: auto
+    how: With these two options enabled in tsconfig, `tsc --noEmit` directly reports non-erasable syntax and type imports missing `type`
+    applies: [lang:ts]
+    why: Node only replaces type syntax with whitespace; it throws on syntax that requires code generation, and type imports written without `type` are treated as value imports and fail at runtime.
+    detail: |
+      - Node does not read tsconfig, so settings such as `paths` aliases and `target` have no effect on it; it also does not process .ts files inside `node_modules`.
+      - Replace enums with an `as const` object plus a union type; replace parameter properties with explicit field assignments.
+    sources: [S03]
+  - id: TS-013
+    title: Tests, scripts and tool configuration files are also type-checked; do not exclude them with `exclude`
+    level: soft
+    check: semi
+    how: Check that the output of `tsc --listFilesOnly` includes the test and script directories; when they need different settings, use a separate tsconfig and check it together in CI
+    applies: [lang:ts]
+    why: It is common for the build configuration to exclude test directories, but if type checking uses the same configuration, the test code is never checked.
+  - id: TS-014
+    title: Do not use `any`, the non-null assertion `!` or `as` to get around type errors; when suppression is unavoidable, use `@ts-expect-error` with a stated reason; `@ts-ignore` and `@ts-nocheck` are banned
+    level: soft
+    check: auto
+    how: Enable the corresponding lint rules (Biome's `noExplicitAny` and `noNonNullAssertion`, typescript-eslint's `ban-ts-comment`, etc.); exceptions are justified as required by 02
+    applies: [lang:ts]
+    why: These constructs silence the compiler, but the errors still occur at runtime, and later nobody knows there was a problem here.
+    detail: Receive data of unknown shape as `unknown`, then narrow it through validation; generated code directories may be excluded in a dedicated exception configuration.
+    see: ["02"]
+  # ── Runtime validation and configuration ──
+  - id: TS-015
+    title: Data from outside (HTTP requests, environment variables, messages, files, database JSON columns, results returned by third parties and models) must be parsed with a runtime validation library before entering business logic, not merely typed with `as`
+    level: hard
+    check: semi
+    how: Lint finds candidates (`as` right after `JSON.parse` or `response.json()`, typescript-eslint's `no-unsafe-*` rules); review checks that every entry point has schema parsing
+    applies: [lang:ts]
+    why: TypeScript types are fully erased at runtime, so only runtime checks can tell what external data actually looks like; types generated from OpenAPI do no runtime checking either.
+    detail: |
+      - Choose one validation approach per path: if you use Fastify, use its JSON Schema validation; otherwise use Zod. Do not validate the same entry point twice.
+      - On validation failure, return a clear error and do not write the raw input to logs.
+    sources: [S14]
+    see: ["16", "25"]
+  - id: TS-016
+    title: Read environment variables in a single configuration entry module and parse them with a schema; other code gets values from that module and does not read `process.env` directly
+    level: soft
+    check: auto
+    how: Lint bans `process.env` outside the configuration module (e.g. Biome's `noProcessEnv` or ESLint's `n/no-process-env`)
+    applies: [lang:ts]
+    why: Reading `process.env` everywhere makes it impossible to detect missing and malformed configuration all at once at startup, and to know which configuration items exist.
+    see: ["02"]
+  # ── Module format ──
+  - id: TS-017
+    title: 'New projects standardize on ESM: set `"type": "module"` in package.json; code run directly by Node uses `NodeNext` module resolution, and relative imports include file extensions'
+    level: soft
+    check: auto
+    how: Check the module settings in package.json and tsconfig; under NodeNext, `tsc --noEmit` reports relative imports missing an extension
+    applies: [lang:ts]
+    why: ESM is JavaScript's standard module format; interop problems when mixing CJS and ESM are hard to debug.
+    detail: |
+      - When the source writes `./x.ts`, use `rewriteRelativeImportExtensions` so that compiled output becomes `./x.js`.
+      - Frontend code handled by a bundler may use `bundler` module resolution; see 07.
+    sources: [S03]
+  - id: TS-018
+    title: Do not rely on tsconfig `paths` aliases working at runtime; when internal aliases are needed, use package.json `imports` (subpath imports starting with `#`)
+    level: soft
+    check: auto
+    how: Check whether tsconfig configures `paths`; if so, confirm in review that there is a corresponding resolution mechanism at runtime
+    applies: [lang:ts]
+    why: tsconfig `paths` only affects type checking and Node does not understand it, so build output can pass checks yet fail to find modules at runtime.
+    sources: [S03]
+  - id: TS-019
+    title: Libraries publish ESM only by default, declaring entry points and type files in the `exports` field; publish dual formats only when there really are CJS consumers
+    level: soft
+    check: semi
+    how: Check `exports` in package.json; dual-format packages must name their consumers and cover both import styles in the TS-008 packaging test
+    applies: [lang:ts, kind:library]
+    why: Dual-format packages are prone to the same module being loaded twice and to types not matching the implementation.
+  # ── Linting and formatting ──
+  - id: TS-020
+    title: The repository uses only one formatter (Biome by default); CI runs it in check mode and fails on any difference
+    level: hard
+    check: auto
+    how: CI runs `biome ci .` (or `prettier --check .` in projects using Prettier); check that no second formatter is configured at the same time
+    applies: [lang:ts]
+    why: Two formatters rewrite each other's output, producing meaningless diffs on every commit.
+    sources: [S04]
+    see: ["COD-038"]
+  - id: TS-021
+    title: Every Promise must be awaited, returned, or explicitly marked with `void` with its errors handled; enforce with a lint rule for missing awaits
+    level: hard
+    check: auto
+    how: Enable typescript-eslint's `no-floating-promises` and `no-misused-promises` (or Biome's equivalent rules; where coverage is incomplete, see TS-022)
+    applies: [lang:ts]
+    why: A missing await turns errors into unhandled rejections, which by default make Node exit the process; it also lets operations run after the transaction or request has ended.
+    sources: [S04, S05]
+  - id: TS-022
+    title: When full type-aware linting is needed, add only typescript-eslint's type rules alongside Biome; formatting still belongs to a single tool
+    level: soft
+    check: semi
+    how: Check that the ESLint configuration enables only type-related rules and no formatting rules; CI runs both
+    applies: [lang:ts]
+    why: Biome implements its own type inference, and some of its type rules still detect fewer issues than typescript-eslint; add only the missing part to avoid two sets of overlapping rules.
+    ref_value: Biome officially states that its missing-await rule detects about 75% of what typescript-eslint does (preliminary testing; figure from the 2025 release).
+    sources: [S04, S05]
+  # ── Async, concurrency and child processes ──
+  - id: TS-023
+    title: Pass an AbortSignal and set a timeout when making network requests and other IO, and propagate the cancellation signal all the way down to the lowest-level call
+    level: soft
+    check: semi
+    how: Review checks whether `fetch` and client library calls pass `signal`; lint finds `fetch` calls without a signal argument as candidates
+    applies: [lang:ts]
+    why: Calls without timeout and cancellation hang indefinitely, holding connections and memory; if you cancel only at the outer layer without passing the signal inward, the underlying request keeps running.
+    detail: '`AbortSignal.timeout(ms)` only produces the cancellation signal; if the called library ignores the signal, it still hangs, so when choosing a library confirm that it supports cancellation.'
+    see: ["02"]
+  - id: TS-024
+    title: Limit concurrency when processing collections of unbounded size concurrently; do not just write `Promise.all(items.map(...))`
+    level: soft
+    check: semi
+    how: Review checks `Promise.all` over collections such as query results and file lists; use a library such as `p-limit` to limit concurrency
+    applies: [lang:ts]
+    why: Unbounded concurrency fires thousands of requests at once, overwhelming downstream services or exhausting memory and connection pools.
+    detail: When one failure should abort everything, call `abort()` after the failure to cancel the remaining tasks; when all results need to be collected, use `Promise.allSettled`.
+  - id: TS-025
+    title: Start child processes with an argument array (`spawn`, `execFile`); do not hand strings containing external input to a shell (`exec`, `shell` set to true)
+    level: hard
+    check: semi
+    how: SAST rules or lint flag calls to `exec`, `execSync` and those with `shell` set to true; review confirms the arguments contain no external input
+    applies: [lang:ts]
+    why: Once external input gets mixed into a string handed to a shell, you have command injection.
+    detail: Limit child processes' run time and output size, and reap the whole process tree on exit or cancellation; killing only the main process leaves grandchild processes behind.
+    sources: [S11]
+    see: ["25", "32"]
+  - id: TS-026
+    title: Do not treat Node's `vm` module or permission model (`--permission`) as a sandbox for running untrusted code
+    level: hard
+    check: manual
+    how: Review places that execute externally submitted code, plugins or agent-generated code, and confirm isolation relies on containers, virtual machines or a separate system user
+    applies: [lang:ts]
+    why: Node officially states that neither the permission model nor `vm` protects against malicious code; they only reduce accidental mistakes.
+    sources: [S10]
+    see: ["32"]
+  # ── Testing ──
+  - id: TS-027
+    title: Use Vitest for unit tests by default; a repository maintains only one unit-testing framework
+    level: soft
+    check: auto
+    how: Check that the dependency manifest does not contain two unit-testing frameworks at once (except during a migration of an existing project, with a stated deadline)
+    applies: [lang:ts]
+    why: Two frameworks mean two sets of assertions, mocks and configuration, and both newcomers and agents will mix them up.
+    detail: Small zero-dependency libraries or CLIs may use Node's built-in `node:test`; existing Jest projects may stay on Jest — migration is not required.
+    sources: [S15]
+    see: ["04"]
+  - id: TS-028
+    title: Write fast-check property-based tests for code with clear invariants, such as parsing, serialization, validation, and money and date calculations
+    level: soft
+    check: semi
+    how: Review checks whether such modules have property-based tests; on failure, record the seed and the shrunk minimal counterexample (see 04)
+    applies: [lang:ts]
+    why: Hand-written examples only cover the cases you think of; property-based tests automatically find counterexamples at the boundaries.
+    see: ["04"]
+  - id: TS-029
+    title: Do not commit `.only` to the main branch, and do not turn CI green with `|| true`, skipped tests or deleted assertions
+    level: hard
+    check: auto
+    how: Lint bans `.only` (e.g. `no-focused-tests` from `@vitest/eslint-plugin`); CI configuration checks that test commands have no `|| true`; newly added `.skip` requires a reason and a task number
+    applies: [lang:ts]
+    why: These tricks make tests look like they pass while actually testing nothing.
+    see: ["03", "04"]
+  # ── Data access ──
+  - id: TS-030
+    title: SQL is always parameterized or assembled with a query builder; never concatenate external input into SQL strings; calls to raw SQL APIs require review
+    level: hard
+    check: semi
+    how: SAST rules flag string-concatenated SQL and raw APIs such as `sql.raw` and `$queryRawUnsafe`; review confirms no external input is involved
+    applies: [lang:ts]
+    why: SQL injection is one of the most common and most severe vulnerabilities.
+    detail: The `sql` template tag in Kysely and Drizzle turns interpolations into parameters and is safe; APIs with raw or unsafe in their names are not.
+    sources: [S17]
+    see: ["25"]
+  - id: TS-031
+    title: Database migrations use the CLI of the chosen query layer or a standalone migration tool to generate SQL files that are committed to the repository; the SQL is reviewed by a human before it is executed
+    level: soft
+    check: semi
+    how: The migrations directory is covered by CODEOWNERS; review looks at the generated SQL, not just the changes to the schema definition
+    applies: [lang:ts]
+    why: Tool-generated migrations may turn a rename into dropping a column and adding a new one; only reading the SQL reveals this.
+    detail: For when migrations run, whether they can be rolled back, and how they stay compatible with older code, see 17.
+    see: ["17"]
+  - id: TS-032
+    title: Each process creates only one database connection pool, with a configurable connection limit and acquisition timeout; do not create connections or pools per request
+    level: soft
+    check: semi
+    how: Review searches for where `new Pool` and `new Client` are used; observe the database connection count during load testing
+    applies: [lang:ts, kind:service]
+    why: Creating a connection per request exhausts database connections during traffic peaks.
+    sources: [S18]
+    see: ["17"]
+  # ── APIs and logging ──
+  - id: TS-033
+    title: TypeScript types and clients generated from OpenAPI live in a read-only directory and are not edited by hand; CI regenerates them and checks with `git diff --exit-code`
+    level: hard
+    check: auto
+    how: CI runs the generation command and fails on any difference
+    applies: [lang:ts]
+    why: Hand edits to generated code are lost at the next generation, and the client silently drifts from the contract.
+    sources: [S19]
+    see: ["16", "COD-009"]
+  - id: TS-034
+    title: Servers use a structured logging library (Pino by default) configured to redact sensitive fields; do not use `console.log` for business logs
+    level: soft
+    check: auto
+    how: Lint bans `console` in service code (e.g. Biome's `noConsole`), relaxed for CLIs and scripts; tests check that logs contain no fields such as tokens
+    applies: [lang:ts, kind:service]
+    why: console output has no levels or fields and is not redacted automatically.
+    detail: For the meaning of log fields and levels see 02; for collection and trace correlation see 26.
+    sources: [S20]
+    see: ["02", "26"]
+  # ── Upgrades ──
+  - id: TS-035
+    title: When upgrading a major version of Node or TypeScript, first run the old and new versions in parallel in CI, and switch only after confirming that compilation, linting, tests, generators and build tools all support it
+    level: soft
+    check: semi
+    how: The upgrade PR includes CI results for the version matrix; review checks whether tools that depend on the compiler API are compatible
+    applies: [lang:ts]
+    why: Major versions change defaults and APIs; TypeScript 7 does not yet have a stable programmatic API, so tools that depend on it cannot simply be upgraded along with it.
+    detail: Under TypeScript 7, tools that depend on the compiler API, such as typescript-eslint's type rules and ts-morph, must for now be used with the TypeScript 6 API package, while type checking itself uses TypeScript 7's `tsc`.
+    sources: [S02, S21]
+choices:
+  - category: Runtime
+    pick: A Node.js LTS line that is still under maintenance
+    alternatives:
+      - { name: Bun, when: "You want an all-in-one toolchain or faster startup, and have verified native addon, signal and child process behavior on the target platform" }
+      - { name: Deno, when: "You need scripts or edge runtimes with permission isolation by default, and have verified compatibility of the npm packages you use" }
+    avoid:
+      - { name: "End-of-life versions, odd-numbered short-term releases, pre-releases", why: No security fixes or support windows that are too short }
+    sources: [S01]
+  - category: Node version management
+    pick: mise (reads the version declared in the project)
+    alternatives:
+      - { name: fnm or nvm, when: "The team already uses it, and only the Node runtime needs managing" }
+    avoid:
+      - { name: Writing the version only in the README, why: Cannot be read or validated by tools }
+    notes: In multi-language repositories, mise can also manage versions of runtimes such as Go and Python at the same time.
+  - category: Package manager
+    pick: pnpm (including workspaces)
+    alternatives:
+      - { name: npm, when: "Single-package projects that don't want to install an extra tool" }
+      - { name: Bun's package manager, when: The runtime is also Bun }
+    avoid:
+      - { name: Mixing multiple package managers and lockfiles in one repository, why: Inconsistent dependency resolution }
+    license: MIT (to be verified)
+    notes: pnpm enables a release cooldown and rejects install scripts that have not been allowed by default, giving stronger supply-chain protection than npm's default configuration. In intranet environments, the mirror registry must preserve packages' publish-time metadata for the cooldown to take effect.
+    sources: [S06, S07]
+  - category: Monorepo task orchestration
+    pick: The filtering and recursive commands built into pnpm workspaces
+    alternatives:
+      - { name: Turborepo or Nx, when: "Many packages and slow builds, requiring a task graph and caching" }
+    avoid:
+      - { name: Adopting a task graph and remote cache when there are only a few packages, why: "Adds configuration and operations cost, and remote caching is unavailable in air-gapped environments" }
+  - category: Type checking
+    pick: TypeScript 7's `tsc --noEmit`
+    alternatives:
+      - { name: TypeScript 6 API package, when: "Coexisting with TypeScript 7 when tools such as typescript-eslint's type rules and ts-morph need the compiler's programmatic API" }
+    avoid:
+      - { name: "Treating the ability to run under esbuild, tsx or Node as passing type checks", why: None of them check types }
+      - { name: Approaches that depend on compiler plugins or transformers, why: TypeScript 7 does not support them }
+    license: Apache-2.0 (to be verified)
+    sources: [S02, S21]
+  - category: Running .ts directly during development
+    pick: Node's native type stripping
+    alternatives:
+      - { name: tsx, when: "The code still contains non-erasable syntax such as enums and parameter properties, or needs tsconfig `paths`" }
+    avoid:
+      - { name: Using a successful run in place of type checking, why: See TS-011 }
+    sources: [S03]
+  - category: Build
+    pick: Services and CLIs emit JavaScript directly with `tsc`, without bundling
+    alternatives:
+      - { name: tsdown, when: "Publishing a library that needs generated declaration files, multiple entry points and an `exports` map" }
+      - { name: esbuild, when: A single-file artifact is needed or cold start is sensitive }
+    avoid:
+      - { name: Publishing uncompiled .ts source, why: "Node does not process .ts files in node_modules, so consumers cannot use it" }
+    notes: tsdown is still at 0.x; pin an exact version and read the changelog when upgrading.
+    sources: [S03, S22]
+  - category: Formatting and linting
+    pick: Biome (one tool for both formatting and linting)
+    alternatives:
+      - { name: ESLint + typescript-eslint + Prettier, when: "You need a plugin ecosystem Biome lacks (such as framework-specific rules), or an existing project already uses it stably" }
+      - { name: Oxlint, when: "An existing ESLint project wants to speed up linting first, with a separate formatter" }
+    avoid:
+      - { name: Enabling two or more formatters at once, why: They rewrite each other's output }
+    license: MIT (to be verified)
+    sources: [S04]
+  - category: Supplementary type-aware linting
+    pick: "typescript-eslint's type rules (such as `no-floating-promises`, `no-misused-promises`, `no-unsafe-*`), enabling only the part Biome does not fully cover"
+    when: When Biome is the default but full type-aware checking is needed
+    license: MIT (to be verified)
+    sources: [S05]
+  - category: Unit testing
+    pick: Vitest
+    alternatives:
+      - { name: "node:test", when: Small zero-dependency libraries or CLIs }
+      - { name: Jest, when: Existing projects already using it }
+    avoid:
+      - { name: Maintaining two unit-testing frameworks in one repository, why: "A separate set of assertions, mocks and configuration for each" }
+    license: MIT (to be verified)
+    sources: [S15]
+  - category: Property-based testing
+    pick: fast-check
+    license: MIT (to be verified)
+  - category: Mutation testing
+    pick: StrykerJS
+    when: "When core logic needs checking that the tests actually catch errors; run periodically per module, not as a gate on every commit"
+    license: Apache-2.0 (to be verified)
+  - category: HTTP mocking
+    pick: MSW (intercepts requests at the network layer)
+    avoid:
+      - { name: Hand-written fetch doubles everywhere, why: "They behave very differently from real requests and are costly to maintain" }
+    license: MIT (to be verified)
+  - category: Runtime validation
+    pick: Zod
+    alternatives:
+      - { name: Valibot, when: Frontend or edge environments sensitive to bundle size }
+      - { name: Framework-built-in JSON Schema validation (Fastify / Ajv), when: "The server already uses Fastify, and validation and OpenAPI docs share one schema" }
+    avoid:
+      - { name: "`req.body as T` or hand-written field checks", why: No guarantees whatsoever at runtime }
+    license: MIT (to be verified)
+    sources: [S14]
+  - category: Server-side HTTP framework
+    pick: Fastify
+    alternatives:
+      - { name: Hono, when: "It must run across Node, Bun, Deno and edge environments, or the service is very small" }
+      - { name: NestJS, when: "Large team with many modules that explicitly needs dependency injection and a uniform structure" }
+      - { name: Express, when: Existing projects }
+    avoid:
+      - { name: Hand-writing routing and middleware with Node's built-in http module, why: "You have to add request body limits, timeouts and parsing boundaries yourself, which is error-prone" }
+    license: MIT (to be verified)
+    sources: [S23, S24]
+  - category: Query builder / ORM
+    pick: Kysely (type-safe SQL query builder) + node-postgres
+    alternatives:
+      - { name: Drizzle ORM, when: You want the schema written in TypeScript with migrations generated from it }
+      - { name: Prisma ORM, when: "The team is already familiar with it and needs its relational queries and toolchain; in air-gapped environments, first verify that the code generation step does not need network access" }
+    avoid:
+      - { name: Hand-concatenating SQL strings, why: "Injection risk; see TS-030" }
+    license: Kysely MIT (to be verified); Drizzle ORM Apache-2.0; Prisma ORM Apache-2.0
+    notes: For domestic Chinese databases that claim PostgreSQL compatibility, test transactions, locks and migrations against a real database instance; a driver that can connect is not enough.
+    sources: [S12, S13, S17]
+  - category: Database migration tool
+    pick: "Follow the query layer: Kysely's built-in migrator, Drizzle Kit, Prisma Migrate"
+    alternatives:
+      - { name: node-pg-migrate, when: "PostgreSQL only, and the query layer has no migrations" }
+      - { name: Language-agnostic tools such as dbmate, when: "When services in multiple languages share one database, standardize on one tool (see 17)" }
+    avoid:
+      - { name: One database managed by two migration tools at once, why: "The migration history splits, and the current schema cannot be determined" }
+    notes: For migration principles (fix forward by default, compatibility with older code, when to run), see 17.
+    sources: [S12, S13, S17]
+  - category: PostgreSQL driver
+    pick: node-postgres (pg) + connection pool
+    alternatives:
+      - { name: postgres.js, when: "You prefer writing SQL with template strings and don't use a query layer that depends on pg" }
+    sources: [S18]
+  - category: TypeScript generator for OpenAPI
+    pick: openapi-typescript (generates types) + openapi-fetch (lightweight client)
+    alternatives:
+      - { name: Orval, when: The frontend needs TanStack Query hooks generated directly }
+      - { name: Hey API, when: "You need a full generated SDK (still 0.x; watch for breaking changes when upgrading)" }
+    avoid:
+      - { name: Multiple generators producing the same client, why: The two copies of code will diverge }
+      - { name: Hand-writing API types and copying them between frontend and backend, why: They inevitably drift once the API changes }
+    notes: For how the contract itself is written and what the single source of truth is, see 16.
+    license: MIT (to be verified)
+    sources: [S19, S25, S26]
+  - category: Logging
+    pick: Pino
+    alternatives:
+      - { name: Winston, when: Existing projects }
+    license: MIT (to be verified)
+    sources: [S20]
+  - category: Concurrency control
+    pick: p-limit
+    alternatives:
+      - { name: p-queue, when: "You also need priorities, pausing or rate limiting" }
+    license: MIT (to be verified)
+antipatterns:
+  - { bad: "Assuming the types are fine because Node ran the .ts successfully", instead: "CI runs `tsc --noEmit` separately" }
+  - { bad: "`JSON.parse(body) as User`", instead: Parse with a library such as Zod before use }
+  - { bad: "Not setting strict in tsconfig and relying on defaults", instead: "Set `strict: true` explicitly" }
+  - { bad: "Using tsconfig `paths` aliases, then getting module-not-found errors at runtime after the build", instead: "Use package.json `imports` subpath imports" }
+  - { bad: "Enabling the formatting rules of Biome, Prettier and ESLint at the same time", instead: "One formatter; ESLint only adds type rules" }
+  - { bad: "Allowing all install scripts wholesale just to get one native package installed", instead: Add only that package to the allowlist }
+  - { bad: "`npx some-tool@latest` in CI", instead: "Add the tool to devDependencies and pin it with the lockfile" }
+  - { bad: "`Promise.all(rows.map(fetchSomething))` over tens of thousands of records", instead: "Limit concurrency with p-limit, or switch to stream processing" }
+  - { bad: "`exec(\\`git clone ${url}\\`)`", instead: "`execFile('git', ['clone', url])`" }
+  - { bad: Running user-submitted code with the `vm` module, instead: "Isolate it in a container or virtual machine (see 32)" }
+  - { bad: "`new Pool()` in every request", instead: Create one connection pool at process startup }
+sources:
+  - { id: S01, title: Node.js Release Working Group (release schedule), url: "https://github.com/nodejs/Release", publisher: Node.js, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S02, title: Announcing TypeScript 7.0, url: "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/", publisher: Microsoft, date: 2026-07-08, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Node.js: Modules: TypeScript", url: "https://nodejs.org/api/typescript.html", publisher: Node.js, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Biome v2—codename: Biotype", url: "https://biomejs.dev/blog/biome-v2/", publisher: Biome, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "typescript-eslint: Linting with Type Information", url: "https://typescript-eslint.io/getting-started/typed-linting", publisher: typescript-eslint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: pnpm 11.0 release, url: "https://pnpm.io/blog/releases/11.0", publisher: pnpm, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "pnpm: Mitigating supply chain attacks", url: "https://pnpm.io/supply-chain-security", publisher: pnpm, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "pnpm: Settings (pnpm-workspace.yaml)", url: "https://pnpm.io/settings", publisher: pnpm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "npm: Trusted publishing", url: "https://docs.npmjs.com/trusted-publishers/", publisher: npm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "Node.js: Permissions", url: "https://nodejs.org/api/permissions.html", publisher: Node.js, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "Node.js: Child process", url: "https://nodejs.org/api/child_process.html", publisher: Node.js, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Drizzle ORM, url: "https://github.com/drizzle-team/drizzle-orm", publisher: Drizzle Team, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: Prisma ORM (LICENSE), url: "https://github.com/prisma/prisma/blob/main/LICENSE", publisher: Prisma, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: Zod, url: "https://github.com/colinhacks/zod", publisher: Zod, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Vitest, url: "https://github.com/vitest-dev/vitest", publisher: Vitest, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "npm: Generating provenance statements", url: "https://docs.npmjs.com/generating-provenance-statements", publisher: npm, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: Kysely, url: "https://github.com/kysely-org/kysely", publisher: Kysely, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: node-postgres, url: "https://node-postgres.com/", publisher: node-postgres, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: openapi-typescript, url: "https://github.com/openapi-ts/openapi-typescript", publisher: openapi-ts, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: Pino, url: "https://github.com/pinojs/pino", publisher: Pino, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Announcing TypeScript 7.0 RC, url: "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0-rc/", publisher: Microsoft, date: 2026-06-18, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: tsdown, url: "https://github.com/rolldown/tsdown", publisher: Rolldown, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Fastify, url: "https://github.com/fastify/fastify", publisher: Fastify, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: Hono, url: "https://github.com/honojs/hono", publisher: Hono, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Orval, url: "https://orval.dev/", publisher: Orval, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: Hey API openapi-ts, url: "https://github.com/hey-api/openapi-ts", publisher: Hey API, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "Whether TypeScript 7.1 (with a stable programmatic API) has been released, and when typescript-eslint will support TypeScript 7 natively; the current basis is the 7.0 RC announcement and community reports, and the transitional approach in TS-035 will need updating then"
+  - The exact package name and usage of the TypeScript 6 API compatibility package have not been verified against official documentation
+  - "The current detection rate of Biome's type rules (the official 75% is preliminary data from the v2 release), and whether `noFloatingPromises` has moved out of the nursery group"
+  - "\"Newer Node versions no longer bundle Corepack and it must be installed separately\" has not been verified online"
+  - "Whether Node has removed `--experimental-transform-types` (seen only in the nightly docs); not verified for stable releases"
+  - "The current pnpm major version number, and the difference in strictness of `minimumReleaseAge` between its default value and an explicit setting (loose mode allows packages automatically), need re-checking"
+  - "The licenses of Vitest, fast-check, StrykerJS, MSW, Kysely, Zod, Valibot, Fastify, Hono, Pino, p-limit, pnpm, Biome, typescript-eslint, openapi-typescript, Orval, Hey API and TypeScript were not verified online this time (marked \"to be verified\")"
+  - Whether newer Prisma versions still need to download binaries for code generation and the query engine in air-gapped environments has not been verified
+  - "There is no reliable information on specific compatibility issues between Bun, Deno and Node (native addons, signals, child processes)"
+  - "Research pending: memory leak diagnosis tools (heap snapshots, clinic, etc.) and monitoring practices for long-running processes"
+  - "Research pending: detailed trade-offs between Turborepo, Nx and moon"
+  - "Research pending: the current state of Node single executable applications (SEA)"
+  - "Research pending: compatibility of the TypeScript 7 ecosystem (tsdown, Vitest, the various generators)"

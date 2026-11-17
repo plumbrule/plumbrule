@@ -1,18 +1,22 @@
 ---
 // 按分组列出全部 32 个主题；还没整理完的主题标「整理中」，不给链接。
-import { topicGroups, topicNames, topicHref } from '../lib/site.ts';
+import { getLang, getSite, topicHref } from '../lib/site.ts';
+
+const lang = getLang(Astro.url.pathname);
+const site = getSite(lang);
+const todo = lang === 'en' ? 'In progress' : '整理中';
 ---
 <div class="tgrid not-content">
-  {topicGroups.map((g) => (
+  {site.groups.map((g) => (
     <div class="tgroup">
       <h3>{g.name}</h3>
       <ul>
         {g.ids.map((id) => {
-          const href = topicHref(id);
-          const name = topicNames[id].名称;
+          const href = topicHref(id, lang);
+          const name = site.topicNames[id].名称;
           return (
             <li>
-              {href ? <a href={href}><span class="n">{id}</span> {name}</a> : <span class="todo"><span class="n">{id}</span> {name} <span class="pr-chip">整理中</span></span>}
+              {href ? <a href={href}><span class="n">{id}</span> {name}</a> : <span class="todo"><span class="n">{id}</span> {name} <span class="pr-chip">{todo}</span></span>}
             </li>
           );
         })}

@@ -1,0 +1,645 @@
+id: "09"
+slug: a11y-i18n
+title: Interaction, Accessibility, and Internationalization
+summary: "How to make interfaces usable, understandable, and error-free for everyone: contrast, touch target size, keyboard and focus, screen readers, reduced motion, action feedback and undo, UI copy and error messages, plus multiple languages, localized formats, and bidirectional text."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+legal_notice: true
+scope:
+  includes:
+    - Accessibility acceptance baseline (WCAG 2.2 AA) and manual checks
+    - Text and non-text contrast, not relying on color alone, zoom and reflow
+    - Touch and pointer target size, alternatives to dragging and hovering
+    - Keyboard operability, visible focus, dialog focus, keyboard shortcuts and IME safeguards
+    - "Screen readers: semantics, accessible names, status announcements"
+    - Motion and flashing, reduced motion
+    - Action feedback, undo and confirmation, optimistic updates, long-running task status, draft preservation
+    - How to write UI copy and error messages
+    - "Internationalization: externalized strings, whole-sentence translation, plurals, date/number/currency formats, bidirectional text, pseudo-localization, translation workflow"
+  excludes:
+    - { what: "Choice of base component library, frontend framework, and frontend i18n library", see: "07" }
+    - { what: "Specific values of visual tokens such as color, font size, spacing, and animation duration", see: "08" }
+    - { what: "Test layering, E2E tools, acceptance evidence, and \"untested must not be recorded as passed\"", see: "04" }
+    - { what: Storage and transport format of points in time and storage of time zone names, see: "02" }
+    - { what: "API error format, stable error codes, and long-running task APIs", see: "16" }
+    - { what: "Security rules such as error information leakage and upload security", see: "25" }
+    - { what: Evaluation and trustworthiness of AI-generated content, see: "24" }
+    - { what: Determining the applicability of accessibility laws and regulations, see: "27" }
+    - { what: Android platform accessibility APIs and testing, see: "29" }
+    - { what: iOS platform accessibility APIs and testing, see: "30" }
+overview: |
+  1. **The baseline is WCAG 2.2 AA.** That means all Level A and Level AA success criteria. WCAG 3 is still a Working Draft and must not be written into contracts as an acceptance standard. All hard constraints follow AA; AAA (e.g., 7:1 contrast, 44×44 targets) is only a higher target a project may adopt voluntarily.
+  2. **A fully green automated scan does not mean conformance.** Tools like axe find only about half of issues on average; before claiming WCAG conformance, a person must walk through key flows with a keyboard and listen through them with a screen reader.
+  3. **Prefer native controls.** Where `button`, `a`, `input`, `label`, or `dialog` will do, don't use `div` plus ARIA; for complex components, use existing implementations that follow the WAI-ARIA APG (W3C's guide to component interaction patterns).
+  4. **Key numbers (all from WCAG 2.2 AA):** body text contrast 4.5:1, large text 3:1, UI components and graphics 3:1; pointer targets 24×24 CSS px (with exceptions); reflow at 320 CSS px width; no content loss with text enlarged to 200%.
+  5. **Keyboard and focus:** all functionality is keyboard operable; focus is always visible and not obscured; after a dialog closes, focus returns to where it was. Keyboard shortcuts are registered centrally and do not fire during IME composition.
+  6. **Don't convey information through color, hover, dragging, or fleeting messages alone.**
+  7. **Feedback must be truthful:** every action has a result; reversible actions offer undo, irreversible ones state the consequences on confirmation; don't show a percentage without real progress.
+  8. **Write copy in plain language:** buttons use "verb + object"; error messages say what is wrong and how to fix it, without exposing stack traces or internal information.
+  9. **Do internationalization from day one:** strings go into resource files, translate whole sentences, leave plurals to ICU rules, leave dates/numbers/currency to `Intl` with language, time zone, and currency passed explicitly; when enabling right-to-left languages, use `dir` and CSS logical properties. Use pseudo-localization to expose hard-coded strings and truncation early.
+  10. **Projects in China:** GB/T 37668-2026 was published on 2026-10-30 and takes effect on 2027-02-01; it is a non-equivalent adoption of WCAG 2.2 and fully replaces the 2019 edition. "Passes WCAG 2.2 AA" does not equal compliance with Chinese regulations; see 27 for applicability. For mobile platform-specific accessibility APIs, see 29 / 30.
+rules:
+  # ── Baseline and acceptance ──
+  - id: A11Y-001
+    title: Web interfaces use WCAG 2.2 AA (all Level A and AA criteria) as the accessibility acceptance baseline; the WCAG 3 draft is not used as a basis for acceptance or contracts
+    level: hard
+    check: manual
+    how: Review requirements documents, contracts, and acceptance checklists to confirm they state "WCAG 2.2 AA"; send them back if they contain phrases like "WCAG 3 certified" or "conforms to WCAG 3"
+    applies: [platform:web]
+    why: WCAG 2.2 is a W3C Recommendation and the reference for both Chinese and international standards (GB/T 37668-2026, EN 301 549); WCAG 3 is still a Working Draft and will change substantially.
+    detail: |
+      - AAA criteria (e.g., 7:1 contrast, 44×44 targets) may be written into requirements as higher project targets, but must be marked as project-defined, not AA requirements.
+      - Projects in China also check against GB/T 37668 (the 2019 edition remains in force until 2027-02-01); products targeting the EU check against EN 301 549. Whether compliance is mandatory and which types of services are covered: see 27.
+      - Desktop and native mobile apps have no directly equivalent standard; perform equivalent checks against the same capability requirements (perceivable, operable, understandable). For platform details, see 29 / 30 / 31.
+    sources: [S01, S03, S23, S24, S25, S26]
+    see: ["27"]
+  - id: A11Y-002
+    title: Passing an automated scan alone is not grounds for conformance; before claiming WCAG conformance, key flows must have records of manual keyboard and screen reader checks
+    level: hard
+    check: manual
+    how: At release review, check that each key flow has a manual check record (tester, date, browser and screen reader, conclusion); flows with only automated scan reports must not be described as "WCAG conformant"
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Whether alt text is accurate, focus order is sensible, and screen reader announcements are understandable can only be judged by a person; axe's own documentation states that automated testing covers only about 57% of WCAG issues on average.
+    detail: |
+      - Screen reader combinations cover at least: NVDA + Chrome or Firefox on Windows, VoiceOver + Safari on macOS; add JAWS when required by contract or used by key users; add TalkBack and iOS VoiceOver when there are mobile users (platform details in 29 / 30).
+      - Each record notes OS, browser, screen reader version, page, tester, date, and conclusion.
+      - For projects in China with users of domestic screen readers or Xinchuang (domestic IT substitution) browsers, list these separately in the test scope.
+    sources: [S06, S07, S08]
+    see: ["04", "29", "30"]
+  - id: A11Y-003
+    title: Run automated accessibility scans on key flows in CI, covering post-interaction states such as open dialogs, form errors, and empty results, not just the initial screen
+    level: soft
+    check: auto
+    how: E2E tests call an axe scan at each key state, filtered by WCAG 2.x A/AA tags, and fail on any violation
+    applies: [platform:web]
+    why: Most accessibility issues appear in post-interaction UI (dialogs, error messages, dynamically loaded content); scanning only the static initial screen misses them.
+    detail: |
+      - Rule tags follow the rule catalog of the axe version in use; after upgrading, verify whether tags have changed.
+      - Exception rules are written in configuration with a reason and expiry date, not casually disabled inside tests.
+    sources: [S07, S08, S20]
+    see: ["04"]
+  - id: A11Y-004
+    title: Controls that can be implemented with native HTML elements (button, a, input, select, label, dialog) are not simulated with div or span plus ARIA
+    level: hard
+    check: auto
+    how: Accessibility lint (e.g., jsx-a11y's no-static-element-interactions, click-events-have-key-events, interactive-supports-focus) fails on error
+    applies: [platform:web]
+    why: Native elements come with keyboard operation, focus, and semantics built in; simulating them with div means filling all of that in yourself, and some part is almost always missed. Wrong ARIA is worse than no ARIA.
+    sources: [S05, S19]
+    see: ["WEB-011"]
+  - id: A11Y-005
+    title: Every interactive element has an accessible name, correct role, and state; where there is a visible text label, the accessible name includes that visible text
+    level: hard
+    check: semi
+    how: axe checks for missing names and roles; in review, verify icon button names, that expanded/selected/disabled states stay in sync, and that aria-label matches the visible text
+    applies: [platform:web]
+    why: Screen reader and voice control users find controls by name; when the name differs from the visible text, voice users say the words they see and can't activate the control (WCAG 2.5.3, 4.1.2).
+    sources: [S01, S05]
+  - id: A11Y-006
+    title: Meaningful images and icons have accurate alt text; purely decorative images use empty alt or are hidden from screen readers
+    level: hard
+    check: semi
+    how: axe checks for missing alt; whether alt text is correct is judged by the reviewer
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Screen reader users can't see images, so without alt text the information is lost; text on decorative images creates noise (WCAG 1.1.1).
+    detail: |
+      - Charts must also provide a data table or a text conclusion, not just "chart".
+      - For alt text of images in Markdown documents, see DOC-009.
+    sources: [S01]
+    see: ["DOC-009"]
+  - id: A11Y-007
+    title: Every page has a descriptive title, a sensible heading hierarchy and landmark regions, and a skip-to-main-content link; link text makes its destination clear
+    level: hard
+    check: semi
+    how: axe checks rules such as document-title, heading-order, landmark, and bypass; in review, look for links like "click here" or "more" that don't say where they go
+    applies: [platform:web]
+    why: Screen reader and keyboard users rely on headings, landmarks, and skip links to navigate quickly; otherwise they have to listen from the top of every page (WCAG 1.3.1, 2.4.1, 2.4.2, 2.4.4).
+    detail: |
+      - In single-page apps, update the page title after route changes, and either move focus to the new page's main heading or use a status announcement to say the page has changed.
+    sources: [S01]
+  - id: A11Y-008
+    title: Status changes that don't move focus (saved successfully, number of search results, errors) must be perceivable by screen readers; use live regions only for content that truly needs announcing, and don't announce repeatedly character by character
+    level: hard
+    check: semi
+    how: E2E asserts that status regions have role="status" or role="alert"; manual screen reader check of announcement count and content
+    applies: [platform:web]
+    why: Screen reader users can't see messages popping up in a corner of the page; but overusing live announcements (e.g., announcing every character of streaming output) makes the page unusable (WCAG 4.1.3).
+    sources: [S01]
+  # ── Keyboard and focus ──
+  - id: A11Y-009
+    title: All functionality can be completed with the keyboard alone, with no keyboard traps you can enter but not leave, and focus order matches reading order
+    level: hard
+    check: semi
+    how: E2E walks through key flows with Tab / Shift+Tab and asserts focus order; manually unplug the mouse and go through once
+    applies: [platform:web, platform:desktop]
+    why: Screen reader, switch device, and voice control users all depend on the keyboard interface; a single unreachable button can block an entire flow (WCAG 2.1.1, 2.1.2, 2.4.3).
+    sources: [S01, S04]
+  - id: A11Y-010
+    title: Focus indicators are always visible; the browser's default focus style is not removed without a replacement; focused elements are not fully obscured by sticky headers or overlays
+    level: hard
+    check: semi
+    how: Style lint finds code that sets outline to none or 0 without a `:focus-visible` replacement style; manually scroll and open overlays to check for obscuring
+    applies: [platform:web]
+    why: Keyboard users can't operate anything if they can't see where focus is (WCAG 2.4.7, 2.4.11, both AA).
+    detail: |
+      - The focus indicator's color itself must meet 3:1 non-text contrast (see A11Y-021).
+      - WCAG 2.4.13 Focus Appearance (AAA) gives more specific area and contrast requirements and can serve as a higher project target.
+      - For specific focus style tokens, see 08.
+    sources: [S01]
+    see: ["08"]
+  - id: A11Y-011
+    title: When a modal dialog opens, focus moves into it, Tab cycles within it, Esc closes it (where applicable), focus returns to the triggering element on close, and content behind it is inert
+    level: hard
+    check: auto
+    how: E2E tests open the dialog, cycle with Tab, press Esc, and assert focus returns to the trigger button
+    applies: [platform:web]
+    why: If focus stays in the background or is lost on close, keyboard and screen reader users get lost.
+    detail: |
+      - Prefer the native `<dialog>` with `showModal()` or the dialog from a mature base component library; don't write your own focus trap (see WEB-011).
+    sources: [S04]
+    see: ["WEB-011"]
+  - id: A11Y-012
+    title: Composite components such as menus, comboboxes, tabs, trees, and grids implement the WAI-ARIA APG keyboard patterns and are tested key by key against the pattern
+    level: soft
+    check: semi
+    how: In review, operate each item in the keyboard table for the corresponding APG pattern; component tests cover arrow keys, Home/End, Esc, Enter/Space
+    applies: [platform:web]
+    why: Adding ARIA roles without the matching keyboard behavior means the screen reader tells users "this is a menu" but the keys do nothing.
+    detail: |
+      - Don't apply `role="menu"` to ordinary site navigation.
+      - In a combobox, Enter pressed during IME composition must not be treated as confirming an option (see A11Y-015).
+    sources: [S04]
+    see: ["WEB-011"]
+  - id: A11Y-013
+    title: Keyboard shortcuts that use only a single letter, number, or symbol key must be able to be turned off, remapped to include a modifier key, or active only when the relevant component has focus
+    level: hard
+    check: semi
+    how: Check that every single-character shortcut in the shortcut registry specifies how to turn it off, remap it, or its scope; E2E verifies it no longer fires once turned off
+    applies: [platform:web, platform:desktop]
+    why: Speech input users trigger single-character shortcuts while speaking, causing accidental actions (WCAG 2.1.4).
+    sources: [S10]
+  - id: A11Y-014
+    title: Keyboard shortcuts are registered centrally and scoped, checked for conflicts when added; every shortcut has a visible menu item or button as an alternative entry point; browser and system conventions such as copy/paste, back, and refresh are not overridden
+    level: soft
+    check: semi
+    how: Maintain a shortcut registry (command, scope, default keys per platform, alternative entry point, whether remappable), with tests checking for conflicts; in review, check whether components add keyboard listeners directly to window
+    applies: [platform:web, platform:desktop]
+    why: When each page listens on its own, shortcuts easily conflict, can't be discovered, and break platform operations users are familiar with.
+    detail: |
+      - Show ⌘ on macOS and Ctrl on other platforms; shortcut help and the command palette show the actual current key bindings.
+      - Use `KeyboardEvent.key` to determine which character was pressed and `code` for the physical position; don't assume everyone uses a US keyboard layout.
+    sources: [S12]
+  - id: A11Y-015
+    title: While an IME is composing (`isComposing` is true or `keyCode` is 229), don't execute shortcuts, submit forms, or confirm options; inside input fields, don't respond to global shortcuts by default
+    level: hard
+    check: auto
+    how: Component tests dispatch compositionstart/compositionend and keydown events during composition, and assert that no submit or command is triggered
+    applies: [platform:web, platform:desktop]
+    why: Chinese and Japanese users press Enter to confirm candidate characters; if that is treated as submit or select, half-finished content is sent or the wrong item is chosen.
+    sources: [S12]
+  # ── Pointer and touch ──
+  - id: A11Y-016
+    title: Pointer and touch targets are at least 24×24 CSS px, or meet a WCAG 2.5.8 exception (sufficient spacing, an equivalent conforming control on the page, inline links, user-agent default controls, essential presentation)
+    level: hard
+    check: semi
+    how: axe's target-size rule finds candidates; spacing and exceptions are confirmed by a person
+    applies: [platform:web]
+    why: With targets too small, users with tremors, touchscreen users, or users with low vision easily tap the wrong thing (WCAG 2.5.8, AA).
+    detail: |
+      - Determining the spacing exception: draw a circle 24 CSS px in diameter centered on the bounding box of each undersized target; the circle must not intersect another target or another undersized target's circle.
+    sources: [S01, S02]
+  - id: A11Y-017
+    title: Primary actions and common actions on touchscreens have targets of 44×44 CSS px
+    level: soft
+    check: semi
+    how: In review, spot-check the actual hit area of primary buttons; visualization tools can highlight undersized targets
+    applies: [platform:web, platform:mobile]
+    why: 24 px is the AA minimum, not a comfortable size; larger targets noticeably reduce mis-taps.
+    ref_value: 44×44 CSS px comes from WCAG 2.5.5 Target Size (Enhanced, AAA) and is a higher project target, not an AA requirement. For native platform recommended sizes, see 29 / 30.
+    sources: [S02]
+    see: ["29", "30"]
+  - id: A11Y-018
+    title: Every operation that requires dragging has a single-click alternative; features that appear only on hover can also be triggered by keyboard and touch; content that pops up on hover or focus is dismissible, hoverable, and doesn't disappear on its own
+    level: hard
+    check: semi
+    how: In review, list all drag and hover interactions and confirm the alternative for each; manually walk through once each with keyboard and touchscreen
+    applies: [platform:web]
+    why: Many users can't drag precisely, and touchscreens have no hover; if a tooltip disappears as soon as the mouse moves away, screen magnifier users can never see all of it (WCAG 2.5.7, 1.4.13, both AA).
+    detail: |
+      - Drag-to-reorder can be paired with "Move up / Move down" buttons or a "Move to…" menu.
+    sources: [S01]
+  # ── Visual presentation ──
+  - id: A11Y-019
+    title: Contrast between body text and background is at least 4.5:1, and at least 3:1 for large text (at least 18pt, or at least 14pt bold)
+    level: hard
+    check: auto
+    how: axe's color-contrast rule; design tokens validate each foreground/background color pair with a contrast tool when defined
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Low contrast is one of the most common accessibility issues; users with low vision and users in bright light can't read it (WCAG 1.4.3, AA).
+    detail: |
+      - 18pt is about 24 CSS px; 14pt is about 18.66 CSS px.
+      - Exceptions: disabled controls, purely decorative text, and text in logos and brand names.
+      - Automated tools can't calculate accurately when text sits over images or gradients; manually verify the worst spot.
+      - AAA (1.4.6) requires 7:1 for body text and 4.5:1 for large text, which can serve as a higher project target.
+      - Re-validate dark themes and high-contrast modes separately. For specific color tokens, see 08.
+    sources: [S01]
+    see: ["08"]
+  - id: A11Y-020
+    title: Text enlarged to 200% loses no content or functionality; at 320 CSS px width, content reflows without requiring scrolling in both directions; layout doesn't break when users increase line and letter spacing
+    level: hard
+    check: semi
+    how: E2E runs key flows at 320 px width and 200% text zoom and takes screenshots; manually check for truncation and overlap
+    applies: [platform:web]
+    why: Users with low vision rely on magnification to read; if magnified content is truncated or requires scrolling back and forth horizontally, it is unusable (WCAG 1.4.4, 1.4.10, 1.4.12, all AA).
+    detail: |
+      - 320 CSS px width is equivalent to a 1280 px wide window zoomed to 400%.
+      - Inherently two-dimensional content such as large tables, maps, charts, and editors may be exempt, but functionality must remain usable.
+      - Don't hard-code heights or single-line truncation on text containers (see also A11Y-044).
+    sources: [S01, S09]
+  - id: A11Y-021
+    title: Control boundaries, state indicators such as selection and focus, and graphics in charts that are required to understand the content have a contrast of at least 3:1 against adjacent colors
+    level: hard
+    check: semi
+    how: Design tokens validate border and state colors; in review, check input borders, checkboxes, and chart lines against screenshots
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: If users can't see input boundaries and checked states, they don't know where to click or what they've selected (WCAG 1.4.11, AA).
+    sources: [S01]
+    see: ["08"]
+  - id: A11Y-022
+    title: Don't convey information by color alone; errors, required fields, statuses, and chart series are also distinguished with text, icons, or patterns
+    level: hard
+    check: manual
+    how: In review, convert screenshots to grayscale and check whether the information is still distinguishable; check with a screen reader that statuses have text
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Color-blind users can't tell red from green, and screen readers can't read colors (WCAG 1.4.1, A). Using only emoji to express status has the same problem.
+    sources: [S01]
+  # ── Motion ──
+  - id: A11Y-023
+    title: Moving, blinking, or scrolling content that starts automatically and lasts more than 5 seconds offers pause, stop, or hide; no content flashes more than three times in one second
+    level: hard
+    check: manual
+    how: In review, list carousels, marquees, autoplay videos, and animations and check for pause controls; manually check flashing content
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Automatically moving content disrupts reading for users with attention disorders; rapid flashing can trigger photosensitive seizures (WCAG 2.2.2, 2.3.1, both A).
+    sources: [S01]
+  - id: A11Y-024
+    title: When the system "reduce motion" setting is on, disable or replace non-essential translation, scaling, parallax, and auto-scrolling animations
+    level: soft
+    check: semi
+    how: E2E emulates the system reduce-motion setting (prefers-reduced-motion set to reduce) and checks that key animations are disabled; review whether animation code reads this setting
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Large motion can make users with vestibular disorders dizzy and nauseous. WCAG 2.3.3 (AAA) requires that interaction-triggered animation can be disabled; the system setting is a preference the user has already expressed.
+    detail: |
+      - Transitions that don't move things, such as fades, can be kept.
+      - For animation duration and other tokens, see 08.
+    sources: [S01]
+    see: ["08"]
+  # ── Forms and authentication ──
+  - id: A11Y-025
+    title: Every input has a visible label; format requirements are shown before input; on error, explain next to the field and allow jumping from a summary at the top of the page to the field; keep entered content after a failed submission
+    level: hard
+    check: semi
+    how: axe checks label association; E2E submits invalid data and asserts that errors are associated with fields (aria-describedby), focus moves to the summary, and input is not cleared
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: With only a placeholder as the label, the requirement disappears as soon as the user types; if errors aren't next to the field and input is cleared, users have to start over (WCAG 3.3.1, 3.3.2).
+    detail: |
+      - Don't report errors while the user is still typing; don't validate during IME composition.
+      - Frontend validation is only for user experience; the server must validate again.
+      - Information already entered in the same flow is not required again (auto-filled or selectable), except where re-entry is essential for security (WCAG 3.3.7, A); in multi-step flows, keep the help entry point in a consistent location (WCAG 3.2.6, A).
+    sources: [S01, S13]
+  - id: A11Y-026
+    title: "Submissions involving legal commitments, payments, or modifying or deleting user data satisfy at least one of: reversible, reviewable before submission, or requiring explicit confirmation"
+    level: hard
+    check: manual
+    how: In review, list these operations and confirm for each that undo, a review page, or a confirmation step exists
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Errors of this kind have serious consequences and are hard to recover from (WCAG 3.3.4, AA).
+    sources: [S01]
+  - id: A11Y-027
+    title: Login does not require users to memorize, transcribe, or solve puzzles; pasting and password manager autofill are allowed
+    level: hard
+    check: auto
+    how: E2E pastes into login and verification code fields and asserts success; check that fields don't disable autocomplete or intercept the paste event
+    applies: [platform:web, platform:mobile]
+    why: Blocking paste or requiring verification codes to be copied by hand shuts out users with cognitive disabilities and pushes everyone toward weak passwords (WCAG 3.3.8, AA).
+    detail: |
+      - Image CAPTCHAs must have an alternative that doesn't rely on a cognitive function test (e.g., recognizing objects or user-provided content is acceptable; transcribing distorted text is not).
+      - For overall login and session design, see 19.
+    sources: [S11]
+    see: ["19"]
+  - id: A11Y-028
+    title: Every action produces a result that is visible and perceivable by screen readers (processing, success, failure, and next steps); no silent failures; important errors don't use only toasts that disappear automatically
+    level: hard
+    check: semi
+    how: E2E simulates success and failure and asserts that status messages appear; in review, check whether errors are placed only in messages that disappear after a few seconds
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Without feedback, users click repeatedly or assume success; screen reader and keyboard users often miss auto-dismissing messages (WCAG 4.1.3).
+    detail: |
+      - Graded interruption levels: use toasts for success, put things needing attention in the page's status area, and use blocking dialogs only for dangerous operations.
+      - Important notifications can be reviewed later (e.g., notification center, task list).
+      - For coverage requirements of page states (loading, empty, error, no permission), see WEB-017, WEB-018.
+    sources: [S01]
+    see: ["WEB-017", "WEB-018"]
+  - id: A11Y-029
+    title: Long-running tasks show real status (queued, running, succeeded, failed, canceled); when there is no measurable total, use indeterminate progress rather than an estimated percentage
+    level: soft
+    check: semi
+    how: Review the data source of progress bars; test that after a disconnect the status is re-queried rather than reusing stale values
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: A fabricated "99%" erodes user trust and leaves users unable to decide whether to wait.
+    detail: |
+      - Cancellation distinguishes "cancellation requested" from "actually canceled".
+      - For long-running task API fields, see 16.
+    see: ["16"]
+  - id: A11Y-030
+    title: Routine reversible actions offer undo rather than a confirmation every time; for irreversible actions or those with external effects, the confirmation states the action, target, quantity, and consequences
+    level: soft
+    check: manual
+    how: In review, check that confirmation copy includes the specific target and consequences and that buttons are specific verbs; check that undoable actions provide an undo entry point
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Asking "Are you sure?" every time trains users to click OK habitually, so it fails to stop them when something is actually dangerous.
+    detail: |
+      - Example: "Permanently delete 3 files? They cannot be recovered after deletion." Buttons say "Delete permanently" and "Cancel", not "OK".
+      - Actions with a recovery period, such as moving to the trash, execute immediately and offer "Undo".
+  - id: A11Y-031
+    title: Optimistic updates (showing success before the server responds) are used only for low-risk, reversible actions, and roll back with notice on failure; payments, authorizations, deletions, outbound sends, and the like show success only after server confirmation
+    level: soft
+    check: semi
+    how: E2E simulates API failures, delays, and conflicts, and asserts the UI rolls back and notifies; in review, check that high-risk actions don't use optimistic updates
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Showing success when the server failed deceives users and causes data mismatches.
+  - id: A11Y-032
+    title: Multi-step forms and long editing sessions auto-save drafts; leaving in ways that would lose unsaved content (closing the page, going back, switching routes) prompts first
+    level: soft
+    check: semi
+    how: E2E refreshes, goes back, and recovers from a network drop mid-entry, and asserts content is preserved or a prompt appears
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Losing a long stretch of entered content to an accidental back tap is one of the most frustrating problems for users.
+  # ── Copy ──
+  - id: A11Y-033
+    title: Buttons and menus use "verb + object"; the same meaning uses the same word across the whole product, distinguishing delete, remove, archive, and deactivate; maintain a UI glossary
+    level: soft
+    check: semi
+    how: Keep the glossary in the repository, and have a copy-check script flag banned synonyms listed in the glossary; in review, check for generic "OK" or "Submit"
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: "\"OK\" doesn't tell users what will happen; if the same action has different names, users will think they are two different things."
+    detail: |
+      - Examples: "Save draft", "Submit for approval", "Delete 3 files".
+      - For naming consistency in code, see COD-001; for documentation writing, see 05.
+    see: ["COD-001", "05"]
+  - id: A11Y-034
+    title: Error messages explain what went wrong, why (when known), and how to recover, without blaming the user; don't show users stack traces, SQL, internal paths, or secrets; a request ID may be included to help with reporting
+    level: hard
+    check: semi
+    how: E2E triggers API errors and scans page text for patterns of stack traces, SQL fragments, and file paths; copy is checked against the templates by the reviewer
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: "\"Operation failed\" doesn't help users; exposing internal information gives attackers clues."
+    detail: |
+      Common templates:
+      - Format: "“{field}” is not in the right format. Please enter it like {example}."
+      - Permission: "Can't {action}: the current account doesn't have {permission}. Contact {role} to get access."
+      - Temporary failure: "{action} didn't complete. What you entered has been kept; please try again. If this keeps happening, please provide request ID {id}."
+      - Conflict: "This record has been modified by someone else. Please review the latest version before submitting."
+      The backend returns stable error codes and the frontend is responsible for translating them into the user's language (error format in 16); for security requirements on information leakage, see 25.
+    sources: [S13]
+    see: ["16", "25"]
+  - id: A11Y-035
+    title: AI-generated content is distinguished in the UI as "generating", "draft pending review", "human-confirmed", and "executed"; suggestions are not shown as executed; don't show confidence percentages without a calibration basis or citations that can't be found
+    level: soft
+    check: manual
+    how: In review, check that status labels on AI output correspond one-to-one with the actual backend state; spot-check that citation links open
+    applies: [kind:llm]
+    why: Users take results that look finished as true; fabricated confidence and citations create a false sense of authority.
+    see: ["24", "06"]
+  - id: A11Y-036
+    title: Chinese typography follows the punctuation and line-breaking rules of the W3C Requirements for Chinese Text Layout (CLReq); don't force spaces between Chinese and Latin text with a global regex
+    level: soft
+    check: manual
+    how: Prepare a set of mixed Chinese-Latin samples containing code, URLs, numbers, and units, and manually proofread the rendered result
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Crude regexes break URLs, code, and numbers; Chinese punctuation and line breaking have their own rules.
+    detail: |
+      - For line breaking, prefer native CSS properties (line-break, word-break, overflow-wrap), tested in target browsers.
+      - CLReq is a W3C Working Group Note; it is a technical reference, not a mandatory provision.
+    sources: [S18]
+  # ── Internationalization ──
+  - id: A11Y-037
+    title: For interfaces that must support multiple languages, all user-visible text (including aria-label, title, alt, errors, empty states, and email and notification templates) goes into resource files, not hard-coded
+    level: hard
+    check: auto
+    how: Lint rules (e.g., the "no literal strings" rule that comes with the i18n library) scan components and templates and fail on any hit; exemptions are written in configuration with a reason
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: Missing even one spot produces a mixed-language UI; accessible names and email templates are the easiest to miss.
+    detail: |
+      - Even single-language projects are advised to externalize strings from day one; extracting them later costs far more than doing it from the start.
+      - For i18n library choice, see 07; for bundling language packs with the app rather than fetching them from the public internet at runtime, see WEB-016.
+    see: ["07", "WEB-016"]
+  - id: A11Y-038
+    title: Translate complete sentences; each message has a stable ID and context notes for translators; don't concatenate translated fragments and variables into sentences
+    level: hard
+    check: semi
+    how: Lint finds code that concatenates translation function results with strings or variables using + or template literals; review whether new messages include notes
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: Word order differs across languages, so concatenated sentences don't make sense in other languages; without context, translators can't tell whether "Open" is a verb or a state.
+    detail: |
+      - Wrong: `t('deleted') + count + t('files')`. Right: a single message `Deleted {count} files`, with variables as placeholders.
+    sources: [S14]
+  - id: A11Y-039
+    title: Plurals, gender, and select branches use ICU MessageFormat or the CLDR plural rules built into the i18n library, not `count === 1` checks
+    level: hard
+    check: semi
+    how: Lint finds singular/plural checks such as `=== 1` or `> 1` near translation calls; resource compilation verifies that every language has complete plural branches
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: Plural rules vary widely across languages (some have 6 forms); distinguishing only "1 item" and "many items" is wrong in many languages.
+    detail: |
+      - ICU syntax: `{count, plural, one {# file} other {# files}}`; Chinese needs only `other`.
+      - By default i18next uses its own JSON plural suffixes (`_one`, `_other`), which also use CLDR rules underneath but are not ICU syntax; use only one message format per project.
+    sources: [S14, S15]
+  - id: A11Y-040
+    title: Dates, times, numbers, percentages, currencies, lists, and sorting use `Intl` or an equivalent localization API, with language, time zone, and currency passed explicitly
+    level: hard
+    check: semi
+    how: Lint finds `toLocaleString()` without arguments, hand-written date format strings, and thousands-separator handling; E2E runs in at least two languages and two time zones
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: Date order, decimal points, thousands separators, and currency symbol positions differ by locale, so hand-written rules are bound to be wrong; without arguments, the result depends on the settings of the machine it runs on.
+    detail: |
+      - Language (e.g., `zh-CN`), time zone (e.g., `Asia/Shanghai`), and currency (e.g., `CNY`) are three independent parameters: a Chinese UI doesn't mean amounts are necessarily in RMB or times necessarily in Beijing time.
+      - Let users set and change language, region, and time zone separately; don't infer one from another, and don't use them to infer other aspects of the user's identity.
+      - Server and Node runtimes must include full internationalization data; verify in the target environment before deployment.
+      - For how points in time are stored and transmitted, see COD-026, COD-027; for frontend date calculations, see WEB-020.
+    sources: [S16]
+    see: ["COD-026", "COD-027", "WEB-020"]
+  - id: A11Y-041
+    title: The page root element's lang matches the current UI language and is updated when the language changes; embedded passages in other languages are marked with their own lang
+    level: hard
+    check: auto
+    how: axe's html-has-lang and html-lang-valid rules; E2E asserts `document.documentElement.lang` after switching languages
+    applies: [platform:web]
+    why: Screen readers choose pronunciation based on lang, so if it's wrong, Chinese gets read out with English rules; browser line breaking and font selection also depend on it (WCAG 3.1.1 A, 3.1.2 AA).
+    sources: [S01]
+  - id: A11Y-042
+    title: When enabling right-to-left languages (e.g., Arabic, Hebrew), control direction with the dir attribute, use CSS logical properties (margin-inline-start, etc.) instead of left/right in styles, and isolate user input and mixed content with dir="auto" or bdi
+    level: hard
+    check: semi
+    how: Style lint flags physical direction properties (left, right, margin-left, etc.); run key flows in an RTL language, take screenshots, and check manually
+    applies: [platform:web]
+    why: Layouts with hard-coded left/right all break under RTL; unisolated usernames and numbers scramble the display order of the whole sentence.
+    detail: |
+      - Don't mirror the entire screen: whether numbers, brand logos, media playback progress, code, timelines, etc. are mirrored is decided by localization review.
+      - Projects that don't support RTL languages are still advised to use logical properties in new code, so later retrofitting costs less.
+    sources: [S17]
+  - id: A11Y-043
+    title: "CI checks translation resources: missing keys, extra keys, inconsistent placeholders across languages, missing plural branches, message syntax errors; failure on any item blocks"
+    level: hard
+    check: auto
+    how: Run the i18n library's extract and compile or validate commands in CI, and compare keys and placeholders across language files
+    applies: [platform:web, platform:desktop, platform:mobile, kind:service]
+    why: Wrong placeholders make pages throw errors or display raw key names; discovering missing translations after release is too late.
+    detail: |
+      - When a translation is missing for a language at runtime, fall back to the designated default language and log it; don't display key names like `order.submit.button`.
+      - Translation records distinguish "untranslated", "machine draft", and "reviewed"; a machine draft counts as done only after human review.
+    see: ["04"]
+  - id: A11Y-044
+    title: Run key pages with pseudo-localization (lengthened text, accented characters, start and end markers) to check for hard-coding, truncation, and concatenation; text containers don't have fixed widths or heights or forced single lines
+    level: soft
+    check: auto
+    how: Generate a pseudo-language pack in CI and run key flows with screenshots; in review, check text containers for fixed heights and single-line truncation
+    applies: [platform:web, platform:desktop, platform:mobile]
+    why: Without waiting for real translations, you can discover early which text isn't in resource files and which layouts can't fit translated text.
+    ref_value: Pseudo-localization usually lengthens text by 30%–40%, based on the typical expansion of languages such as German and Russian relative to English; translating from Chinese source copy into English expands even more, so projects adjust according to target languages.
+    see: ["04"]
+choices:
+  - category: Web accessibility acceptance baseline
+    pick: WCAG 2.2 AA (all A and AA criteria) + WAI-ARIA APG as the interaction reference for complex components
+    alternatives:
+      - { name: GB/T 37668-2026, when: "Projects in China; the 2019 edition remains in force until it takes effect on 2027-02-01; it is a non-equivalent adoption of WCAG 2.2, so differences must be compared clause by clause against the text" }
+      - { name: EN 301 549, when: "Targeting the EU market or public sector; the latest V4.1.1 was published on 2026-09-02, but until it is cited in the Official Journal of the EU, presumption of conformity is still based on V3.2.1" }
+    avoid:
+      - { name: WCAG 3 draft, why: "Still a Working Draft that will change substantially; cannot be used as a basis for acceptance" }
+      - { name: Automated scan scores (e.g. the Lighthouse accessibility score), why: "Cover only some automatically detectable issues; do not indicate conformance" }
+    sources: [S01, S03, S04, S23, S26]
+  - category: Accessibility static checks (lint)
+    pick: eslint-plugin-jsx-a11y (React / JSX projects)
+    alternatives:
+      - { name: The framework's corresponding accessibility lint plugin, when: "Non-JSX projects such as Vue, Angular, Svelte" }
+    avoid:
+      - { name: Relying only on manual review, why: "Machines reliably catch issues like missing labels and clickable divs" }
+    license: MIT
+    sources: [S19]
+  - category: Automated page accessibility scanning
+    pick: axe-core
+    alternatives:
+      - { name: Other checkers implementing W3C ACT rules, when: When already integrated with another quality platform }
+    avoid:
+      - { name: Treating a passing scan as proof of compliance, why: Finds only about half of issues on average }
+    license: MPL-2.0. Running it standalone as a test tool carries no extra obligations; if axe-core is bundled into a distributed product, modified files must be published under the MPL (file-level); see 27 for interpretation.
+    sources: [S08]
+  - category: Accessibility checks in E2E
+    pick: Playwright + @axe-core/playwright
+    alternatives:
+      - { name: Cypress + cypress-axe, when: The project has standardized on Cypress }
+    avoid:
+      - { name: Scanning only the initial page load state, why: "Post-interaction states such as dialogs and error messages are where issues concentrate" }
+    license: Playwright is Apache-2.0; @axe-core/playwright is MPL-2.0
+    notes: For E2E framework choice, see 04; intranet and offline environments need browser binaries mirrored in advance.
+    sources: [S07, S20]
+  - category: Manual screen reader checks
+    pick: NVDA + Chrome / Firefox on Windows; VoiceOver + Safari on macOS
+    alternatives:
+      - { name: JAWS, when: Required by contract or used by key users }
+      - { name: "Android TalkBack, iOS VoiceOver", when: "There are mobile users; platform details in 29 / 30" }
+    avoid:
+      - { name: Only clicking with a mouse in desktop Chrome, why: Cannot find keyboard or screen reader issues }
+  - category: Keyboard shortcuts
+    pick: With few shortcuts, use native KeyboardEvent + an in-project shortcut registry
+    alternatives:
+      - { name: react-hotkeys-hook, when: "React projects with many shortcuts that need scopes" }
+      - { name: hotkeys-js, when: "Non-React projects with many shortcuts" }
+    avoid:
+      - { name: Each component adding its own keyboard listener to window, why: "Conflicts, undiscoverable, ignores IME" }
+    license: react-hotkeys-hook and hotkeys-js are both MIT
+    notes: For choosing components such as command palettes, see 07.
+  - category: Message format (plurals, select)
+    pick: ICU MessageFormat
+    alternatives:
+      - { name: i18next's built-in JSON plural suffixes, when: The project already uses i18next and doesn't need complex nested selects }
+    avoid:
+      - { name: Writing your own plural logic, why: "Rules differ greatly across languages; bound to be wrong" }
+      - { name: Mixing two message formats in one project, why: Neither translators nor tools can validate consistently }
+    notes: For i18n library choice, see 07.
+    sources: [S14, S15]
+  - category: Localized formatting
+    pick: Platform Intl (DateTimeFormat, NumberFormat, PluralRules, RelativeTimeFormat, ListFormat, Collator) + BCP 47 language tags + IANA time zone names
+    avoid:
+      - { name: "Hand-written date formats, thousands separators, and currency symbols", why: "Rules differ by locale; something will inevitably be missed" }
+      - { name: toLocaleString() without a locale argument, why: The result depends on the settings of the machine it runs on }
+    sources: [S16]
+  - category: Translation management
+    pick: At small scale, manage resource files in Git and review via PR
+    alternatives:
+      - { name: Weblate, when: "Many languages and translators, need self-hosting and two-way sync with Git" }
+      - { name: Tolgee, when: "Need in-context translation in the UI; first review the enterprise feature license and free-tier seat limits" }
+    avoid:
+      - { name: Adopting a large translation platform at the start of a project, why: Deployment and maintenance costs outweigh the benefits }
+    license: Weblate is GPL-3.0-or-later (run as a standalone service, not distributed with the product); Tolgee's core is Apache-2.0, enterprise features are under a proprietary license, and the free self-hosted edition has seat limits; refer to the official website
+    sources: [S21, S22]
+  - category: Chinese typography
+    pick: W3C CLReq + native CSS line-breaking properties + manual proofreading
+    avoid:
+      - { name: Global regex inserting spaces between Chinese and Latin text, why: "Breaks URLs, code, and numbers" }
+    sources: [S18]
+antipatterns:
+  - { bad: "Using `<div onClick>` as a button, then adding `role=\"button\"`", instead: "Use a native `<button>`" }
+  - { bad: Assuming accessibility is done once aria-label is added everywhere, instead: Native semantics + APG patterns + automated scanning + manual screen reader testing }
+  - { bad: Declaring WCAG AA conformance because axe is all green, instead: "Automated scanning + manual keyboard and screen reader checks, recorded" }
+  - { bad: Treating 24 px as the optimal touch size, instead: "24 px is the AA minimum; make primary actions 44 px" }
+  - { bad: "Removing the focus ring with `outline: none` without a replacement", instead: "Design a clear focus style with `:focus-visible`" }
+  - { bad: "Popping up \"Are you sure?\" for every action", instead: "Offer undo for reversible actions; state consequences before confirming irreversible ones" }
+  - { bad: Showing important errors only in toasts that disappear after a few seconds, instead: Place them in an error area that stays viewable }
+  - { bad: Progress bars estimating percentages from elapsed time or token speed, instead: Use indeterminate progress when there is no real total }
+  - { bad: "Globally listening for Ctrl+K and Enter, ignoring IME", instead: "Register shortcuts, scope them, don't fire during composition" }
+  - { bad: Concatenating translated fragments into sentences, instead: Whole-sentence messages with placeholders }
+  - { bad: "`count === 1 ? '1 file' : 'files'`", instead: ICU plural rules }
+  - { bad: Defaulting to RMB and Beijing time because the UI is in Chinese, instead: "Set language, time zone, and currency separately" }
+  - { bad: Horizontally flipping the entire screen for RTL languages, instead: dir + CSS logical properties + an exceptions list }
+  - { bad: Forcing spaces between Chinese and Latin text with a regex, instead: CLReq + manual proofreading }
+sources:
+  - { id: S01, title: "Web Content Accessibility Guidelines (WCAG) 2.2", url: "https://www.w3.org/TR/WCAG22/", publisher: W3C, date: 2024-12-12, kind: standard, checked: 2026-11-13 }
+  - { id: S02, title: "Understanding SC 2.5.8: Target Size (Minimum)", url: "https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum", publisher: W3C, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S03, title: "W3C Accessibility Guidelines (WCAG) 3.0 (Working Draft)", url: "https://www.w3.org/TR/wcag3/", publisher: W3C, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S04, title: "WAI-ARIA APG: Developing a Keyboard Interface", url: "https://www.w3.org/WAI/ARIA/apg/practices/keyboard-interface/", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S05, title: "MDN: ARIA", url: "https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: Selecting Web Accessibility Evaluation Tools, url: "https://www.w3.org/WAI/test-evaluate/tools/selecting/", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S07, title: "Playwright: Accessibility testing", url: "https://playwright.dev/docs/accessibility-testing", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: axe-core, url: "https://github.com/dequelabs/axe-core", publisher: Deque, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "Understanding SC 1.4.10: Reflow", url: "https://www.w3.org/WAI/WCAG22/Understanding/reflow.html", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S10, title: "Understanding SC 2.1.4: Character Key Shortcuts", url: "https://www.w3.org/WAI/WCAG22/Understanding/character-key-shortcuts", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S11, title: "Understanding SC 3.3.8: Accessible Authentication (Minimum)", url: "https://www.w3.org/WAI/WCAG22/Understanding/accessible-authentication-minimum.html", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: "MDN: KeyboardEvent", url: "https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "GOV.UK Design System: Error message", url: "https://design-system.service.gov.uk/components/error-message/", publisher: GOV.UK, date: 2024-01, kind: case, checked: 2026-11-13 }
+  - { id: S14, title: "ICU User Guide: Formatting Messages", url: "https://unicode-org.github.io/icu/userguide/format_parse/messages/", publisher: Unicode, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "i18next: Plurals", url: "https://www.i18next.com/translation-function/plurals", publisher: i18next, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "FormatJS: React Intl Components", url: "https://formatjs.github.io/docs/react-intl/components/", publisher: FormatJS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "MDN: CSS logical properties and values", url: "https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Logical_properties_and_values", publisher: MDN, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Requirements for Chinese Text Layout", url: "https://www.w3.org/TR/clreq/", publisher: W3C, date: 2026-11-04, kind: standard, checked: 2026-11-13 }
+  - { id: S19, title: eslint-plugin-jsx-a11y, url: "https://github.com/jsx-eslint/eslint-plugin-jsx-a11y/releases", publisher: jsx-eslint, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "axe-core-npm (including @axe-core/playwright)", url: "https://github.com/dequelabs/axe-core-npm/releases", publisher: Deque, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Weblate, url: "https://github.com/WeblateOrg/weblate", publisher: Weblate, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "Tolgee: Self-hosted pricing", url: "https://tolgee.io/pricing/self-hosted", publisher: Tolgee, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "GB/T 37668-2026 Information technology — Technical requirements and testing methods for accessibility of internet content", url: "https://std.samr.gov.cn/gb/search/gbDetailed?id=%2B5RvluIDeD0%3D&mode=p", publisher: "State Administration for Market Regulation; Standardization Administration of China", date: 2026-10-30, kind: standard, checked: 2026-11-14 }
+  - { id: S24, title: "Law of the People's Republic of China on the Construction of Barrier-Free Environments", url: "https://gxca.miit.gov.cn/zwgk/zcwj/flfg/art/2024/art_340a68cb6a8e45ae81c121630dd37346.html", publisher: Standing Committee of the National People's Congress, date: 2023-06-28, kind: standard, checked: 2026-11-13 }
+  - { id: S25, title: "Directive (EU) 2019/882 (European Accessibility Act)", url: "https://eur-lex.europa.eu/eli/dir/2019/882/oj", publisher: European Union, date: 2019-04-17, kind: standard, checked: 2026-11-13 }
+  - { id: S26, title: EN 301 549 V4.1.1 published, url: "https://nda.ie/news/en301549-published", publisher: National Disability Authority (Ireland), date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - "Clause-by-clause differences between GB/T 37668-2026 and WCAG 2.2 have not been checked against the text (verified from the standard's information page: published 2026-10-30, effective 2027-02-01, non-equivalent adoption of ISO/IEC 40500:2025, fully replaces the 2019 edition)."
+  - "The specific provisions of the Law on the Construction of Barrier-Free Environments concerning internet information services (the report cites Article 32, covering government services and services built with public funds) have not been verified; applicability is determined in 27."
+  - "The European Accessibility Act applies from 2025-06-28 (per the report; not re-verified online this round); when EN 301 549 V4.1.1 will be cited in the Official Journal of the EU and become the basis for presumption of conformity is to be confirmed."
+  - "The exact date of the latest WCAG 3 Working Draft has not been verified (confirmed that it is still a Working Draft, and W3C states explicitly that it does not replace WCAG 2)."
+  - "The maintenance activity of eslint-plugin-jsx-a11y and the licenses of Playwright, @axe-core/playwright, Weblate, Tolgee, react-hotkeys-hook, and hotkeys-js were not re-verified online this round (axe-core verified as MPL-2.0); Tolgee's free self-hosted seat count is a volatile commercial term."
+  - "GB/T 45395-2025 (mini-program accessibility) was listed as a source in the report but not elaborated; whether it needs separate rules is pending further research."
+  - "Pending research: tone guidelines for UI copy and Chinese/English writing conventions (punctuation, specific rules for mixed Chinese-Latin text)."
+  - "Pending research: definitions of notification interruption levels."
+  - "Pending research: test scope for domestic Chinese screen readers, Xinchuang browsers, and WebViews."
+  - "Pending research: equivalent accessibility test matrix for mobile and desktop."
+  - "Pending research: a more comprehensive comparison of translation management platforms (Pontoon, Crowdin, etc.) and the maturity of MessageFormat 2."

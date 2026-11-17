@@ -1,0 +1,647 @@
+id: "05"
+slug: docs
+title: Documentation and Writing
+summary: "How to classify, place, write, check, and keep project documentation from going stale: README, ADRs, changelogs, Chinese typography, diagrams, documentation sites, and documentation linting."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Documentation types and layout (README, CONTRIBUTING, CHANGELOG, docs/)
+    - Format and location of ADRs (Architecture Decision Records)
+    - Markdown structure, link text, image alt text
+    - Chinese technical writing and mixed Chinese–English text
+    - Accuracy of procedural docs and verification of examples
+    - Keeping docs in sync with code, owners, review metadata
+    - Documentation linting (markdownlint, Chinese typography checks, Vale, link checking)
+    - Diagram tools and diagram security
+    - Documentation site selection and offline delivery
+    - llms.txt
+    - Writing user-facing changelogs
+  excludes:
+    - { what: "Scope and writing of AGENTS.md (every repository with agent involvement must have one)", see: "23" }
+    - { what: "Writing UI copy, buttons, error messages, and confirmations for dangerous actions", see: "09" }
+    - { what: "Commit message format, release automation tools, CODEOWNERS and branch protection", see: "03" }
+    - { what: "Content requirements for runbooks and incident postmortems, the postmortem process", see: "26" }
+    - { what: "API reference documentation (OpenAPI, etc.)", see: "16" }
+    - { what: "Architecture design methods themselves (when to split, dependency direction)", see: "01" }
+    - { what: Code comments and doc comments on public interfaces, see: "02" }
+    - { what: "Chunking, permissions, and injection protection when docs are fed into RAG retrieval", see: "24" }
+    - { what: License obligations for tools and diagram engines, see: "27" }
+overview: |
+  1. **Classify by what the reader is trying to do.** Organize navigation with the four Diátaxis types (tutorials, how-to guides, reference, explanation), without mechanically turning them into directories; README, changelog, runbooks, and ADRs each have a fixed entry point.
+  2. **Docs as code.** Keep docs in the repository close to the code, write them in Markdown, and review them in the same PR as the code; if you change behavior, update the docs in the same PR, or state "no docs impact" with a reason.
+  3. **The README is the entry point.** State what this is, prerequisites, how to start it, how to test it, where the docs are, and the support boundaries.
+  4. **Hand anything machine-checkable to tools.** markdownlint checks structure, AutoCorrect checks Chinese typography, lychee checks links, and the docs build checks rendering; Vale for terminology and wording is the second step. Only one tool may auto-fix Chinese typography.
+  5. **Docs checks in PRs do not depend on the internet.** Check internal links offline; put external links in a scheduled job with network access, and have a human confirm failures.
+  6. **Procedural docs must be followable.** Write the environment, exact commands, and expected output; mark anything not actually tested as "unverified".
+  7. **Freshness comes from explicit review.** Docs that need freshness management carry an owner and `reviewed_at`/`review_due`; update the date only after a real review, and do not pass off the last-modified time as a review.
+  8. **Diagrams must be reproducible.** Commit text source files and render them in CI with pinned versions; sensitive content never goes to third-party online rendering services; keep Mermaid at its default `strict`.
+  9. **Changelogs are written for users.** Generate a draft from commit messages, have a human rewrite it as "who is affected, what they need to do", and file it using the Keep a Changelog structure.
+  10. **llms.txt is an optional community proposal.** List only public content; it is not a standard and not access control.
+rules:
+  # ── Documentation system and locations ──
+  - id: DOC-001
+    title: "Every delivered repository must have a README at its root that states purpose, prerequisites, start command, test command, docs entry point, and support boundaries"
+    level: hard
+    check: semi
+    how: "CI checks that README.md exists and contains these sections; whether the content is accurate is up to review, and start and test commands that can run automatically go into example tests (see DOC-016)"
+    applies: [all]
+    why: The README is the first stop for both humans and agents in a repository; without prerequisites and commands, every newcomer has to figure it out all over again.
+    detail: |
+      - "Support boundaries" means which platforms and versions are supported and which usages are not guaranteed.
+      - A README with only screenshots and badges does not count.
+      - Agent working conventions go in AGENTS.md (see 23); the README holds only entry information for all readers. The two link to each other and do not duplicate content.
+    sources: [S01]
+    see: ["AGT-001"]
+  - id: DOC-002
+    title: "Content serving clearly different reader tasks is split into tutorials, how-to guides, reference, and explanation, written and navigated separately"
+    level: soft
+    check: manual
+    how: "In review, check which type a new doc belongs to, and whether it mixes tutorial, reference, and conceptual explanation in one page"
+    applies: [all]
+    why: "Learning, getting something done, looking something up, and understanding are four different reading goals; mix them and no reader gets a smooth read."
+    detail: |
+      - Diátaxis is navigation logic; it does not require directories named `tutorials/` or `how-to/`. For a small project, a single README is enough.
+      - README, changelog, runbooks, incident postmortems, ADRs, and contributing guides cut across the four types; give each a fixed entry point instead of forcing it into one type.
+    sources: [S01]
+  - id: DOC-003
+    title: "README, CONTRIBUTING, and CHANGELOG go in the repository root; other docs go in docs/. Create directories as needed; do not commit empty directories or empty templates"
+    level: soft
+    check: semi
+    how: "A script lists empty files, heading-only pages, and empty directories under docs/, to be confirmed in review"
+    applies: [all]
+    why: "Fixed locations let both humans and tools find things; empty pages created for \"completeness\" make readers think there is content when there isn't."
+    detail: |
+      A common layout (illustrative; take what you need):
+
+      ```text
+      README.md  CONTRIBUTING.md  CHANGELOG.md
+      docs/
+        index.md
+        tutorials/  how-to/  reference/  explanation/
+        adr/        runbooks/  migrations/
+        glossary.md
+      ```
+
+      - CONTRIBUTING.md is only needed when there are multiple contributors; it can live in the root or in `.github/`.
+  - id: DOC-004
+    title: "Docs live in the code repository and are reviewed with the code; standards shared across projects are referenced by version number or commit, not copied wholesale into each project"
+    level: soft
+    check: manual
+    how: "In review, check for standards text copied wholesale from elsewhere, and whether references to external standards pin a version"
+    applies: [all]
+    why: "The farther docs are from the code, the faster they go stale; copied standards evolve separately from the original, and readers can't tell which one is right."
+    detail: "Do not set up a wiki, knowledge base, or CMS first and think about the change process later; build a docs site only when repository Markdown is not enough (see docs site selection)."
+    sources: [S23]
+  - id: DOC-005
+    title: "Doc file names use lowercase ASCII with hyphens (kebab-case); headings referenced from outside get explicit anchors instead of relying on anchors auto-generated from Chinese headings"
+    level: soft
+    check: auto
+    how: "A script checks file names under docs/; after the build, link checking verifies anchors"
+    applies: [all]
+    why: "Chinese and uppercase file names break easily across systems and URL encodings; anchors auto-generated from Chinese headings follow different rules in each tool, so links break when you switch tools."
+    detail: Headings themselves may be in Chinese; file names and stable links just shouldn't depend on them.
+    sources: [S26]
+  # ── ADR ──
+  - id: DOC-006
+    title: "For technical decisions that affect multiple modules, are hard to reverse, or involve clear trade-offs, write an ADR with context, decision, alternatives considered, consequences, and status"
+    level: soft
+    check: manual
+    how: "When reviewing PRs that cross modules, introduce new infrastructure, or change shared conventions, check for a link to the corresponding ADR"
+    applies: [all]
+    why: "Six months later nobody remembers why a choice was made; without a record, those who come later either don't dare change it or repeat the same mistakes."
+    detail: |
+      - One decision per ADR, kept short; write down the constraints at the time so later readers can judge whether they still hold.
+      - Use these statuses: Proposed, Accepted, Deprecated, Superseded.
+      - What counts as an architectural decision and how to do design: see 01.
+    see: ["01"]
+  - id: DOC-007
+    title: "ADRs go in docs/adr/ with incrementing numbers (e.g., 0007-use-postgres-queue.md); do not change the conclusion of an accepted ADR. To overturn it, write a new one and link the two both ways"
+    level: soft
+    check: auto
+    how: "A script checks file name format and unique numbering under docs/adr/; in review, check that changes to accepted ADRs touch only status and links"
+    applies: [all]
+    why: "The value of an ADR is preserving the judgment made at the time; rewriting old conclusions erases history, and readers can't see how the decision evolved."
+    detail: "Fixing typos and adding links can be done directly; changing the \"Decision\" section requires a new ADR, with the old one marked \"Superseded\" and linked to the new one."
+  # ── Markdown structure and accessibility ──
+  - id: DOC-008
+    title: "Each Markdown file has exactly one top-level heading, headings increment one level at a time, and code blocks declare a language"
+    level: hard
+    check: auto
+    how: "Enable markdownlint MD001 (heading increment), MD025 (single top-level heading), and MD040 (fenced code language)"
+    applies: [all]
+    why: "Table-of-contents generation, screen-reader navigation, and syntax highlighting all depend on these; tools can decide them directly, so there's no reason to rely on human eyes."
+    detail: |
+      Recommended starter configuration (`.markdownlint.jsonc`, illustrative):
+
+      ```jsonc
+      {
+        "default": true,
+        "MD013": false,              // Don't wrap long Chinese paragraphs and tables at English line widths
+        "MD046": { "style": "fenced" }
+      }
+      ```
+
+      - Configure MD033 (no inline HTML) per path: keep it on for ordinary docs, and relax it only for docs-site directories that genuinely need HTML or MDX components; do not disable it globally.
+    sources: [S08, S09]
+  - id: DOC-009
+    title: "Link text states where it goes; never use \"here\", \"click here\", or \"link\". Images must have alt text"
+    level: hard
+    check: auto
+    how: "Enable markdownlint MD045 (images need alt text) and MD059 (link text must be descriptive), and add the Chinese equivalents of \"here\", \"click here\", \"at this place\", and \"link\" to MD059's prohibited words"
+    applies: [all]
+    why: "Screen readers often list links on their own, and \"click here\" means nothing out of context; an image without alt text doesn't exist for screen-reader users."
+    detail: "MD059's default prohibited words are English only (click here, here, link, more); add the Chinese ones yourself. Whether alt text is well written still needs a human; general accessibility requirements are in 09."
+    sources: [S08]
+    see: ["09"]
+  - id: DOC-010
+    title: "When a diagram carries key information, write its conclusions in a few sentences below it, not just alt text like \"architecture diagram\""
+    level: soft
+    check: manual
+    how: "When reviewing docs with architecture or flow diagrams, check that there is a text explanation below the diagram"
+    applies: [all]
+    why: "Readers who only see text (screen-reader users, search, agents) need to get the diagram's conclusions from the text."
+    ref_value: "Write 2–5 sentences as a reference: scope, main components or steps, key conclusions. This is a rule of thumb, not a standard."
+  # ── Chinese writing ──
+  - id: DOC-011
+    title: "Chinese sentences use full-width punctuation; whether to put spaces between Chinese and English or digits follows the team's chosen style and exception list, checked in CI by a single tool"
+    level: soft
+    check: auto
+    how: "CI runs AutoCorrect (or zhlint) in check mode, with exceptions written into the tool's configuration file"
+    applies: [all]
+    why: Inconsistent typography is distracting; watching spaces and punctuation by eye is slow and inaccurate.
+    detail: |
+      Common defaults (team style, illustrative):
+
+      | Context | Write | Don't write |
+      |---|---|---|
+      | Mixed Chinese and English | A space on each side of an embedded English word such as `React` | `React` jammed directly against the Chinese characters |
+      | Chinese and digits | A space between the number and the Chinese text, e.g. "wait 30 seconds" with `30` spaced | The number written directly against the Chinese text |
+      | Chinese punctuation | Full-width corner quotes and full-width comma and period around UI labels such as "Save" and "Publish" | ASCII straight quotes, half-width comma and period |
+      | Proper nouns | GitHub, TypeScript, Node.js | Github, Typescript, NodeJS |
+
+      - Exceptions: code, paths, commands, ISO timestamps, official product spellings; whole English sentences use English punctuation.
+      - Whether to put a space before symbols such as percent signs and degrees: the team picks one and writes it into the exception list.
+    sources: [S04, S10, S11]
+  - id: DOC-012
+    title: "Spacing in mixed Chinese–English text is team style; do not present it as a mandatory national standard requirement. When citing national standards, cite GB/T 15834 (punctuation) and GB/T 15835 (numerals)"
+    level: soft
+    check: manual
+    how: "When reviewing style guides, check whether team conventions are labeled as \"required by national standard\""
+    applies: [all]
+    why: "Both are recommended (non-mandatory) national standards, and neither specifies spaces between Chinese and English; citing the wrong basis leads to misjudgments in contracts and acceptance."
+    detail: "Whether national standards must be followed depends on the customer contract and industry requirements. For Chinese typography details in browsers, see the W3C Requirements for Chinese Text Layout; it is a working group note and does not guarantee browser implementation."
+    sources: [S02, S03, S05]
+  - id: DOC-013
+    title: "Choose only one tool to auto-fix Chinese typography; other tools only report. CI only checks and never writes back to source files"
+    level: soft
+    check: semi
+    how: "Check that CI configuration has no `--fix`-style flags; check whether the repository enables multiple Chinese typography fixers at once"
+    applies: [all]
+    why: "Fixers have slightly different rules, so running several at once makes them undo each other's changes; CI writing back to files makes the committed content diverge from what was reviewed."
+    sources: [S10, S11]
+  - id: DOC-014
+    title: "Before enabling Chinese typography checks, build a set of regression samples covering Chinese, English, digits, code, links, tables, and UI strings"
+    level: soft
+    check: semi
+    how: "Keep the sample set in the repository; when upgrading the checker or changing rules, run it first and compare the results"
+    applies: [all]
+    why: "Typography tools easily cause collateral damage around code, links, and terms; without samples, you discover mass mis-edits only after upgrading."
+    ref_value: "Reference value: about 30 samples, so every scenario has positive and negative cases; the number itself has no source, adjust it to project size."
+  - id: DOC-015
+    title: "Product names, terms, capitalization, and units follow a versioned glossary in the repository; add new terms to the glossary before using them"
+    level: soft
+    check: semi
+    how: "Use Vale vocabulary rules (accept/reject lists) to check spellings in docs; glossary changes are reviewed in PRs"
+    applies: [all]
+    why: "Humans and agents both use different names in different docs, and readers assume they are different things."
+    detail: |
+      - Location: `docs/glossary.md`, or machine-readable YAML with fields such as term, preferred Chinese, preferred English, prohibited spellings, definition, owner.
+      - There's no need to force a unique Chinese translation for every English word; customer-facing UIs can define separate business terms.
+      - For consistent naming in code, see COD-001; for the source text of UI buttons, see 09.
+    sources: [S12]
+    see: ["COD-001", "09"]
+  - id: DOC-016
+    title: "Write concrete sentences: one main action per sentence, with preconditions and observable results; don't use \"obviously\", \"simple\", or \"just\" in place of factual conditions. Sentence length is only a hint, with no hard threshold"
+    level: soft
+    check: semi
+    how: "A custom Vale rule flags words like \"obviously\", \"simply\", \"just\", and \"whatever\" as suggestions; sentence-length rules warn but do not block"
+    applies: [all]
+    why: "\"It's simple\" carries no information for someone who doesn't know how; if limitations and failure cases aren't written down, readers have to hit them themselves. English sentence-length thresholds can't be applied directly to Chinese."
+    sources: [S06, S12]
+  # ── Procedural docs and examples ──
+  - id: DOC-017
+    title: "How-to guides and runbooks must state the applicable environment and versions, exact commands and paths, inputs and expected output; examples are complete and copyable, with omissions clearly marked"
+    level: hard
+    check: semi
+    how: "Check each item when reviewing procedural docs; examples that can be automated go into example tests (see DOC-019)"
+    applies: [all]
+    why: "Someone following the steps (including an agent) can't guess omitted parameters; without expected output, they can't tell whether they did it right."
+    sources: [S07]
+  - id: DOC-018
+    title: "Key commands that docs ask readers to run must have been tested in the declared supported environments; untested ones are marked \"unverified\" along with the environment"
+    level: hard
+    check: semi
+    how: "Commands covered by example tests count as verified; for the rest, review requires an attached test record, otherwise they must carry an \"unverified\" marker"
+    applies: [all]
+    why: "A command that was never run can be wrong no matter how real it looks; in a runbook, a wrong command amplifies losses during an incident."
+    sources: [S07]
+  - id: DOC-019
+    title: "Examples that can run automatically (README start commands, code snippets, sample configs) go into CI and run regularly"
+    level: soft
+    check: auto
+    how: "Use each language's doc-testing capability or a script that extracts and runs code blocks; on failure, block or open a task"
+    applies: [all]
+    why: Code changes and examples silently break; running them automatically is the only reliable way to find out.
+    detail: "For language-native doc testing tools (such as Rust doctest, Python doctest, Go Example), see 10–15."
+    see: ["10-15"]
+  # ── Keeping docs in sync with code, owners, review ──
+  - id: DOC-020
+    title: 'PRs that change CLI flags, configuration options, permissions, UI behavior, deployment methods, or compatibility must update the relevant docs in the same PR, or write `docs-impact: none` with a reason in the PR description'
+    level: hard
+    check: semi
+    how: "CI uses a \"code path → docs\" mapping table to decide whether a PR is affected; it fails when affected but neither the docs were changed nor an impact statement was written. Whether the statement is reasonable is decided in review"
+    applies: [all]
+    why: "When docs and code are changed separately, the docs are almost always forgotten; the follow-up docs PR often never comes."
+    detail: "The path mapping is only a heuristic and can't tell automatically whether semantics changed, so the final step needs human confirmation. For the PR template, see 03."
+    sources: [S23]
+    see: ["03"]
+  - id: DOC-021
+    title: "Important doc directories (external docs, runbooks, standards) have owners assigned in CODEOWNERS, with owner approval required; agent-generated docs need human review too"
+    level: soft
+    check: auto
+    how: "Check that CODEOWNERS covers these directories and that branch protection enables \"require review from code owners\""
+    applies: [all]
+    why: "Docs without an owner don't get maintained; writing CODEOWNERS without enforcing approval is no gate at all."
+    detail: "For general rules on CODEOWNERS and branch protection, see FLW-020."
+    see: ["FLW-020"]
+  - id: DOC-022
+    title: "Docs that need freshness management (runbooks, external how-to guides, standards, version support matrices) carry owner, status, reviewed_at, review_due, and applies_to in frontmatter, validated against a schema"
+    level: soft
+    check: auto
+    how: CI uses JSON Schema to validate that these fields exist and dates are correctly formatted
+    applies: [all]
+    why: "Without an owner and a review date, there's no way to know whether a doc can still be trusted."
+    detail: |
+      Illustrative:
+
+      ```yaml
+      ---
+      title: Database rollback
+      owner: team-orders
+      status: active
+      reviewed_at: 2026-11-14
+      review_due: 2027-02-14
+      applies_to: ">=2.4 <3.0"
+      source_paths: [deploy/db/, migrations/]
+      ---
+      ```
+
+      - `source_paths` is optional and used by the DOC-020 path mapping.
+      - Ordinary conceptual explanation docs don't need it.
+  - id: DOC-023
+    title: "Update reviewed_at only after actually reviewing the content; do not substitute the file's last-modified time or latest commit time for the review time"
+    level: soft
+    check: semi
+    how: "When a PR changes reviewed_at, require the description to state what was reviewed; spot-check periodically"
+    applies: [all]
+    why: "Fixing a typo is not the same as checking the whole doc; false freshness is more misleading than no date at all."
+  - id: DOC-024
+    title: "A doc past review_due only generates a review task and does not block unrelated PRs; expired runbooks for production emergencies may be made a release gate"
+    level: soft
+    check: auto
+    how: "A scheduled job scans frontmatter and opens tasks for owners of expired docs; only runbooks marked as emergency are wired into release checks"
+    applies: [all]
+    why: "If one old conceptual explanation blocks every feature PR, people will just bump the date to get past it; only expired emergency runbooks have consequences worth blocking a release."
+    detail: "\"Link returns 403\" or \"no commits for a long time\" does not mean the content is wrong; treat them only as review hints. Review cycles are set by each doc's owner; content requirements for runbooks are in 26."
+    see: ["26"]
+  - id: DOC-025
+    title: "When standards, selection, and decision docs cite external facts such as regulations, versions, or policy dates, include a source link and verification date; if it can't be found, write \"unverified\""
+    level: soft
+    check: semi
+    how: "In review, check that external facts carry a source and date; a script can scan whether there are links near version numbers and dates in docs"
+    applies: [all]
+    why: "External facts change; without a source and date, readers and agents can't judge whether they still hold."
+  # ── Docs checks and CI ──
+  - id: DOC-026
+    title: "Docs build failures, Markdown structure check failures, and broken in-repository links must block merging"
+    level: hard
+    check: auto
+    how: "Make markdownlint, `lychee --offline` (checks only local files and internal links), and the docs site build required checks"
+    applies: [all]
+    why: "All of these can be decided reliably by automation; let them through and readers get broken pages and dead links."
+    detail: |
+      - Validate anchors and heading case again after the docs site build.
+      - Once the Chinese typography check (DOC-011) is stable, it can also be made required.
+      - Wrap these commands into a single entry point (DOC-028).
+    sources: [S09, S14]
+  - id: DOC-027
+    title: "External link checking is not a required PR check; run it as a scheduled job with network access instead, and have a human confirm failures before fixing or recording an exemption"
+    level: soft
+    check: auto
+    how: "A scheduled job runs a full lychee check with retries, rate limiting, and a domain allowlist; results open tasks instead of editing docs directly"
+    applies: [all]
+    why: "External link failures are often rate limiting, 403s, geo-restrictions, or intranet connectivity, unrelated to the change at hand; putting them in PRs makes merges fail randomly, and in offline CI they always fail."
+    sources: [S14]
+  - id: DOC-028
+    title: "Wrap docs checks into a single command in the repository (e.g., `make docs-check` or `scripts/docs-check.sh`) that local runs, CI, and agents all use"
+    level: soft
+    check: semi
+    how: CI configuration is checked to call this entry point rather than scattered commands
+    applies: [all]
+    why: "With commands scattered across CI YAML, local runs can't reproduce the same results, and agents have to guess whether to use npm or something else."
+    detail: |
+      Illustrative:
+
+      ```bash
+      #!/usr/bin/env bash
+      set -euo pipefail
+      markdownlint-cli2 'README.md' 'AGENTS.md' 'docs/**/*.md'
+      autocorrect --lint docs/
+      lychee --offline 'README.md' 'AGENTS.md' 'docs/**/*.md'
+      # If there is a docs site, wire in the real build command
+      ```
+
+      - Use pinned tool versions; in offline environments, pre-install binaries and verify SHA256, and don't use unpinned sources like `curl | sh` or `@main`.
+      - For the general rule of keeping CI logic in repository scripts, see FLW-024.
+    see: ["FLW-024"]
+  # ── Diagrams ──
+  - id: DOC-029
+    title: "Architecture, flow, and sequence diagrams are committed as editable text source files (.mmd, .d2, .puml) or whiteboard source files (.excalidraw); PNG and SVG are only exports"
+    level: soft
+    check: semi
+    how: "A script lists images under docs/ that have no source file with the same name, to be confirmed in review"
+    applies: [all]
+    why: "Image-only diagrams can't be edited by anyone and soon stop matching the system; text sources also show what changed in a PR."
+    detail: "Screenshots and photos don't need source files. Whiteboard diagrams are fine for discussion drafts; formal architecture diagrams should ideally also have a text source."
+  - id: DOC-030
+    title: "Text diagrams are rendered in CI with a pinned-version renderer; a rendering failure fails the check"
+    level: hard
+    check: auto
+    how: "CI calls the local Mermaid CLI, d2, and PlantUML commands to render all diagram sources; a non-zero exit fails"
+    applies: [all]
+    why: "Renderer upgrades can change syntax and layout; without rendering in CI, broken diagrams get published directly."
+    sources: [S18, S19, S20]
+  - id: DOC-031
+    title: "Diagrams state their scope and legend: whether arrows mean calls, events, or data flow; mark trust boundaries and external dependencies; node names match the real components"
+    level: soft
+    check: manual
+    how: "When reviewing diagrams, check the legend, boundaries, and node names one by one"
+    applies: [all]
+    why: "Different people read the same arrow differently; if node names don't match the code, the diagram becomes a guessing game."
+    detail: |
+      - Flowcharts: write decision nodes as questions, label branches "yes/no", draw failure and retry paths; don't draw giant diagrams covering the entire business.
+      - Sequence diagrams: mark sync/async, error paths, timeouts, and retries.
+  - id: DOC-032
+    title: "Diagrams and docs containing internal or customer information must not be sent to third-party online rendering or editing services (public PlantUML servers, online Mermaid editors, public Kroki instances, etc.); use local or self-hosted rendering instead"
+    level: hard
+    check: semi
+    how: "Scan docs, docs site configuration, and build scripts for addresses pointing at external rendering services; in private deployments, block them with network egress policy"
+    applies: [all]
+    why: "Diagram sources are sent verbatim to the rendering service, which amounts to handing your architecture and customer information to a third party."
+    detail: "Third-party hosted fonts, search, and CDNs also leak access information; for whether cross-border data transfer is involved, see 27."
+    see: ["27"]
+  - id: DOC-033
+    title: "Keep Mermaid's securityLevel at the default strict; don't change it to loose for click-through navigation. When diagrams from untrusted sources must be rendered, use sandbox mode together with CSP"
+    level: hard
+    check: auto
+    how: "Scan configuration such as `mermaid.initialize` in docs sites and applications; fail when `loose` or `antiscript` appears"
+    applies: [all]
+    why: "loose allows HTML and click callbacks in diagrams, which becomes an XSS entry point when rendering diagrams written by others; real products have had to fix vulnerabilities because of this."
+    detail: |
+      - strict: HTML-encodes text in the diagram and disables clicks; it is the default.
+      - sandbox: renders in an iframe with scripts disabled, suitable for user-submitted diagrams; the official docs have labeled it as beta, so verify its behavior before enabling.
+      - securityLevel cannot be overridden by frontmatter in the diagram source; it can only be set at initialization.
+    sources: [S18]
+    see: ["25"]
+  # ── Docs sites ──
+  - id: DOC-034
+    title: "Docs sites pin dependencies and can reproduce builds locally; production sites don't use pre-release versions such as alpha or beta"
+    level: soft
+    check: auto
+    how: "CI installs from the lock file and builds; check that the docs site framework in the dependency manifest is not a pre-release version"
+    applies: [all]
+    why: "APIs and plugin compatibility of pre-release versions can change at any time, upgrades need regression testing, and help is hard to find when things go wrong."
+    detail: When upgrading the docs site framework, run a full-site build and Chinese search acceptance testing.
+    sources: [S15]
+  - id: DOC-035
+    title: "For docs sites delivered offline or on-premises, fonts, search indexes, scripts, and styles must all be packaged into the deliverable, with no dependence on CDNs, hosted search, or telemetry; run an offline smoke test before delivery"
+    level: hard
+    check: semi
+    how: "Open the build output in an offline environment and spot-check page rendering, search, and images; scan the build output for external domains"
+    applies: [kind:onprem]
+    why: "\"Builds statically\" does not mean \"works offline\"; fonts, search services, and CDNs fail silently on an intranet."
+    detail: "Frameworks that default to hosted search (e.g., Docusaurus defaults to Algolia) must be switched to local search. Also test the customer's proxy, certificate, and CSP settings."
+    sources: [S16, S17, S25]
+  # ── llms.txt ──
+  - id: DOC-036
+    title: "When publishing llms.txt, list only public pages and generate it automatically from site navigation; don't list internal addresses or private content, and don't treat it as access control"
+    level: hard
+    check: semi
+    how: "Release CI generates llms.txt from navigation and scans whether all domains and paths in it are within the public site"
+    applies: [all]
+    why: "llms.txt is a public file; anything listed in it is visible to everyone. It's just an index for models and blocks no access at all."
+    detail: |
+      - llms.txt is a community proposal, not a W3C or IETF standard, and no major model vendor has committed to reading it; it is optional, not required.
+      - Format: a top-level heading (the site name, the only required item), a blockquote summary, and link lists under several second-level headings; a second-level heading named Optional holds secondary links that can be skipped.
+      - The proposal suggests providing a plain Markdown version of each page at the same URL with `.md` appended.
+      - When internal knowledge bases are used by agents, go through permission-aware retrieval; see 24.
+    sources: [S22]
+    see: ["24"]
+  # ── Changelogs ──
+  - id: DOC-037
+    title: "Projects with externally released versions maintain CHANGELOG.md: one section per released version with version number and release date, newest at the top"
+    level: hard
+    check: auto
+    how: "Release CI checks that the version about to be tagged has a corresponding dated section in CHANGELOG.md"
+    applies: [all]
+    why: "Users and downstream consumers rely on it to judge upgrade risk; if a version ships and nobody can find what changed, they have to dig through the commit history."
+    detail: |
+      Follow the Keep a Changelog structure: an "Unreleased" section at the top; each version grouped into Added, Changed, Deprecated, Removed, Fixed, Security; dates in YYYY-MM-DD. Chinese projects may use Chinese group names.
+    sources: [S24]
+  - id: DOC-038
+    title: "Changelogs are written for users: what changed, who is affected, what they need to do. Drafts are generated from commit messages, then a human removes internal changes and rewrites them; don't paste commit logs verbatim"
+    level: soft
+    check: manual
+    how: "In release review, spot-check whether entries are written in language users understand, and whether internal task IDs and refactoring entries remain"
+    applies: [all]
+    why: "Commit messages are written for developers; shown directly to users they are all noise, and the changes that really need attention get buried."
+    detail: |
+      - Call out breaking changes, upgrade steps that require user action, and security fixes separately.
+      - Internal ticket IDs may go at the end of an entry as traceability links.
+      - For draft generation tools (release-please, Changesets, etc.) and commit message format, see 03.
+    sources: [S24]
+    see: ["FLW-006"]
+  - id: DOC-039
+    title: "Versions with breaking changes provide a migration guide stating which version to migrate from, what to change, how to verify, and whether rollback is possible, linked from the changelog"
+    level: soft
+    check: semi
+    how: "When release CI detects a breaking-change marker in a version, it checks that the changelog links to a migration guide"
+    applies: [all]
+    why: "Saying only \"incompatible\" without explaining how to migrate leaves users either not upgrading or figuring it out themselves."
+    detail: "Migration guides go in `docs/migrations/`. If direct upgrades across versions aren't supported, say so."
+    see: ["03"]
+choices:
+  - category: Documentation classification method
+    pick: "Diátaxis (tutorials, how-to guides, reference, explanation) as navigation logic"
+    avoid:
+      - { name: One template for every doc, why: Different reader tasks need different writing }
+    sources: [S01]
+  - category: ADR format
+    pick: "A trimmed-down MADR (Markdown Architectural Decision Records template)"
+    alternatives:
+      - { name: "Michael Nygard's original format (context, decision, status, consequences)", when: "The team is just starting to write ADRs and wants the fewest sections" }
+    avoid:
+      - { name: Recording decisions only in chat logs or meeting minutes, why: "Can't be found, and has no status" }
+      - { name: Storing ADRs in a wiki, why: "Out of sync with code, can't be reviewed in PRs" }
+  - category: Markdown structure checking
+    pick: markdownlint-cli2
+    alternatives:
+      - { name: Prettier plus markdownlint, when: "The project already uses Prettier for formatting (formatting principles in 02)" }
+    avoid:
+      - { name: Prettier alone, why: "Handles formatting only; doesn't check semantic issues like heading levels and alt text" }
+      - { name: Having an LLM check grammar and punctuation, why: "Slow, expensive, and not reproducible" }
+    license: MIT
+    sources: [S08, S09]
+  - category: Chinese typography checking
+    pick: AutoCorrect
+    alternatives:
+      - { name: zhlint, when: "The team prefers its rules, or works mainly in a JS toolchain" }
+    avoid:
+      - { name: Hand-written regexes to batch-replace spaces and punctuation, why: "Damages code, links, and terms" }
+      - { name: Multiple Chinese checkers auto-fixing at once, why: "Rules conflict and keep undoing each other" }
+    license: "AutoCorrect and zhlint are both MIT (to be verified one by one against the official repository LICENSE)"
+    notes: "A single executable, suitable for multi-language projects and offline environments."
+    sources: [S10, S11]
+  - category: Terminology and wording checking
+    pick: "Vale (add it after structure and typography checks are stable)"
+    alternatives:
+      - { name: textlint, when: "The team knows the JS ecosystem and needs its plugins" }
+    avoid:
+      - { name: Pure regex scripts, why: "No context awareness, many false positives" }
+    license: "Vale is MIT; textlint is MIT (to be verified)"
+    notes: "Vale is a single binary that works offline; rules live in a Styles directory in the repository."
+    sources: [S12, S13]
+  - category: Link checking
+    pick: "lychee (use --offline in PRs to check only internal links; external links go to a scheduled job)"
+    alternatives:
+      - { name: The docs site framework's built-in dead-link check, when: "You already use a docs site and its check has enough coverage" }
+    avoid:
+      - { name: Checking all external links site-wide online in every PR, why: Rate limiting and network issues cause random failures }
+    license: "Dual-licensed MIT or Apache-2.0 (per the distribution package you use)"
+    sources: [S14]
+  - category: "Docs site (small to medium, primarily Chinese)"
+    pick: "Don't build a site yet: README plus Markdown under docs/, interlinked with relative links"
+    when: "Up to a few dozen pages, read only in the repository"
+    alternatives:
+      - { name: "VitePress (the stable 1.x line)", when: "Dozens to hundreds of pages, primarily Chinese, team doesn't mind Vue; use the built-in local search" }
+      - { name: Starlight, when: "You want out-of-the-box local search (Pagefind) and a good content authoring experience; it is still 0.x, so upgrades need regression testing" }
+      - { name: Docusaurus, when: "You need versioned docs, multiple languages, and MDX components, and the team accepts React; on an intranet, replace the default hosted search" }
+    avoid:
+      - { name: VitePress 2.x pre-release in production, why: "Still alpha as of the verification date; the stable release is still 1.x" }
+      - { name: "A wiki, CMS, or database for a few dozen pages of docs", why: Maintenance cost exceeds the benefit }
+    license: "VitePress, Starlight, and Docusaurus are all MIT"
+    notes: "The VitePress stable line hasn't had a new release in quite a while and 2.0 is still alpha; if you choose it, watch whether 1.x still receives security fixes. All three can build static files, but offline usability must be verified separately (DOC-035)."
+    sources: [S15, S16, S17, S25]
+  - category: "General flowcharts and relationship diagrams"
+    pick: Mermaid
+    alternatives:
+      - { name: D2, when: "Architecture diagrams with complex layouts that Mermaid's auto-layout can't arrange clearly" }
+    avoid:
+      - { name: Storing only hand-edited images, why: "Unmaintainable, changes can't be seen" }
+    license: MIT
+    sources: [S18, S27]
+  - category: Complex architecture diagrams
+    pick: D2
+    when: "Many components, deep nesting, need for good auto-layout"
+    alternatives:
+      - { name: Mermaid, when: "The diagram isn't complex and you want it rendered directly in Markdown" }
+    avoid:
+      - { name: Using D2 even for small flowcharts, why: "Adds another toolchain and doesn't show in Markdown previews" }
+    license: "MPL-2.0; the TALA layout engine was open-sourced under MPL-2.0 on 2026-09-07 and ships with D2 (--layout=tala), so a commercial license is no longer needed"
+    sources: [S19, S28]
+  - category: Sequence diagrams and detailed UML diagrams
+    pick: "PlantUML (run locally or self-hosted)"
+    alternatives:
+      - { name: Mermaid sequence diagrams, when: "The diagram is simple and you want it rendered directly in Markdown" }
+    avoid:
+      - { name: Rendering sensitive content on public PlantUML servers, why: Diagram sources are sent to a third party }
+    license: "Distribution packages under multiple licenses (GPL, LGPL, Apache, EPL, MIT, etc.); the default package is GPL-3.0 or later. When integrating into a distributed product, choose the package per 27"
+    sources: [S20]
+  - category: Discussion sketches
+    pick: "Excalidraw, committing the .excalidraw source file as well"
+    alternatives:
+      - { name: "draw.io (diagrams.net)", when: "The team already uses it; likewise commit the editable source file" }
+    avoid:
+      - { name: Storing only PNG, why: Can no longer be edited }
+    license: "The main Excalidraw project is MIT; the collaborative cloud service needs separate evaluation; draw.io license to be verified"
+    sources: [S21]
+  - category: Changelog structure
+    pick: "Keep a Changelog structure, with drafts generated from commit messages and rewritten by a human"
+    avoid:
+      - { name: Pasting commit logs verbatim for users, why: "Lots of internal noise, missing user impact" }
+    notes: "For draft generation tools, see \"Changelog drafts and release automation\" in 03."
+    sources: [S24]
+  - category: Site index for models
+    pick: "Not required; generate llms.txt for public docs sites when needed"
+    alternatives:
+      - { name: sitemap.xml plus Markdown exports of pages, when: "You already have a sitemap and want agents to read Markdown directly" }
+    avoid:
+      - { name: Treating llms.txt as access control or a search ranking guarantee, why: It is only a public index proposal }
+    sources: [S22]
+antipatterns:
+  - { bad: A README with only screenshots and badges, instead: "Write purpose, prerequisites, start and test commands, and the docs entry point" }
+  - { bad: "A hundred-page \"design document\" mixing tutorials, reference, and concepts", instead: "Split by reader task, with a single entry point" }
+  - { bad: "Setting up a wiki, CMS, and database first for a few dozen pages of docs", instead: "Repository Markdown; build a static site when needed" }
+  - { bad: Hand-writing a pile of regexes for Chinese–English spacing and punctuation, instead: Use AutoCorrect or zhlint with an exception configuration }
+  - { bad: Enabling auto-fix in all Chinese checkers at once, instead: "One tool fixes, the others only report" }
+  - { bad: Checking all external links online in every PR, instead: "Check internal links offline in PRs; put external links in a scheduled job" }
+  - { bad: Storing diagrams only as PNG, instead: "Commit text or whiteboard source files; images are only exports" }
+  - { bad: Rendering customer architecture diagrams with public online services, instead: Local CLI or self-hosted rendering }
+  - { bad: Switching Mermaid to loose for click-through navigation, instead: "Keep strict; use sandbox for untrusted sources" }
+  - { bad: "Using the latest commit time as \"reviewed\"", instead: "An explicit reviewed_at, updated only after a real review" }
+  - { bad: Pasting git log directly into the changelog, instead: "Generate a draft from commit messages and have a human rewrite the user-facing parts" }
+  - { bad: Stuffing all internal docs into llms.txt, instead: "List only public pages; internal material goes through permission-aware retrieval" }
+  - { bad: "Assuming \"builds statically\" means \"deliverable offline\"", instead: "Package fonts and search indexes, and test offline before delivery" }
+  - { bad: Changing the conclusion of an accepted ADR, instead: "Write a new one, mark the old one as superseded, and link them both ways" }
+sources:
+  - { id: S01, title: "Diátaxis: Start here", url: "https://diataxis.fr/start-here/", publisher: Diátaxis, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: "GB/T 15834-2011 General rules for punctuation", url: "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=22EA6D162E4110E752259661E1A0D0A8", publisher: "State Administration for Market Regulation; Standardization Administration of China", date: 2011-12-30, kind: standard, checked: 2026-11-13 }
+  - { id: S03, title: "GB/T 15835-2011 General rules for writing numerals in publications", url: "https://openstd.samr.gov.cn/bzgk/std/newGbInfo?hcno=F5DAC3377DA99C8D78AE66735B6359C7", publisher: "State Administration for Market Regulation; Standardization Administration of China", date: 2011-07-29, kind: standard, checked: 2026-11-13 }
+  - { id: S04, title: Chinese Copywriting Guidelines, url: "https://github.com/sparanoid/chinese-copywriting-guidelines/blob/master/README.zh-Hans.md", publisher: sparanoid, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S05, title: "W3C: Requirements for Chinese Text Layout", url: "https://www.w3.org/TR/clreq/", publisher: W3C, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S06, title: "Google Technical Writing: Clear sentences", url: "https://developers.google.com/tech-writing/one/clear-sentences", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Google Technical Writing: Sample code", url: "https://developers.google.com/tech-writing/two/sample-code", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "markdownlint: rules (including MD059 descriptive link text)", url: "https://github.com/DavidAnson/markdownlint", publisher: DavidAnson, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: markdownlint-cli2, url: "https://github.com/DavidAnson/markdownlint-cli2", publisher: DavidAnson, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: AutoCorrect, url: "https://github.com/huacnlee/autocorrect", publisher: huacnlee, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: zhlint, url: "https://github.com/zhlint-project/zhlint", publisher: zhlint-project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Vale, url: "https://github.com/vale-cli/vale", publisher: vale-cli, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: textlint, url: "https://github.com/textlint/textlint", publisher: textlint, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: lychee, url: "https://github.com/lycheeverse/lychee", publisher: lycheeverse, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: VitePress releases, url: "https://github.com/vuejs/vitepress/releases", publisher: Vue.js, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Docusaurus: Search", url: "https://www.docusaurus.io/docs/search", publisher: Meta, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Starlight: Site search", url: "https://starlight.astro.build/guides/site-search/", publisher: Astro, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Mermaid config: securityLevel", url: "https://mermaid.js.org/config/schema-docs/config-properties-securitylevel.html", publisher: Mermaid, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: TALA is open source, url: "https://d2lang.com/blog/tala-is-open-source/", publisher: D2, date: 2026-09-07, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: PlantUML licenses, url: "https://github.com/plantuml/plantuml/blob/master/LICENSES.md", publisher: PlantUML, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Excalidraw, url: "https://github.com/excalidraw/excalidraw", publisher: Excalidraw, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "The /llms.txt file (proposal)", url: "https://llmstxt.org/", publisher: Jeremy Howard, date: 2024-09-03, kind: community, checked: 2026-11-14 }
+  - { id: S23, title: "GitLab: Documentation workflow", url: "https://docs.gitlab.com/development/documentation/workflow/", publisher: GitLab, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S24, title: Keep a Changelog 1.1.0, url: "https://keepachangelog.com/en/1.1.0/", publisher: Keep a Changelog, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S25, title: "VitePress: Search", url: "https://vitepress.dev/reference/default-theme-search", publisher: Vue.js, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "GitLab: Documentation style guide", url: "https://docs.gitlab.com/development/documentation/styleguide/", publisher: GitLab, date: null, kind: case, checked: 2026-11-13 }
+  - { id: S27, title: Mermaid, url: "https://github.com/mermaid-js/mermaid", publisher: Mermaid, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: D2, url: "https://github.com/d2lang/d2", publisher: D2, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - "llms.txt: the official site labels it proposal version 2 (last modified 2026-08-10), verified; whether major model vendors actually read it is supported only by third-party claims, unverified"
+  - "Whether the VitePress 1.x stable line will still get security fixes, and when 2.0 will become stable, has no clear official statement; to be followed up"
+  - "Progress on Docusaurus 4 and changes in Starlight's maintainers (third parties say the Astro team has been acquired by Cloudflare) come only from third-party sources and are not verified officially"
+  - "Whether Mermaid's sandbox mode has left beta; check the current docs"
+  - "The current state and licensing of ADR formats (MADR vs. Nygard format) have not been verified online; research needed: whether ADR tools (e.g., adr-tools, log4brains) are worth recommending"
+  - "Licenses of AutoCorrect, zhlint, textlint, and draw.io have not been verified one by one against the LICENSE in their official repositories"
+  - "Research needed: how to resolve conflicts between public Chinese technical writing guides (e.g., Chinese Copywriting Guidelines, the Chinese technical documentation style guide), and a complete exception list for Chinese punctuation and spacing"
+  - "Research needed: off-the-shelf tools for detecting stale docs (frontmatter-based checkers, docs site plugins); currently only hand-written scripts are used"
+  - "Research needed: public standards for Chinese UI copy (belongs to 09; this topic only references it)"
+  - "Research needed: hands-on results for docs sites and docs tools on domestic Chinese operating systems, CPUs, and browsers"

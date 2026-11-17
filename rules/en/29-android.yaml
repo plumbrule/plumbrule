@@ -1,0 +1,635 @@
+id: "29"
+slug: android
+title: Android
+summary: "Platform specifics for native Android apps: Kotlin and Jetpack Compose, Gradle and the Android Gradle Plugin (AGP), targetSdk and 16 KB page sizes, permissions and component exposure, local storage and encryption, network security config, R8 and signing, Android developer verification, unit and Compose UI tests, performance and background work, and Chinese app stores."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - Applying Kotlin, Jetpack Compose and the officially recommended architecture on Android
+    - Combining and upgrading Gradle, AGP, Kotlin, KSP and the Compose compiler plugin in Android projects
+    - targetSdk, minSdk, 16 KB page sizes, and large-screen behavior changes
+    - Manifest permissions, exported components, deep links, WebView
+    - DataStore, Room, Android Keystore, backup rules
+    - Network security config
+    - R8 obfuscation and shrinking, signing, Play App Signing, Android developer verification
+    - Android unit tests, Compose UI tests, Lint
+    - Baseline Profiles, WorkManager and foreground services
+    - The Google Play Data safety form and listing checklists for Chinese app stores
+  excludes:
+    - { what: "Cross-platform framework choice, offline sync, overall push architecture and Chinese OEM push channels", see: "28" }
+    - { what: "Mobile E2E tools, Release smoke tests on real devices, crash and performance monitoring", see: "28" }
+    - { what: "General runtime permission practice, not initializing SDKs before user consent, general credential storage requirements", see: "28" }
+    - { what: "Gradle baseline for JVM server projects (Wrapper, dynamic versions, dependency locking)", see: "14" }
+    - { what: "Test layering, coverage definitions, screenshot baseline review, acceptance evidence", see: "04" }
+    - { what: "Contrast, touch target size, TalkBack, font scaling, internationalization behavior", see: "09" }
+    - { what: "Push server APIs (how to call FCM)", see: "21" }
+    - { what: "Secret scanning, SBOM, dependency vulnerabilities and signed provenance", see: "25" }
+    - { what: "App filing (ICP), personal information protection law, SDK compliance lists and licensing policy", see: "27" }
+    - { what: "General practice for offline builds and artifact archiving", see: "26" }
+overview: |
+  1. **Default stack.** Kotlin + Jetpack Compose + Material 3; the officially recommended UI layer / data layer split, ViewModels exposing immutable state, coroutines + Flow. Migrate existing View projects incrementally; do not rewrite everything at once. Add dependencies when a feature needs them; do not preinstall Hilt, Room, Paging or WorkManager.
+  2. **Upgrade the build as a set.** Upgrade AGP, Gradle, Kotlin, KSP and the Compose compiler plugin together; the combination must be in the official compatibility tables and have CI results. From AGP 9, Kotlin support is built in and `org.jetbrains.kotlin.android` is no longer applied; the Compose compiler follows the Kotlin version. Wrapper, version catalogs and the ban on dynamic versions follow topic 14.
+  3. **targetSdk follows Google Play.** Meet Google Play's current target API requirement and upgrade before the deadline; set minSdk from your own users' device inventory. Apps with native libraries (including `.so` files brought in by SDKs) must support 16 KB page sizes.
+  4. **Minimal exposure.** Manage merged-Manifest permissions with an allowlist; do not export components that do not need to be called externally; treat deep link parameters and WebView bridges as untrusted input. Use the system photo picker for selecting images.
+  5. **Put data in the right place.** DataStore for settings, Room for relational data with migration tests; keys go in Android Keystore, and do not newly adopt the deprecated EncryptedSharedPreferences; backup rules exclude tokens and device-bound data.
+  6. **No cleartext in production.** Network security config disables cleartext traffic, private CAs are trusted only for specified domains, and no "trust all certificates" code is written.
+  7. **A traceable release chain.** Enable R8 and resource shrinking for Release, keep rules minimal, archive the mapping file for every release; use Play App Signing on Play and manage only the upload key locally; fix the signing certificate for a package name across channels before the first release. Distributing to Google-certified devices (including channels outside Play) requires completing Android developer verification.
+  8. **Tests check behavior.** ViewModels and the data layer have local unit tests, key screens have Compose UI tests, and screenshot tests are only a supplement; Lint blocks new issues in CI.
+  9. **Performance and background work.** Ship a Baseline Profile and measure with Macrobenchmark; use WorkManager for deferrable work, reserve foreground services for tasks the user can perceive, and remember the system does not guarantee exact timing.
+  10. **Chinese app stores.** Maintain a separate listing checklist for each app store, following its current rules; compliance judgments belong to topic 27, push channels to topic 28.
+rules:
+  # ── Language, UI and architecture ──
+  - id: AND-001
+    title: Write new code in Kotlin and new UI in Jetpack Compose; migrate existing Java and View code incrementally rather than rewriting it all at once
+    level: soft
+    check: semi
+    how: CI counts newly added `.java` files and new XML layouts; when any appear, the PR must explain why
+    applies: [platform:android]
+    why: Android's new capabilities, samples and architecture guidance are all centered on Kotlin and Compose; a one-shot rewrite is risky, while incremental migration is safer.
+    sources: [S06, S09]
+  - id: AND-002
+    title: The UI layer does not call the network or database directly; it goes through ViewModels and the data layer (Repository)
+    level: soft
+    check: semi
+    how: Use module dependency rules (for example, UI modules do not depend on network or DAO modules) or ArchUnit class checks to find direct references from the UI layer to Retrofit, OkHttp or DAOs, confirmed in review
+    applies: [platform:android]
+    why: When the UI accesses data directly, state ends up scattered everywhere, and switching data sources or writing tests means changing UI code.
+    detail: |
+      - Add a domain layer (use cases) only when business rules are complex or need to be reused across several ViewModels; do not wrap every getter.
+      - MVI is a way of organizing code; it does not require adopting a state management framework.
+    sources: [S09]
+    see: ["01"]
+  - id: AND-003
+    title: Screen state is exposed by the ViewModel as an immutable StateFlow and collected in Compose with collectAsStateWithLifecycle
+    level: soft
+    check: semi
+    how: In review, check whether ViewModels expose MutableStateFlow publicly; text-scan Composables for `collectAsState()` calls, confirmed in review
+    applies: [platform:android]
+    why: Unidirectional data flow gives state a single exit point, which makes testing and process restoration easier; lifecycle-aware collection stops when the UI is not visible, avoiding wasted resources.
+    sources: [S09, S10]
+  - id: AND-004
+    title: App code does not use GlobalScope; when catching exceptions, do not swallow CancellationException
+    level: hard
+    check: auto
+    how: detekt coroutine rules (GlobalCoroutineUsage, SuspendFunSwallowedCancellation, etc.) or custom Lint checks block in CI; test code may be exempted by directory
+    applies: [platform:android]
+    why: Work in GlobalScope is not cancelled with the UI or ViewModel, so it easily leaks and runs repeatedly; swallowing CancellationException breaks cancellation.
+    detail: |
+      - Use lifecycle-bound scopes such as viewModelScope and lifecycleScope; hand work that must continue after the UI closes to WorkManager or an application-level scope.
+      - When writing `catch (e: Exception)` in a coroutine, rethrow CancellationException.
+      - Inject dispatchers (Dispatchers) through constructor parameters so tests can replace them.
+    sources: [S10]
+  - id: AND-005
+    title: Adopt dependency injection frameworks and third-party libraries only when needed; small projects inject by hand, and adopting Hilt or Koin requires stating the benefit
+    level: soft
+    check: manual
+    how: In review, check that PRs adding dependencies state the purpose and rationale
+    applies: [platform:android]
+    why: Template projects that ship with every framework preinstalled lengthen build times and increase app size and upgrade burden.
+    sources: [S09]
+    see: ["02"]
+  - id: AND-006
+    title: Do not avoid large-screen support by locking screen orientation or disabling resizing; verify core screens on tablets, foldables and in split-screen
+    level: hard
+    check: semi
+    how: CI checks the Manifest for restrictions such as `screenOrientation` and `resizeableActivity`; before release, run core flows on large-screen emulators and in split-screen mode and record the results
+    applies: [platform:android]
+    why: Starting with Android 16, for apps targeting it the system ignores orientation and size restrictions on large-screen devices, so locking orientation no longer hides layout problems.
+    detail: |
+      - Lay out by available space using window size classes and adaptive layout components; do not hard-code checks on device model or `screenWidthDp`.
+      - State must be restored after switching between portrait and landscape.
+    sources: [S34]
+    see: ["09"]
+  # ── Build: Gradle and AGP ──
+  - id: AND-007
+    title: Android projects build only through the Gradle Wrapper, use the Kotlin DSL and a version catalog (libs.versions.toml), and forbid dynamic versions and unapproved snapshots
+    level: hard
+    check: auto
+    how: CI runs wrapper validation and sets `failOnDynamicVersions()` and `failOnChangingVersions()`; same approach as topic 14's Wrapper and dependency locking rules
+    applies: [platform:android]
+    why: Dynamic versions make the same code build differently today and tomorrow, and the official docs explicitly advise against writing AGP versions with `+`.
+    sources: [S04, S35]
+    see: ["14"]
+  - id: AND-008
+    title: Upgrade AGP, Gradle, Kotlin, KSP and the Compose compiler plugin as a set; the combination must be in the official compatibility tables, and upgrade PRs include links to the tables and CI results
+    level: hard
+    check: semi
+    how: The upgrade PR template has fixed "compatibility table link" and "CI results" fields; CI compares the minimum Gradle version required by AGP with the actual Wrapper version
+    applies: [platform:android]
+    why: These tools each have different support ranges, and chasing the latest of each independently often yields an incompatible combination; there are official tables for AGP's minimum Gradle version and the Kotlin plugin's supported AGP range.
+    detail: |
+      - "Latest of everything" does not mean "a supported combination". Follow the minimum Gradle version table on the AGP release page and Kotlin's official Gradle/AGP compatibility table.
+      - Android Studio supports AGP only within a certain time window; when AGP is too old, the IDE will require an upgrade.
+      - Coding agents must not change these versions on their own; upgrades go in a separate PR.
+    sources: [S04, S08]
+    see: ["23"]
+  - id: AND-009
+    title: Projects on AGP 9 and later use built-in Kotlin support and no longer apply the org.jetbrains.kotlin.android plugin; annotation processing in new code uses KSP, with no new kapt
+    level: hard
+    check: auto
+    how: CI checks that no module `plugins` block or version catalog contains `org.jetbrains.kotlin.android` or `kotlin-kapt` (modules under migration are exempted via a list)
+    applies: [platform:android]
+    why: AGP 9 has built-in Kotlin support, and applying the old plugin fails the build outright; kapt is slower than KSP, and new projects have no reason to use it.
+    detail: |
+      - Only transitional projects that explicitly set `android.builtInKotlin=false` keep the old plugin, with a documented removal plan.
+      - For libraries that still depend on kapt, follow the official migration guide to switch to their KSP version or a migration plugin.
+    sources: [S05]
+  - id: AND-010
+    title: Compose projects enable the Compose compiler via the org.jetbrains.kotlin.plugin.compose plugin, whose version follows Kotlin; Compose library versions are managed with the BOM
+    level: hard
+    check: auto
+    how: CI checks that Compose modules apply the plugin and have no leftover `kotlinCompilerExtensionVersion`; Compose library dependencies do not specify their own version numbers (exceptions to BOM coverage require a stated reason)
+    applies: [platform:android]
+    why: Since Kotlin 2.0 the Compose compiler is released with the same version as Kotlin, and the old separate configuration no longer applies; the BOM guarantees that Compose library versions have been tested together.
+    sources: [S06, S07]
+  - id: AND-011
+    title: Configure package name suffixes and backend URLs separately for each build variant (debug, staging, release); non-release variants must not point to production
+    level: soft
+    check: auto
+    how: CI reads the BuildConfig or resource configuration generated for each variant and compares backend URLs against an allowlist
+    applies: [platform:android]
+    why: A test build connected to production creates real data and real charges, and this is hard to discover afterwards.
+  # ── Target versions and package format ──
+  - id: AND-012
+    title: targetSdk meets Google Play's current target API requirement, with the upgrade completed before the deadline; where another distribution channel has a stricter requirement, follow that channel
+    level: hard
+    check: auto
+    how: Maintain a "channel → minimum targetSdk → deadline" configuration in the repo, and CI asserts each variant's targetSdk is not below it; update this configuration from the official pages at every review
+    applies: [platform:android]
+    why: New apps and updates below the requirement cannot be published on Google Play, and existing apps become invisible to users on newer OS versions; each upgrade also brings behavior changes that need testing in advance.
+    ref_value: |
+      Google Play requirements as of 2026-11-14 (the official page is authoritative; they rise every year):
+      - New apps and updates for phones and tablets: from 2026-08-31 must target Android 16 (API 36) or higher; an extension to 2026-11-01 can be requested.
+      - Existing apps: must target Android 15 (API 35) or higher, otherwise they are invisible to users on newer OS versions.
+      - New apps and updates for Wear OS and Android Automotive OS: API 35; Android TV: API 34.
+    sources: [S01]
+  - id: AND-013
+    title: Decide minSdk from the actual device inventory of target users, and record the basis in a decision record
+    level: soft
+    check: manual
+    how: When reviewing minSdk changes, check that a device inventory or user OS version statistics are attached
+    applies: [platform:android]
+    why: Public OS version share figures are web traffic statistics and do not represent installed bases such as enterprise devices or industrial tablets; a wrong minSdk directly prevents some users from installing.
+    see: ["28"]
+  - id: AND-014
+    title: Apps containing native libraries (including .so files brought in by third-party SDKs) must support 16 KB memory page sizes and be tested in a 16 KB environment
+    level: hard
+    check: auto
+    how: CI runs `zipalign -c -P 16 -v 4` and the official `check_elf_alignment.sh` on the Release package; Lint flags unaligned native libraries; before release, run core flows on a 16 KB emulator image
+    applies: [platform:android]
+    why: More and more devices use 16 KB pages, and unaligned native libraries fail to install or crash on them; Google Play has made it a publishing requirement.
+    detail: |
+      - First use APK Analyzer to see whether the package has `.so` files under `lib/`; pure Kotlin/Java apps are inherently compatible, but running through a 16 KB environment once is still recommended.
+      - Per the official docs, AGP 8.5.1 and later and NDK r28 and later align to 16 KB by default; older NDKs need the linker flag `-Wl,-z,max-page-size=16384`.
+      - Replace prebuilt third-party `.so` files with 16 KB-compatible versions from the vendor.
+      - Native code must not assume a page size of 4096; get the value with `sysconf(_SC_PAGESIZE)`.
+    ref_value: "As of 2026-11-14: Google Play requires apps targeting Android 15 (API 35) or higher to support 16 KB pages on 64-bit devices; from 2027-02-01, updates without support cannot be published."
+    sources: [S02]
+  # ── Permissions and component exposure ──
+  - id: AND-015
+    title: Manage merged-Manifest permissions with an allowlist; any new permission (including ones brought in by SDKs) must have its purpose explained in the PR
+    level: hard
+    check: auto
+    how: CI extracts `uses-permission` from the merged Manifest of the Release variant and compares it with the allowlist in the repo, blocking any extras; remove unneeded permissions with `tools:node="remove"`
+    applies: [platform:android]
+    why: Third-party libraries quietly add permissions, and developers often only find out when review rejects the app or users complain.
+    sources: [S19]
+    see: ["27"]
+  - id: AND-016
+    title: Request runtime permissions when the user triggers the corresponding feature, and degrade the feature if denied; use the system photo picker for choosing images and videos instead of requesting permission to read all media
+    level: soft
+    check: semi
+    how: Tests cover the "denied" and "permanently denied" paths; when CI finds `READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO` or `READ_EXTERNAL_STORAGE`, it requires an explanation of why the photo picker is not enough
+    applies: [platform:android]
+    why: The photo picker lets users choose images without any permission; requesting every permission at once on launch gets denied and bad reviews, and violates the minimum-necessary principle.
+    detail: |
+      - Request with the Activity Result API's `RequestPermission`, and use `shouldShowRequestPermissionRationale` to decide whether to explain the purpose first.
+      - The notification permission (from Android 13) is also a runtime permission; request it when the user turns on a reminder-type feature.
+    sources: [S17, S18]
+    see: [MOB-039]
+  - id: AND-017
+    title: Every component with an intent-filter explicitly declares android:exported; components that do not need to be called by other apps are set to false
+    level: hard
+    check: auto
+    how: Android Lint blocks in CI; CI lists all `exported="true"` components from the merged Manifest and compares them with an allowlist
+    applies: [platform:android]
+    why: Exported Activities, Services, Receivers and Providers can be called by any app and are a common entry point for privilege escalation and data leaks.
+    detail: |
+      - Components that must be exported are protected with a signature-level permission, or verify the caller at the entry point.
+      - Specify mutability explicitly for PendingIntents; use `FLAG_IMMUTABLE` for ones passed to other apps.
+    sources: [S20]
+    see: ["25"]
+  - id: AND-018
+    title: Treat all parameters received by deep links and exported components as untrusted input; operations involving accounts or payments re-authenticate at the entry point and are never executed directly from deep link parameters
+    level: hard
+    check: semi
+    how: Review deep link handling code; in security testing, craft malicious deep links and Intents (for example, sent with adb) to verify they cannot bypass login or directly execute sensitive operations
+    applies: [platform:android]
+    why: Any app or web page can construct a deep link, and redirect URLs, order numbers and tokens in the parameters can all be forged.
+    detail: |
+      - Use verified App Links (`autoVerify` + assetlinks.json on the server) for web links to prevent other apps from opening them first.
+      - Redirect URLs in deep links must be validated against an allowlist and never passed as-is to a WebView or the next Intent.
+    sources: [S20, S21]
+    see: ["25"]
+  - id: AND-019
+    title: When a WebView loads untrusted or third-party content, do not expose addJavascriptInterface bridge objects and do not enable file or content access
+    level: hard
+    check: semi
+    how: Use Lint and text scanning to find calls such as `addJavascriptInterface`, `setAllowFileAccess(true)` and `setAllowUniversalAccessFromFileURLs`, and confirm in review that loaded content is limited to your own domains
+    applies: [platform:android]
+    why: Bridge objects are visible to every script on the page, and an injected script can use them to invoke native capabilities and read local files.
+    sources: [S22]
+    see: ["25"]
+  # ── Privacy and SDKs ──
+  - id: AND-020
+    title: Third-party SDKs that collect data have auto-initialization and auto-collection disabled and are initialized explicitly after user consent; after adding or upgrading such an SDK, compare first-launch packet captures
+    level: hard
+    check: semi
+    how: Check that the SDK's auto-start ContentProvider is removed from the Manifest and auto-collection switches are off; capture traffic in three states — fresh install, consent declined, and after consent — and compare the requested domains
+    applies: [platform:android]
+    why: Many SDKs auto-initialize through a ContentProvider at app launch and report device information before privacy consent, which is a frequent cause of regulatory notices and rectification orders in China.
+    detail: |
+      - Use App Startup or your own initialization entry point to control when SDKs start.
+      - Archive packet capture records and the SDK list for store listing and compliance checks; topic 27 is authoritative on compliance.
+    sources: [S24]
+    see: [MOB-040, "27"]
+  - id: AND-021
+    title: For apps published on Google Play, the Data safety form matches actual data collection and sharing (including third-party SDKs); update it whenever SDKs or data uses change
+    level: hard
+    check: manual
+    how: Add a "Data safety reviewed" item to the release checklist, signed off against the SDK list and packet capture results
+    applies: [platform:android]
+    why: The Data safety form is self-declared by developers; a mismatch with reality violates Play policy and can lead to rejected updates or app removal.
+    sources: [S23]
+    see: ["27"]
+  # ── Local storage and encryption ──
+  - id: AND-022
+    title: Use DataStore for lightweight settings and Room for relational data; Room has exportSchema enabled, and every schema change has a migration and a migration test
+    level: hard
+    check: auto
+    how: CI checks that schema export files are committed and increment with versions; use MigrationTestHelper to run tests upgrading from every released schema version to the current one
+    applies: [platform:android]
+    why: A schema change without a migration makes upgraded users crash on launch or lose data, and such problems do not show up on test devices with fresh installs.
+    detail: |
+      - Do not use Room to store a few toggles, and do not use SharedPreferences / DataStore to store queues or transactional data.
+      - Do not perform disk reads or writes on the main thread.
+      - For the outbound queue for offline writes and idempotency keys, see topic 28.
+    sources: [S11, S12]
+    see: [MOB-022, "17"]
+  - id: AND-023
+    title: Manage keys for local encryption with Android Keystore; do not use the deprecated Jetpack Security (EncryptedSharedPreferences, EncryptedFile) in new code
+    level: hard
+    check: auto
+    how: CI scans dependencies for `androidx.security:security-crypto` and the corresponding API calls, blocking new usages; existing usages are registered with a migration plan
+    applies: [platform:android]
+    why: All Jetpack Security APIs have been officially deprecated, and the official recommendation is to use platform APIs and Android Keystore directly; keys stored in Keystore cannot be exported.
+    detail: |
+      - For storage requirements for credentials such as tokens, see topic 28; do not treat encryption as a reason to store sensitive data locally — if you can avoid storing it, do.
+      - When you need encrypted files or databases, encrypt and decrypt with a key from Keystore, or choose a mature, evaluated encryption library.
+    sources: [S13, S14]
+    see: [MOB-012]
+  - id: AND-024
+    title: Configure backup rules (dataExtractionRules / fullBackupContent) to exclude tokens, device-bound data and data encrypted with Keystore keys from cloud backup and device transfer
+    level: hard
+    check: semi
+    how: CI checks that the Manifest references a backup rules file; review whether the rules cover the files and databases holding credentials; do a restore test on a new device
+    applies: [platform:android]
+    why: Auto Backup carries app data to new devices by default, but Keystore keys do not move with it, so after restore either credentials leak or the data cannot be decrypted and the app crashes.
+    sources: [S14, S15]
+  - id: AND-025
+    title: Release builds do not output debug logs; tokens and personal information are not written to Logcat or to shared external storage
+    level: hard
+    check: semi
+    how: Use R8 rules to strip `Log.d`/`Log.v` calls, or use a logging facade that is active only in debug; text-scan log calls for field names such as token or phone number, confirmed in review
+    applies: [platform:android]
+    why: External storage and Logcat can be read by other apps or by anyone who connects the device to a computer.
+    sources: [S20]
+    see: ["02", "25"]
+  # ── Networking ──
+  - id: AND-026
+    title: Production builds forbid cleartext HTTP; private CAs configure trust anchors per domain in network security config, with no code that trusts all certificates or skips hostname verification
+    level: hard
+    check: auto
+    how: CI checks that `cleartextTrafficPermitted` is not true for release in network security config; Android Lint checks such as TrustAllX509TrustManager and BadHostnameVerifier block
+    applies: [platform:android]
+    why: An internal network is not a trusted network either; disabling certificate validation leaves you defenseless against man-in-the-middle attacks.
+    detail: |
+      - User CA trust needed only for debugging goes in `debug-overrides` and never into release.
+      - For the trade-offs of certificate pinning and backup public key requirements, see topic 28.
+    sources: [S16]
+    see: [MOB-016, "25"]
+  - id: AND-027
+    title: An app uses only one HTTP client, with timeouts and retries set centrally; HTTP logging interceptors are enabled only in debug builds
+    level: soft
+    check: semi
+    how: Dependency analysis finds modules that pull in both OkHttp/Retrofit and Ktor; check that logging interceptors appear only in debug dependency configurations
+    applies: [platform:android]
+    why: Two clients mean two sets of timeout, authentication and certificate configuration, so behavior easily diverges; logging interceptors print request headers and bodies (including tokens) to the log.
+    see: ["16"]
+  # ── R8, signing and distribution ──
+  - id: AND-028
+    title: Release builds enable R8 code shrinking and resource shrinking; keep rules retain only classes actually used by reflection and serialization, with no broad rules such as -keep class **
+    level: hard
+    check: auto
+    how: CI checks that `isMinifyEnabled` and `isShrinkResources` are true for the release variant; diff-check keep rule files and require an explanation when a rule wildcards a whole package or all classes
+    applies: [platform:android]
+    why: Turning off R8 makes the app larger, slower to start and easier to reverse-engineer; broad keep rules amount to half-disabling R8.
+    sources: [S25]
+  - id: AND-029
+    title: Archive the R8 mapping file for every release and upload it to Play Console and the crash reporting platform
+    level: hard
+    check: auto
+    how: The release pipeline saves the mapping file as an artifact and verifies the upload step succeeded
+    applies: [platform:android]
+    why: Without the mapping file, obfuscated crash stack traces cannot be deobfuscated and production issues cannot be diagnosed.
+    sources: [S25]
+    see: [MOB-026]
+  - id: AND-030
+    title: Use Play App Signing for Google Play releases, with only the upload key kept locally and in CI; signing key files and passwords stay out of the repo
+    level: hard
+    check: auto
+    how: Secret scanning checks the repo for `.jks` and `.keystore` files and signing passwords; CI reads the upload key from a secrets management service; compare certificate fingerprints before release
+    applies: [platform:android]
+    why: If the app signing key is lost or leaked, users cannot upgrade or may install impersonating updates; Play App Signing lets Google hold the signing key, and a lost upload key can be reset.
+    sources: [S26, S27]
+    see: ["25"]
+  - id: AND-031
+    title: The signing certificate used for a package name across channels such as Google Play, Chinese app stores and direct download from the website is decided before the first release and not changed casually afterwards
+    level: hard
+    check: manual
+    how: The release checklist records the signing certificate fingerprint for each channel; every release compares the fingerprint with the record
+    applies: [platform:android]
+    why: Android only allows upgrading over an installed package with the same signature; if signatures differ between channels, users who update from a different channel fail to install and must uninstall and reinstall, losing data.
+    sources: [S26]
+  - id: AND-032
+    title: When the app will be installed on Google-certified Android devices (including through channels outside Play), complete Android developer verification identity checks and app registration before the requirement takes effect
+    level: hard
+    check: manual
+    how: The release checklist records the verification status of the developer account and the registered package names; register new package names or signatures as they are added
+    applies: [platform:android]
+    why: In regions where the requirement is in effect, apps not registered to a verified developer cannot be installed directly on certified devices and can only go through ADB or an advanced install flow.
+    detail: |
+      - Apps distributed to managed devices through an enterprise's own store do not require verification, but registration is recommended if they may leak to unmanaged devices.
+      - Students and hobbyists can use limited-distribution accounts, which have an install cap.
+    ref_value: "Official guidance as of 2026-11-14: takes effect in Indonesia, Singapore and Thailand from 2026-09-30 (some reports also include Brazil; the official page is authoritative); expands to all certified devices worldwide in 2027."
+    sources: [S03]
+  # ── Testing and quality ──
+  - id: AND-033
+    title: Android Lint runs in CI, existing issues are frozen with a baseline file, and new issues block merging
+    level: hard
+    check: auto
+    how: CI runs the `lint` task with `abortOnError` set; changes to the baseline file must be reviewed by someone
+    applies: [platform:android]
+    why: Lint finds Android-specific issues (component exporting, permissions, API levels, 16 KB alignment, Compose misuse); without it, you only find out in production.
+    sources: [S28]
+    see: ["02"]
+  - id: AND-034
+    title: ViewModels and the data layer have local unit tests covering success, failure, cancellation and no network; coroutines use kotlinx-coroutines-test test dispatchers, and dependencies use fakes
+    level: soft
+    check: semi
+    how: CI runs the local unit test task; review whether new Repositories and ViewModels come with tests
+    applies: [platform:android]
+    why: Local unit tests need no device and run fast; failure and cancellation paths are the most error-prone and the hardest to cover in manual testing.
+    sources: [S10]
+    see: ["04"]
+  - id: AND-035
+    title: Key screens have Compose UI tests that find elements by semantics or testTag and assert behavior; screenshot tests are only a supplement and do not replace behavior assertions
+    level: soft
+    check: semi
+    how: CI runs Compose UI tests on an emulator or Robolectric; review whether screenshot tests have corresponding behavior tests
+    applies: [platform:android]
+    why: Matching screenshots do not mean something can be tapped, typed into or read by a screen reader; only semantic assertions verify behavior.
+    detail: |
+      - Updates to screenshot baselines must have their diffs reviewed by a human; see topic 04 for the rules.
+      - The official screenshot testing tool is still experimental and should not be the only blocking check.
+      - For cross-platform E2E tools and Release smoke tests on real devices, see topic 28.
+    sources: [S29, S30]
+    see: ["04", MOB-037]
+  - id: AND-036
+    title: Before release, run launch and main-flow smoke tests on an R8-enabled Release build; testing only the debug build is not enough
+    level: hard
+    check: auto
+    how: The release pipeline installs the release variant (or an R8-enabled variant such as benchmark) on an emulator or real device and runs smoke test cases; failures block the release
+    applies: [platform:android]
+    why: R8 removes and renames classes used by reflection and serialization, and such crashes do not show up in debug builds.
+    sources: [S25]
+    see: [MOB-036]
+  # ── Performance and background work ──
+  - id: AND-037
+    title: User-facing apps generate and ship a Baseline Profile and use Macrobenchmark to measure startup and critical paths; performance conclusions are based on measurements of Release builds
+    level: soft
+    check: semi
+    how: CI checks that baseline-prof.txt exists and is updated with releases; periodically run Macrobenchmark on fixed devices and record the trend
+    applies: [platform:android]
+    why: A Baseline Profile precompiles critical code at install time, noticeably improving first launch and scrolling; debug build performance differs greatly from real-world behavior.
+    detail: |
+      - Give every item in long Compose lists a stable `key`; use Compose compiler reports and stability configuration to track down unnecessary recompositions.
+      - For production monitoring of startup time, jank and the like, see topic 28.
+    sources: [S31, S36]
+    see: [MOB-028]
+  - id: AND-038
+    title: Use WorkManager for deferrable background work; foreground services are only for ongoing tasks the user can perceive, and declare the corresponding foregroundServiceType in the Manifest
+    level: hard
+    check: auto
+    how: CI checks that every foreground service declares a type and the corresponding permission; review the purpose of any new foreground service
+    applies: [platform:android]
+    why: Newer OS versions require foreground services to declare a type, otherwise starting them throws an exception immediately; system and OEM battery-saving policies delay or kill background tasks, and no mechanism guarantees exact timing.
+    detail: |
+      - Do not use persistent services or frequent wake-ups to "keep the app alive"; do not guide users to disable all battery-saving settings as a general solution.
+      - Business features that need on-time reminders are triggered by server push, with a catch-up fetch when the app opens; see topic 28.
+    sources: [S32, S33]
+    see: [MOB-021, MOB-023]
+  # ── Chinese app stores ──
+  - id: AND-039
+    title: When publishing to Chinese app stores, maintain a separate listing checklist for each store (entity credentials, filing information, privacy policy, permission explanations, SDK list, signing), following that store's current rules
+    level: soft
+    check: manual
+    how: Before release, check the list item by item with evidence attached (filing number, privacy policy link, packet capture records, signing fingerprint)
+    applies: [platform:android]
+    why: Each store's review requirements differ and change often, and copying one store's rules easily leads to rejection; legal judgments such as whether filing is required are made by the compliance owner.
+    sources: [S37, S38]
+    see: ["27", "28"]
+choices:
+  - category: Language and UI
+    pick: Kotlin + Jetpack Compose + Material 3, with Compose library versions managed by the BOM
+    alternatives:
+      - { name: Mixing XML Views and Compose, when: Incremental migration of existing View projects }
+    avoid:
+      - { name: Writing all new features in Java, why: "Out of step with coroutines, Compose and the official samples" }
+      - { name: A home-grown UI framework, why: "High maintenance cost, cannot keep up with platform changes" }
+    license: Apache-2.0
+    sources: [S06]
+  - category: Architecture
+    pick: The officially recommended UI layer / data layer split + ViewModel + unidirectional data flow
+    alternatives:
+      - { name: Adding a domain layer (use cases), when: When business rules are complex or need to be reused in several places }
+    avoid:
+      - { name: Global mutable singletons holding state, why: "Unclear source of state, hard to test and restore" }
+      - { name: Adopting a large state framework for MVI, why: ViewModel + StateFlow is enough for small apps }
+    sources: [S09]
+  - category: Async
+    pick: Kotlin coroutines + Flow / StateFlow
+    alternatives:
+      - { name: LiveData, when: Maintaining existing code }
+    avoid:
+      - { name: "GlobalScope, raw threads", why: "Not cancelled with the lifecycle, prone to leaks" }
+    license: Apache-2.0
+    sources: [S10]
+  - category: Dependency injection
+    pick: Manual injection for small projects; Hilt for multi-module medium and large projects
+    alternatives:
+      - { name: Koin, when: "You want to avoid annotation processing, or need to share with Kotlin Multiplatform" }
+    avoid:
+      - { name: Adopting a DI framework by default without real complexity, why: Adds build time and comprehension cost }
+    license: Hilt (Dagger) and Koin are both Apache-2.0
+  - category: Networking and serialization
+    pick: OkHttp + Retrofit, with kotlinx.serialization for serialization
+    alternatives:
+      - { name: Ktor Client, when: "You need to share the networking layer with Kotlin Multiplatform; choose either it or Retrofit, not both" }
+      - { name: Moshi / Gson, when: Maintaining existing code }
+    avoid:
+      - { name: Building your own framework on HttpURLConnection, why: "Timeouts, retries and connection pooling all have to be reinvented" }
+      - { name: Two HTTP clients side by side, why: Configuration and behavior diverge }
+    license: Apache-2.0
+  - category: Local storage
+    pick: DataStore for settings, Room for relational data
+    alternatives:
+      - { name: SQLDelight, when: You prefer handwritten SQL or need to share database code across platforms }
+    avoid:
+      - { name: A home-grown SQLite ORM, why: Migrations and type mapping all have to be reinvented }
+      - { name: SharedPreferences for queues or transactional data, why: No transactions or migrations }
+    license: Apache-2.0
+    notes: "Room has a new major release line with different coordinates and APIs, so it is not a drop-in replacement; evaluate it only for new projects or new modules, and treat existing projects as migration projects."
+    sources: [S11, S12]
+  - category: Local encryption
+    pick: Android Keystore + platform cryptography APIs
+    avoid:
+      - { name: Jetpack Security (EncryptedSharedPreferences), why: All APIs have been officially deprecated }
+      - { name: Hard-coding keys in code or resources, why: Anyone can extract them by decompiling }
+    sources: [S13, S14]
+  - category: Navigation
+    pick: Navigation 3 for new Compose projects
+    alternatives:
+      - { name: Navigation 2 (Navigation Compose), when: "Existing projects; migrate when it becomes necessary" }
+    avoid:
+      - { name: Maintaining your own back stack, why: "Cannot be restored after process death, and deep links are hard to handle" }
+    license: Apache-2.0
+  - category: Image loading
+    pick: Coil
+    alternatives:
+      - { name: Glide, when: Large existing View projects }
+    avoid:
+      - { name: Managing your own Bitmap cache, why: Prone to OOM and leaks }
+    license: Apache-2.0
+  - category: Background work
+    pick: WorkManager
+    alternatives:
+      - { name: Foreground services, when: "Ongoing tasks the user can perceive (such as navigation, calls, upload progress)" }
+      - { name: AlarmManager exact alarms, when: "Cases that truly need exact timing, such as alarm clocks and calendar reminders; requires the corresponding permission" }
+    avoid:
+      - { name: Persistent services or frequent wake-ups to keep the app alive, why: "Drains battery, restricted by the system and OEMs" }
+    license: Apache-2.0
+    sources: [S32]
+  - category: Build
+    pick: Gradle Wrapper + Kotlin DSL + version catalog + AGP (built-in Kotlin)
+    alternatives:
+      - { name: Groovy DSL, when: Incremental migration of old repos }
+    avoid:
+      - { name: "Dynamic versions, unlocked snapshots", why: Builds are not reproducible }
+      - { name: Using kapt by default in new projects, why: "Slower than KSP, and needs extra migration under AGP 9" }
+    sources: [S04, S05]
+  - category: Formatting and static analysis
+    pick: Android Lint (required) + ktlint
+    alternatives:
+      - { name: detekt, when: "You need extra rules such as coroutine or complexity checks; confirm it supports the current Kotlin version before making it blocking" }
+      - { name: Spotless, when: You want a single entry point for invoking formatters }
+    avoid:
+      - { name: Two formatters modifying the same files, why: They fight each other }
+    license: "Lint is Apache-2.0; ktlint is MIT; detekt is Apache-2.0"
+    sources: [S28]
+  - category: Unit and UI testing
+    pick: "JUnit + kotlinx-coroutines-test + fakes; Compose UI tests for screens"
+    alternatives:
+      - { name: MockK / Mockito, when: When a fake truly cannot be used instead }
+      - { name: Robolectric, when: "You want to run UI tests on the JVM and reduce reliance on emulators" }
+      - { name: Roborazzi / Paparazzi, when: "You need screenshot tests; pilot them first and do not make them the only blocking check" }
+    avoid:
+      - { name: Unit tests hitting a real backend, why: Slow and flaky }
+    sources: [S29, S30]
+  - category: Performance
+    pick: Baseline Profile + Macrobenchmark
+    sources: [S31]
+  - category: Release automation
+    pick: Gradle Play Publisher (Google Play)
+    alternatives:
+      - { name: fastlane, when: "The team already uses it, or also needs to manage iOS releases" }
+      - { name: Open APIs of individual Chinese app stores or manual upload, when: "Chinese channels, in a separate pipeline" }
+    avoid:
+      - { name: Putting store account keys in the repo, why: "If leaked, they can be used to publish releases under your name" }
+    sources: [S39]
+antipatterns:
+  - { bad: "Copying old tutorials and applying the kotlin-android plugin and kotlinCompilerExtensionVersion in an AGP 9 project", instead: Use built-in Kotlin and the Compose compiler plugin }
+  - { bad: "Upgrading AGP, Kotlin and Gradle each to the latest and calling it done", instead: Upgrade as a set according to the official compatibility tables and run CI }
+  - { bad: "Locking portrait orientation or disabling resizing to dodge large-screen support", instead: "Use adaptive layouts and verify on large screens and in split-screen" }
+  - { bad: "Adding `-keep class ** { *; }` whenever an obfuscated build crashes", instead: "Find the classes actually accessed by reflection, write minimal keep rules, and regression-test on the Release package" }
+  - { bad: Releasing after testing only the debug build, instead: Run smoke tests on an R8-enabled Release build }
+  - { bad: "Loading analytics and push SDKs on first launch before showing the privacy agreement", instead: "Disable SDK auto-initialization, initialize after consent, and prove it with packet captures" }
+  - { bad: Requesting all permissions at once on launch, instead: "Request when the feature is used, and use the photo picker for choosing images" }
+  - { bad: "Allowing global cleartext HTTP or ignoring certificate errors for internal-network convenience", instead: "Put the private CA in network security config and trust it per domain" }
+  - { bad: "Using GlobalScope or persistent services to \"keep background tasks alive\"", instead: "WorkManager; for user-visible ongoing tasks, foreground services with a declared type" }
+  - { bad: Mixing the Play upload key and Chinese channel signing keys arbitrarily, instead: "Plan the signing certificate for each channel before the first release and record the fingerprints" }
+  - { bad: Treating screenshot tests as proof that accessibility and interaction are fine, instead: UI tests with semantic assertions + manual screen reader verification }
+  - { bad: "Preinstalling Hilt, Room, Paging and WorkManager in every project by default", instead: Adopt them when a feature needs them }
+sources:
+  - { id: S01, title: "Target API level requirements for Google Play apps", url: "https://support.google.com/googleplay/android-developer/answer/11926878", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "Support 16 KB page sizes", url: "https://developer.android.com/guide/practices/page-sizes", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Understanding Android developer verification", url: "https://support.google.com/android-developer-console/answer/16561738", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Android Gradle plugin: Update AGP and Gradle", url: "https://developer.android.com/build/releases/about-agp", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "Migrate to built-in Kotlin", url: "https://developer.android.com/build/migrate-to-built-in-kotlin", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "Compose Bill of Materials", url: "https://developer.android.com/develop/ui/compose/bom", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: "Compose Compiler Gradle plugin", url: "https://developer.android.com/develop/ui/compose/compiler", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "Kotlin: Configure a Gradle project (Gradle and AGP compatibility tables)", url: "https://kotlinlang.org/docs/gradle-configure-project.html", publisher: JetBrains, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "Recommendations for Android architecture", url: "https://developer.android.com/topic/architecture/recommendations", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "Best practices for coroutines in Android", url: "https://developer.android.com/kotlin/coroutines/coroutines-best-practices", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "Migrate your Room database", url: "https://developer.android.com/training/data-storage/room/migrating-db-versions", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "DataStore", url: "https://developer.android.com/topic/libraries/architecture/datastore", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "Jetpack Security releases", url: "https://developer.android.com/jetpack/androidx/releases/security", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "Android Keystore system", url: "https://developer.android.com/privacy-and-security/keystore", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: "Back up user data with Auto Backup", url: "https://developer.android.com/identity/data/autobackup", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Network security configuration", url: "https://developer.android.com/privacy-and-security/security-config", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Request runtime permissions", url: "https://developer.android.com/training/permissions/requesting", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Photo picker", url: "https://developer.android.com/training/data-storage/shared/photo-picker", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "Manage manifest files (merged Manifest)", url: "https://developer.android.com/build/manage-manifests", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "Security tips", url: "https://developer.android.com/privacy-and-security/security-tips", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "Verify Android App Links", url: "https://developer.android.com/training/app-links/verify-applinks", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: "Insecure WebView native bridges", url: "https://developer.android.com/privacy-and-security/risks/insecure-webview-native-bridges", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "Provide information for Google Play's Data safety section", url: "https://support.google.com/googleplay/android-developer/answer/10787469", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: "MIIT announcement on the campaign to address personal information protection in apps and SDKs", url: "https://www.miit.gov.cn/jgsj/xgj/APPqhyhqyzxzzxd/tzgg/art/2026/art_0d4f79b29eac4727b6b403a74b0d41fa.html", publisher: Ministry of Industry and Information Technology of China, date: 2026-08-25, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "Enable app optimization (R8)", url: "https://developer.android.com/topic/performance/app-optimization/enable-app-optimization", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "Sign your app", url: "https://developer.android.com/studio/publish/app-signing", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Use Play App Signing", url: "https://support.google.com/googleplay/android-developer/answer/9842756", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "Improve your code with lint checks", url: "https://developer.android.com/studio/write/lint", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: "Test your Compose layout", url: "https://developer.android.com/develop/ui/compose/testing", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: "Screenshot testing", url: "https://developer.android.com/training/testing/ui-tests/screenshot", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: "Baseline Profiles overview", url: "https://developer.android.com/topic/performance/baselineprofiles/overview", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: "Background tasks overview", url: "https://developer.android.com/develop/background-work/background-tasks", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: "Changes to foreground services", url: "https://developer.android.com/develop/background-work/services/fgs/changes", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: "App orientation, aspect ratio, and resizability", url: "https://developer.android.com/develop/adaptive-apps/guides/app-orientation-aspect-ratio-resizability", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: "Gradle: Verifying dependencies", url: "https://docs.gradle.org/current/userguide/dependency_verification.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S36, title: "Stability in Compose", url: "https://developer.android.com/develop/ui/compose/performance/stability", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: "Huawei AppGallery developer documentation", url: "https://developer.huawei.com/consumer/cn/doc/App/50104/", publisher: Huawei, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S38, title: "Xiaomi App Store listing guide", url: "https://dev.mi.com/xiaomihyperos/documentation/detail?pId=1501", publisher: Xiaomi, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S39, title: "Gradle Play Publisher", url: "https://github.com/Triple-T/gradle-play-publisher", publisher: Triple-T, date: null, kind: community, checked: 2026-11-14 }
+open_questions:
+  - "First countries where Android developer verification takes effect: the official page lists Indonesia, Singapore and Thailand, and some reports also include Brazil; whether it affects non-Google-certified devices in mainland China and distribution through Chinese app stores is to be confirmed"
+  - "The current terms of Google Play's policy on photo and video permissions (READ_MEDIA_* may be requested only for core functionality) have not been verified clause by clause; once verified, AND-016 could be upgraded to a hard constraint"
+  - The status of the Navigation 3 stable release and the new Room major release line comes from the original report and has not been re-verified
+  - "Which AGP version Kotlin's official Gradle/AGP compatibility table currently covers has not been re-verified (the current AGP major version is 9, which has been verified)"
+  - "detekt's support for the current Kotlin version and ktlint's maintenance cadence have not been verified"
+  - "Licenses of third-party libraries such as Gradle Play Publisher, fastlane, Coil, Koin, Roborazzi and Paparazzi have not been individually verified against the LICENSE files in their official repos (the original report lists Gradle Play Publisher as Apache-2.0; to be confirmed)"
+  - "The Xiaomi push channel policy change milestone on 2026-12-31 (mentioned in the original report, details not verified) is tracked under topic 28"
+  - "Research to add: listing review rules for the OPPO, vivo and Honor app stores"
+  - "Research to add: Android-side choices for crash reporting and logging libraries (domestic and international options, self-hosted deployment)"
+  - "Research to add: maturity and CI integration of Baseline Profile, Macrobenchmark and screenshot testing tools"

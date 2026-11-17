@@ -1,0 +1,605 @@
+id: "15"
+slug: scripts-config
+title: Scripts and Configuration Languages
+summary: How to write, and which tools to use to check, Shell and PowerShell scripts, task runners (just, Task, Make), YAML/JSON/TOML configuration, .env files, Dockerfiles, SQL files, and CI configuration files.
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Writing and checking Bash, POSIX sh, and PowerShell scripts (ShellCheck, shfmt, PSScriptAnalyzer)
+    - When to stop using Shell and switch to a proper programming language
+    - Task runners (just, Task, Make, npm scripts) and standard task names
+    - Writing, formatting, and Schema-validating YAML, JSON, and TOML configuration
+    - .env files and environment variable naming conventions
+    - Writing Dockerfiles and hadolint
+    - Dialect declaration and formatting for SQL files (SQLFluff)
+    - Static checks for CI configuration files (GitHub Actions, GitLab CI)
+    - Cron expression dialects and time zones
+  excludes:
+    - { what: "General principles of formatting and linting; baseline requirements for .editorconfig", see: "02" }
+    - { what: "Centralized config loading, type validation, and override order", see: "02" }
+    - { what: "CI gate ordering, keeping CI logic in repository scripts, local hook tooling", see: "03" }
+    - { what: "Secret management and scanning, general defenses against command injection and SQL injection, regular expression denial of service (ReDoS), supply chain and image scanning, SBOM", see: "25" }
+    - { what: "Building and publishing container images, base image policy, deployment", see: "26" }
+    - { what: "Schema design, naming, migrations, and query semantics beyond parameter binding", see: "17" }
+    - { what: "Choosing a job scheduling system, duplicate triggers, and idempotency", see: "18" }
+    - { what: "License review when distributing GPL tools with a product", see: "27" }
+overview: |
+  1. **Shell is only glue.** Use Shell to call existing commands and chain a few steps; once complex branching, concurrency, or JSON/YAML parsing appears, switch to the project's main language.
+  2. **Get the interpreter right first.** Executable scripts have a shebang (the `#!` interpreter declaration on the first line); `sh` scripts contain no Bash-specific syntax; PowerShell has its own separate toolset.
+  3. **Every script goes through ShellCheck and shfmt.** Including executables without a `.sh` suffix. `set -euo pipefail` is a guardrail, not exception handling.
+  4. **One task runner, one set of task names.** What is standardized is the names `dev/test/lint/format/check/build/clean`, not the tool; `check` does not modify files, and failures must not be swallowed.
+  5. **Config must parse first, then pass a Schema.** Choose the format by its consumer; machine-read configuration has a committed JSON Schema; reject duplicate keys; quote values in YAML that would be implicitly type-converted.
+  6. **.env is not committed.** What is committed is a `.env.example` containing only variable names and non-sensitive defaults; production values are injected by the deployment platform.
+  7. **Dockerfiles must pass lint and actually build.** Pin base images, run as non-root, pass build credentials via secret mounts, and have a `.dockerignore`.
+  8. **SQL files declare their dialect.** Passing SQLFluff only shows that formatting and some syntax are fine; it does not mean the SQL runs on the target database.
+  9. **CI configuration is a program with privileges.** Run actionlint and zizmor; pin third-party Actions to full commit SHAs; keep permissions minimal; do not splice untrusted text into `run:`.
+rules:
+  # ── Shell and PowerShell ──
+  - id: CFG-001
+    title: Executable scripts must have a shebang on the first line that matches the actual syntax; scripts using `#!/bin/sh` must not contain Bash-specific syntax
+    level: hard
+    check: auto
+    how: ShellCheck reports SC2148 for a missing shebang; after determining the dialect from the shebang, it reports SC3xxx-series warnings for Bash syntax in sh scripts
+    applies: [lang:shell]
+    why: With the wrong interpreter, a script runs on the development machine but breaks in environments that only have dash or BusyBox, and the error often does not surface on the first line.
+    detail: |
+      - Bash scripts use `#!/usr/bin/env bash`; write POSIX sh only for scripts that must run in minimal images or during system initialization.
+      - For scripts that must run cross-platform, state which environments are supported and test each one: the very old Bash bundled with macOS, BusyBox ash, Git Bash, and WSL cannot be treated as the same environment.
+      - zsh is fine for interactive use but is not the default interpreter for automation scripts.
+    sources: [S01, S03]
+  - id: CFG-002
+    title: Run ShellCheck in CI on every Shell script in the repository (including executables without a `.sh` suffix); any warning fails the build
+    level: hard
+    check: auto
+    how: Use `shfmt -f .` to list all Shell files by suffix and shebang, and pass them to `shellcheck`
+    applies: [lang:shell]
+    why: Checking only `scripts/*.sh` misses suffix-less scripts under `bin/`, which are often the ones executed most.
+    detail: When a specific warning genuinely does not apply, put `# shellcheck disable=SCxxxx` on the line above, naming the rule and giving a reason (see COD-039); do not disable it for the whole file.
+    sources: [S03, S05]
+    see: [COD-039]
+  - id: CFG-003
+    title: Format Shell scripts uniformly with shfmt and check with `shfmt -d` in CI; put indentation and other options in `.editorconfig`
+    level: hard
+    check: auto
+    how: CI runs `shfmt -d .`; any diff fails the build
+    applies: [lang:shell]
+    why: Leaving formatting to a tool keeps whitespace out of code review; shfmt reads `.editorconfig`, so the editor and CI share the same settings.
+    detail: Formatting only handles layout; it cannot replace ShellCheck's correctness checks.
+    sources: [S05, S42]
+    see: [COD-038]
+  - id: CFG-004
+    title: Always double-quote variable expansions and command substitutions; pass multiple arguments with `"$@"` or an array, not by concatenating them into one string
+    level: hard
+    check: auto
+    how: ShellCheck rules such as SC2086 (unquoted expansion) and SC2068 (unquoted `$@`)
+    applies: [lang:shell]
+    why: Without quotes, values containing spaces, newlines, or glob characters get split or expanded; at best this causes errors, at worst it deletes the wrong files.
+    detail: Leave quotes off only when glob expansion is actually intended, and add a comment explaining why. To iterate over files, do not use `for f in $(ls)`; use `find -print0` with `while read -r -d ''`, or use a glob directly.
+    sources: [S04]
+  - id: CFG-005
+    title: Bash scripts start with `set -euo pipefail` by default; handle commands that are expected to fail with `if` or an explicit exit-code check, and do not treat `-e` as exception handling
+    level: soft
+    check: semi
+    how: A script scan checks for the set line at the top; review whether commands expected to fail are handled explicitly
+    applies: [lang:shell]
+    why: '`-e` does not trigger an exit inside `if` conditions, `&&`/`||` chains, or some function calls; relying on it as a safety net lets errors slip through.'
+    detail: |
+      - `pipefail` makes the pipeline fail if any stage fails; but commands that exit early, such as `grep -q`, cause the upstream command to receive SIGPIPE; handle that explicitly instead of turning the option off globally.
+      - The target sh does not necessarily support `pipefail`; when writing POSIX sh, test on the target shell, or check return codes step by step.
+    sources: [S02]
+  - id: CFG-006
+    title: Untrusted input must not reach `eval`, `bash -c`, `sh -c`, or a concatenated command string; pass the command and its arguments separately
+    level: hard
+    check: semi
+    how: Scan for `eval` and `-c` invocations as candidates, and review where their arguments come from
+    applies: [lang:shell]
+    why: External content spliced into a command string is executed as code; this is a direct entry point for command injection.
+    sources: [S06]
+    see: ["25"]
+  - id: CFG-007
+    title: Create temporary files and directories with `mktemp` and clean them up with `trap`; before `rm -rf` uses a path variable, confirm it is non-empty and inside a controlled directory
+    level: hard
+    check: semi
+    how: ShellCheck's SC2115 suggests `${var:?}` to avoid deleting from the root when the variable is empty; review where deletion paths come from
+    applies: [lang:shell]
+    why: Temporary files with fixed names get overwritten by concurrent runs; when the variable is empty, `rm -rf "$dir/"*` deletes in unexpected places.
+    detail: |
+      ```bash
+      tmp_dir=$(mktemp -d)
+      trap 'rm -rf -- "$tmp_dir"' EXIT
+      ```
+    sources: [S01, S03]
+  - id: CFG-008
+    title: Write error messages to standard error and return a non-zero exit code on failure; scripts that change external state offer a dry run or run pre-checks before executing
+    level: soft
+    check: manual
+    how: In review, check where error output goes, the exit codes, and pre-checks before dangerous operations
+    applies: [lang:shell]
+    why: Callers and CI rely on exit codes to determine success and on standard output to get results; mixing the two makes scripts impossible to compose.
+    sources: [S01]
+  - id: CFG-009
+    title: When a script grows complex branching, state machines, concurrency, retries, or needs to read/write JSON/YAML, rewrite it in the project's main language
+    level: soft
+    check: manual
+    how: When reviewing new or heavily modified scripts, judge whether Shell is still appropriate
+    applies: [lang:shell]
+    why: Shell has no reliable data structures or error handling; once the logic gets complex it becomes hard to test and hard to change.
+    detail: For just reading or making small edits to JSON/YAML, use parsing tools such as `jq` and `yq`; do not use `sed` or `grep` to edit structured data as text.
+    ref_value: The Google Shell Style Guide suggests reconsidering once a script exceeds about 100 lines or has complex control flow; this is a signal to reassess, not a hard limit.
+    sources: [S01]
+  - id: CFG-010
+    title: Run PSScriptAnalyzer on PowerShell scripts in CI; do not use ShellCheck to check `.ps1`
+    level: hard
+    check: auto
+    how: CI runs `Invoke-ScriptAnalyzer -Recurse`; any error-level issue fails the build
+    applies: [lang:shell]
+    why: PowerShell is a different language; ShellCheck cannot understand it.
+    detail: Start scripts with `Set-StrictMode -Version Latest` and `$ErrorActionPreference = 'Stop'` so that undefined variables and non-terminating errors also surface. Use Pester for tests.
+    sources: [S07, S41]
+  # ── Task runners ──
+  - id: CFG-011
+    title: Provide one task runner at the repository root (justfile, Taskfile.yml, Makefile, or package.json scripts) that can list all tasks with descriptions
+    level: soft
+    check: semi
+    how: Check that a task runner exists at the root and that `just --list`, `task --list`, etc. list the tasks; the contributing guide states the required tools
+    applies: [all]
+    why: Newcomers and Agents do not have to dig through docs to guess commands; CI can also call the same commands (see 03).
+    sources: [S08, S09]
+    see: ["03"]
+  - id: CFG-012
+    title: 'Applicable tasks use these standard names: help, dev, test, lint, format, check, build, clean; do not create empty placeholders for tasks that do not apply'
+    level: soft
+    check: semi
+    how: A script lists the task names in the runner and compares them against the agreed list
+    applies: [all]
+    why: With uniform names, you know what to type in any repository, and Agents do not have to figure it out repository by repository.
+    detail: |
+      - `lint`: static checks; does not modify files.
+      - `format`: formatting; modifies files.
+      - `check`: the collection of read-only checks such as lint, type checking, and fast tests; run by both CI and locally.
+      - `clean`: deletes only files generated by this project.
+  - id: CFG-013
+    title: '`check`, `lint`, and `test` tasks must not modify files in the working tree'
+    level: hard
+    check: auto
+    how: After CI runs `check`, run `git status --porcelain`; non-empty output fails the build
+    applies: [all]
+    why: If a check task quietly modifies files, CI passes on the modified code while what was committed is the unmodified version.
+  - id: CFG-014
+    title: A failed task must return a non-zero exit code; do not swallow check failures with `|| true`, Make's `-` prefix, Task's `ignore_error`, or CI's `allow_failure`
+    level: hard
+    check: semi
+    how: Scan task files and CI configuration for these patterns as candidates, and confirm each one is justified and is not a required check
+    applies: [all]
+    why: Once failures are swallowed the pipeline is all green, and problems only surface in production.
+    detail: For steps that are genuinely allowed to fail (such as optional reporting), add a comment next to them explaining why.
+    see: ["03"]
+  - id: CFG-015
+    title: Tasks with external side effects, such as deploying, releasing, or resetting data, get their own names (e.g. `deploy-staging`, `reset-db`) and are not hung under the default task, check, or test
+    level: soft
+    check: manual
+    how: When reviewing the task runner, check the dependency chains of the default task and the check-type tasks
+    applies: [all]
+    why: Typing a harmless-looking command that also triggers a deployment or wipes a database is one of the hardest incidents to trace.
+  - id: CFG-016
+    title: In a Makefile, list targets that do not correspond to files in `.PHONY`; when recipes use Bash syntax, set `SHELL` and `.SHELLFLAGS` explicitly
+    level: soft
+    check: semi
+    how: Review the Makefile; check whether non-file targets are in `.PHONY`
+    applies: [lang:shell]
+    why: Without `.PHONY`, a target is skipped if the repository happens to contain a file or directory with the same name; Make uses `/bin/sh` by default, so Bash syntax fails on some systems.
+    detail: For example, `SHELL := bash` and `.SHELLFLAGS := -euo pipefail -c`. Recipe lines must be indented with Tab; set `indent_style = tab` for Makefiles in `.editorconfig`.
+    sources: [S10, S42]
+  # ── Configuration files ──
+  - id: CFG-017
+    title: 'Choose the config format by its consumer: JSON for machine-to-machine exchange, YAML where the ecosystem already expects it (CI, container orchestration), and TOML for human-edited application config; do not force conversions just for uniformity'
+    level: soft
+    check: manual
+    how: When reviewing a new configuration file, confirm its format is natively supported by its consumer
+    applies: [all]
+    why: The format is determined by the program that reads it; forcing everything into one format often adds a conversion layer and loses comments or types.
+    detail: Environment variables hold only simple values that change per deployment and references to secrets; do not stuff a whole block of JSON into one variable.
+    sources: [S11, S13]
+  - id: CFG-018
+    title: Machine-read configuration files with a fixed structure have a committed JSON Schema, validated in CI with check-jsonschema; validation uses the local Schema and does not fetch it over the network
+    level: hard
+    check: auto
+    how: CI runs `check-jsonschema --schemafile schemas/xxx.json <config-file>`
+    applies: [all]
+    why: Checking only that it is "valid YAML" does not catch misspelled keys or wrong types, and such errors often surface only at startup or runtime.
+    detail: |
+      - Use the 2020-12 Schema draft and specify `required`, types, enums, and value ranges; reject unknown fields by default (`additionalProperties: false`), and relax this only when extension is needed.
+      - Validation has four steps: parses → conforms to the Schema → business semantics are correct (references exist, value combinations make sense) → contains no plaintext secrets.
+      - When the config structure has a breaking change, version the Schema and document the migration path.
+      - In offline environments, keep the Schema and the meta-schemas it references locally.
+    sources: [S11, S12]
+    see: [COD-022, COD-023]
+  - id: CFG-019
+    title: YAML and JSON configuration must not contain duplicate keys
+    level: hard
+    check: auto
+    how: For YAML, use yamllint's `key-duplicates` rule (enabled by default); for JSON, use a tool that detects duplicate keys, such as pre-commit-hooks' `check-json` or Biome's `noDuplicateObjectKeys`
+    applies: [all]
+    why: The YAML spec requires unique keys, and the JSON spec says the handling of duplicate keys is unpredictable; some parsers take the first, others the last, so the same config means different things in two programs.
+    sources: [S13, S14, S16]
+  - id: CFG-020
+    title: Quote YAML values that would be implicitly type-converted, such as yes/no/on/off, version-like `1.10`, numbers with leading zeros, and times like `12:30`
+    level: hard
+    check: semi
+    how: Set yamllint's `truthy` and `octal-values` rules to error level; version-like float values rely on review and deserialization tests
+    applies: [all]
+    why: 'YAML parsers handle these values differently: `no` may become false and `1.10` may become 1.1, so the configuration is silently changed.'
+    detail: "In GitHub Actions, `on:` is a key, not a value; set `check-keys: false` on the `truthy` rule to avoid false positives."
+    sources: [S13, S16]
+  - id: CFG-021
+    title: Run yamllint on YAML files in CI with its config file committed; turn off layout rules that conflict with the formatter, keeping only the rules the formatter does not cover
+    level: hard
+    check: auto
+    how: CI runs `yamllint -s .` (`-s` makes warnings fail too)
+    applies: [all]
+    why: A formatter only handles layout; duplicate keys, implicit types, and syntax errors need yamllint to find them.
+    detail: When Prettier is also used, leave yamllint's layout rules such as indentation and line length to Prettier, so the two tools do not fight each other.
+    sources: [S15, S16]
+  - id: CFG-022
+    title: Use one formatter for JSON and YAML (Prettier by default), verified in check mode in CI
+    level: hard
+    check: auto
+    how: CI runs `prettier --check "**/*.{json,yml,yaml}"`
+    applies: [all]
+    why: With only one formatter per file type, saving from different people and different editors does not produce meaningless changes.
+    detail: |
+      - In TypeScript projects that already format JSON with Biome, leave JSON to Biome and let Prettier handle only YAML; do not have both manage JSON (see 10).
+      - Use JSONC with comments only for files that explicitly support it (such as `tsconfig.json` and editor settings); do not hand it to other parsers as standard JSON.
+    sources: [S17]
+    see: [COD-038, "10"]
+  - id: CFG-023
+    title: Use one formatting and checking tool for TOML files (Tombi by default), verified in check mode in CI
+    level: hard
+    check: auto
+    how: CI runs the tool in check mode (e.g. `tombi format --check` and `tombi lint`)
+    applies: [all]
+    why: TOML's dotted keys, arrays of tables, and date-time types are easy to get wrong and hard to spot by eye.
+    detail: Projects already using Taplo can keep using it, but it has moved to individual maintenance with infrequent releases, so new projects should not choose it. Passing the tool does not mean the target program's TOML parser behaves the same; load critical configuration once with the actual target program.
+    sources: [S18, S19]
+    see: [COD-038]
+  # ── .env and environment variables ──
+  - id: CFG-024
+    title: '`.env` and other local environment files go in `.gitignore` and are not committed; the committed `.env.example` lists only variable names, descriptions, and non-sensitive defaults'
+    level: hard
+    check: auto
+    how: CI checks that the repository contains no `.env` or `.env.*` files other than `.env.example`, and runs secret scanning on the repository (tools in 25)
+    applies: [all]
+    why: '`.env` usually contains real passwords and tokens; once committed, they are in the history, and deleting the file does not remove them.'
+    detail: When code adds or removes an environment variable, update `.env.example` in the same change; a script can compare the variable names the code reads against the example file.
+    sources: [S20]
+    see: ["25"]
+  - id: CFG-025
+    title: Environment variable names use only uppercase letters, digits, and underscores, with an application or service prefix, e.g. `ORDER_SVC_DB_URL`
+    level: soft
+    check: semi
+    how: A script checks the format of variable names in `.env.example` and in config definitions
+    applies: [all]
+    why: By POSIX convention, environment variable names used by utilities consist of uppercase letters, digits, and underscores; a prefix avoids collisions with variables from the system or other programs.
+    sources: [S21]
+  - id: CFG-026
+    title: .env files are for local development only; in production, values are injected by the deployment platform or a secrets service, and .env is not baked into the image
+    level: soft
+    check: manual
+    how: Review deployment configuration and Dockerfiles to confirm .env is not copied
+    applies: [all]
+    why: Configuration varies by deployment and is stored separately from code; a .env baked into an image gets distributed wherever the image goes.
+    detail: |
+      - .env has no unified syntax standard; loader libraries differ in how they handle quotes, interpolation, and multi-line values, so write only simple `KEY=value`.
+      - Do not `source` a .env of unknown origin in scripts: it is executed as Shell code.
+    sources: [S20]
+    see: [COD-022, "26"]
+  # ── Dockerfile ──
+  - id: CFG-027
+    title: Run hadolint and `docker build --check` on Dockerfiles in CI, and actually build once
+    level: hard
+    check: auto
+    how: CI runs `hadolint Dockerfile` and `docker build --check .`, then performs a real build
+    applies: [all]
+    why: Lint finds problems in how it is written, but only a real build proves it works; you need both.
+    detail: |
+      - hadolint runs ShellCheck on the Shell snippets in RUN.
+      - When RUN uses a pipe, set `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` first (hadolint DL4006); otherwise a failure in an earlier stage of the pipe is ignored.
+      - Commit `.hadolint.yaml`; ignoring a rule requires a stated reason.
+    sources: [S24, S25]
+  - id: CFG-028
+    title: For released images, FROM must not use `latest` or an untagged base image; pin with tag plus digest and let a dependency update bot open PRs to upgrade
+    level: hard
+    check: auto
+    how: hadolint's DL3006 (no tag) and DL3007 (uses latest); additionally, a script checks that FROM lines contain `@sha256:`
+    applies: [all]
+    why: Tags can be repointed to different content; without pinning, you cannot say which base image a given build used.
+    detail: 'Pinning the digest does not make builds reproducible: package downloads, timestamps, compilers, and architectures can all make two builds differ. For how to choose base images, see 26.'
+    sources: [S22, S25]
+    see: ["26", "25"]
+  - id: CFG-029
+    title: The final image runs as a non-root user; where root is genuinely needed, document the reason and the runtime restrictions in place
+    level: hard
+    check: auto
+    how: hadolint's DL3002 (last USER is root); after building, run `id` to confirm
+    applies: [all]
+    why: If a process in the container is compromised, running as root makes it easier for an attacker to escape or damage data mounted from the host.
+    sources: [S22, S25]
+    see: ["25"]
+  - id: CFG-030
+    title: Pass credentials needed at build time via BuildKit secret or ssh mounts, not ARG, ENV, or COPY
+    level: hard
+    check: auto
+    how: '`docker build --check`''s SecretsUsedInArgOrEnv check; run secret scanning on Dockerfiles'
+    applies: [all]
+    why: ARG and ENV values remain in image metadata and build history; anyone with the image can read them.
+    sources: [S23, S24]
+    see: ["25"]
+  - id: CFG-031
+    title: Any directory with a Dockerfile must have a `.dockerignore` that excludes at least `.git`, `.env*`, key files, dependencies, and build cache directories
+    level: hard
+    check: auto
+    how: CI checks that `.dockerignore` exists and contains these entries
+    applies: [all]
+    why: Without it, `COPY . .` copies the Git history and local secrets into the image, and also invalidates the build cache frequently.
+    sources: [S27]
+  - id: CFG-032
+    title: Use multi-stage builds, copying only the files needed at runtime into the runtime stage; copy the dependency manifest and lockfile and install dependencies first, then copy the source code
+    level: soft
+    check: semi
+    how: Review the Dockerfile's stage layout and COPY order; compare image sizes
+    applies: [all]
+    why: Build tools and source code left in the runtime image both increase its size and widen the attack surface; installing dependencies first lets source changes reuse the cached dependency layer.
+    detail: Minimal single-stage images (e.g. copying just one static binary) can be an exception.
+    sources: [S22, S26]
+  - id: CFG-033
+    title: Put system package installation and cache cleanup in the same RUN; write CMD and ENTRYPOINT in JSON array form
+    level: soft
+    check: auto
+    how: hadolint's DL3009 (apt lists not cleaned) and DL3015 (missing `--no-install-recommends`); `docker build --check`'s JSONArgsRecommended
+    applies: [all]
+    why: When written separately, the cache stays in the earlier layer; shell-form CMD prevents the process from receiving stop signals, so the container cannot shut down gracefully.
+    detail: Whether to pin system package versions (DL3008) depends on the base image's update policy; if you pin, someone must upgrade regularly, or builds will fail when old versions are removed from the repository.
+    sources: [S22, S24, S25]
+  # ── SQL files ──
+  - id: CFG-034
+    title: Lint and format SQL files in the repository with SQLFluff; commit `.sqlfluff` and specify the target dialect in it
+    level: hard
+    check: auto
+    how: CI runs `sqlfluff lint`; `.sqlfluff` must contain a `dialect` setting
+    applies: [all]
+    why: SQL syntax differs between databases; without a declared dialect it can only guess using generic syntax, producing both missed issues and false positives.
+    detail: |
+      - Passing SQLFluff only shows that the formatting and the syntax it can parse are fine; SQL using dialect-specific syntax must be tested by running it on the actual version of the target database (see 17).
+      - Chinese domestic databases that are PostgreSQL-compatible are not fully identical to PostgreSQL; they too must be tested on the target database.
+      - For templated SQL (such as dbt or Jinja), configure the corresponding templater.
+    sources: [S28, S29]
+    see: ["17"]
+  - id: CFG-035
+    title: Business queries name the columns they select and do not use `SELECT *`; forms that select no columns, such as `EXISTS (SELECT 1 ...)`, are exempt
+    level: soft
+    check: auto
+    how: Enable AM04 (ambiguous number of result columns) in `.sqlfluff`
+    applies: [all]
+    why: After a table gains columns or its column order changes, the result of `SELECT *` silently changes, which may break callers or expose extra sensitive fields.
+    sources: [S29]
+  # ── CI configuration files ──
+  - id: CFG-036
+    title: Run actionlint and zizmor on GitHub Actions workflow files in CI; validate GitLab CI configuration with the official CI Lint
+    level: hard
+    check: auto
+    how: CI runs `actionlint` and `zizmor .github/workflows/`; for GitLab, call the project's CI Lint API
+    applies: [all]
+    why: Generic YAML checks do not understand CI syntax and expressions; actionlint checks syntax and types, zizmor checks security issues, and the two complement each other.
+    detail: GitLab's `include`, `rules`, and variables can only be fully validated in the project's context, so use the instance's built-in CI Lint rather than just running yamllint.
+    sources: [S32, S33, S34]
+  - id: CFG-037
+    title: Pin third-party Actions and reusable workflows to a full commit SHA (or use the platform's workflow dependency lockfile), not just `@v4` or `@main`
+    level: hard
+    check: auto
+    how: zizmor's `unpinned-uses` check
+    applies: [all]
+    why: Tags and branches can be repointed at any time; a poisoned Action runs in your pipeline with your permissions.
+    detail: Add a comment after the SHA with the corresponding version number, and let Renovate or Dependabot handle upgrades (see 03). GitHub's workflow dependency lockfile (`.github/workflows/actions.lock`) is a new feature; confirm your setup supports it before using it.
+    sources: [S30, S35]
+    see: ["03", "25"]
+  - id: CFG-038
+    title: Workflows explicitly declare minimal `permissions`, elevating only the individual jobs that need more
+    level: hard
+    check: auto
+    how: zizmor's `excessive-permissions` check
+    applies: [all]
+    why: The default token's permissions can be broad; if a step is compromised, the smaller the permissions, the smaller the damage.
+    detail: Do not run PR code from forks in the same job as anything that can read secrets or has write permissions. Mark sensitive GitLab variables as protected and masked.
+    sources: [S30]
+    see: ["25"]
+  - id: CFG-039
+    title: Do not put untrusted event text such as PR titles, branch names, and commit messages directly into `run:` scripts; put it in an environment variable first and reference that
+    level: hard
+    check: auto
+    how: zizmor's `template-injection` check
+    applies: [all]
+    why: '`${{ }}` expressions are substituted verbatim into the script before it runs, so a snippet of Shell code in a PR title gets executed.'
+    detail: |
+      ```yaml
+      - env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE"
+      ```
+    sources: [S31]
+    see: ["25"]
+  # ── Cron expressions ──
+  - id: CFG-040
+    title: Next to each Cron expression, note which scheduler runs it, the time zone, and the number of fields; when changing an important scheduled job, use the target scheduler to list the next several trigger times and check them
+    level: soft
+    check: manual
+    how: In review, check the comments and the list of trigger times
+    applies: [all]
+    why: Linux cron, GitHub Actions, and Quartz differ in field count and syntax; if the time zone is unclear or daylight saving time kicks in, a job may not run or may run twice.
+    detail: |
+      - GitHub Actions schedules use UTC by default; you can add `timezone` to specify an IANA time zone; the minimum interval is 5 minutes, and runs may be delayed during peak times.
+      - In Linux cron, when both the day-of-month and day-of-week fields are restricted, the job fires when either matches.
+      - For duplicate triggers, missed triggers, and idempotency of scheduled jobs, see 18.
+    sources: [S36, S37]
+    see: ["18"]
+choices:
+  - category: Shell static analysis
+    pick: ShellCheck
+    alternatives:
+      - { name: bash -n, when: "Only for a quick syntax-error check; not a substitute for ShellCheck" }
+    avoid:
+      - { name: Relying only on manual review, why: "Issues such as quoting and dialect are hard to catch fully by eye" }
+    license: GPL-3.0 (run as a standalone command-line tool in CI; if distributing it with a product, see 27)
+    notes: Still maintained, with ongoing commits to the repository, but formal releases are infrequent.
+    sources: [S03]
+  - category: Shell formatting
+    pick: shfmt
+    license: BSD-3-Clause
+    sources: [S05]
+  - category: Shell script testing
+    pick: bats-core
+    when: When a script has branching logic, is called from multiple places, and needs regression tests
+    license: MIT
+    sources: [S40]
+  - category: PowerShell checking and testing
+    pick: PSScriptAnalyzer (static analysis) + Pester (testing)
+    avoid:
+      - { name: Using ShellCheck on .ps1, why: "It is not the same language" }
+    license: PSScriptAnalyzer is MIT; Pester is Apache-2.0
+    sources: [S07, S41]
+  - category: Task runner
+    pick: just
+    when: Multi-language repositories where the main goal is giving a set of commands memorable names
+    alternatives:
+      - { name: Task, when: "When you need task dependencies, skipping completed tasks based on inputs and outputs, or want to avoid depending on Bash on Windows" }
+      - { name: GNU Make, when: "C/C++ projects that need incremental file-based builds, or that already have a mature Makefile" }
+      - { name: npm scripts, when: "Projects consisting of a single Node package" }
+    avoid:
+      - { name: Layer upon layer of wrapper scripts, why: "When something fails, you cannot find the command actually being run" }
+      - { name: A complex Makefile for a handful of commands, why: "Tabs, variable expansion, and implicit rules bring extra pitfalls" }
+    license: just is CC0-1.0; Task is MIT; GNU Make is GPL-3.0 or later
+    sources: [S08, S09, S10]
+  - category: JSON Schema validation
+    pick: check-jsonschema
+    alternatives:
+      - { name: In-application JSON Schema validation library, when: "When config is validated at program startup; see 10–14 for validation libraries per language" }
+    avoid:
+      - { name: Only checking that a file is valid JSON or YAML, why: "Does not catch misspelled keys or wrong types" }
+      - { name: "Sourcemeta JSON Schema CLI (when integrating or distributing)", why: "Licensed under AGPL-3.0; review per 27 before distributing or offering it as a service; impact is smaller when it only runs standalone in CI" }
+    license: check-jsonschema is Apache-2.0
+    notes: check-jsonschema ships Schemas for common files such as GitHub workflows; in offline environments, keep the Schemas you use locally.
+    sources: [S12, S38]
+  - category: YAML checking
+    pick: yamllint
+    avoid:
+      - { name: Using yamllint to validate CI pipelines, why: "It does not understand GitHub Actions or GitLab CI semantics; see CFG-036" }
+    license: GPL-3.0 (standalone command-line tool)
+    sources: [S15]
+  - category: JSON and YAML formatting
+    pick: Prettier
+    alternatives:
+      - { name: Biome, when: "TypeScript projects already using Biome hand JSON to it and keep Prettier for YAML" }
+    avoid:
+      - { name: Two formatters for the same file type, why: "They rewrite each other's output" }
+    license: MIT
+    sources: [S17]
+  - category: TOML formatting and checking
+    pick: Tombi
+    alternatives:
+      - { name: Taplo, when: "Existing projects already using it without problems; the two tools' configs are incompatible, so migrating requires changing the config" }
+    avoid:
+      - { name: Handling TOML with a YAML or generic formatter, why: "They do not understand TOML syntax" }
+    license: Tombi and Taplo are both MIT
+    notes: Taplo's original author announced stepping away in 2025; it is now maintained by a single maintainer at their own pace, with the most recent formal release in May 2025. Tombi is actively updated, but the project is fairly new and mainly maintained by a few people, so review it regularly.
+    sources: [S18, S19]
+  - category: Dockerfile checking
+    pick: hadolint + docker build --check
+    avoid:
+      - { name: Linting without building, why: "Does not prove the build succeeds" }
+    license: hadolint is GPL-3.0 (standalone command-line tool)
+    notes: For image vulnerability scanning and SBOM tools, see 25.
+    sources: [S24, S25]
+  - category: SQL checking and formatting
+    pick: SQLFluff
+    alternatives:
+      - { name: pgFormatter, when: "PostgreSQL only, and only formatting is needed, not lint" }
+    avoid:
+      - { name: Treating SQLFluff as a SQL injection check, why: "It only looks at the SQL files themselves; for injection defenses see 25" }
+    license: SQLFluff is MIT; pgFormatter is under the PostgreSQL License
+    sources: [S28, S39]
+  - category: GitHub Actions configuration checking
+    pick: actionlint (syntax) + zizmor (security)
+    alternatives:
+      - { name: GitLab CI Lint, when: "When using GitLab CI" }
+    avoid:
+      - { name: Running only actionlint, why: "It does not check security issues such as permissions and injection" }
+    license: actionlint and zizmor are both MIT
+    sources: [S32, S33, S34]
+antipatterns:
+  - { bad: "Treating `set -e` as try/catch, assuming any failure will make the script exit", instead: "Handle commands expected to fail explicitly with if" }
+  - { bad: '`for f in $(ls)` and unquoted variables', instead: "Quote them; use globs or `find -print0`" }
+  - { bad: 'Installing tools with `curl ... | bash`', instead: "Download a pinned version and verify its hash, or use a package manager" }
+  - { bad: "Editing JSON or YAML with sed or regular expressions", instead: "Use jq, yq, or a parsing library in your language, and validate against the Schema afterwards" }
+  - { bad: "Writing a separate set of lint and build commands in CI that differs from local", instead: "Have CI call the repository's task runner" }
+  - { bad: 'Running formatting inside the `check` task', instead: "check is read-only; formatting belongs in format" }
+  - { bad: "Passing an API token via ARG in a Dockerfile", instead: "Use a BuildKit secret mount" }
+  - { bad: '`FROM xxx:latest` for released images', instead: "Pin with tag plus digest and let a bot open PRs to upgrade" }
+  - { bad: "Committing .env to the repository or baking it into the image", instead: "Commit only .env.example; values are injected by the platform at runtime" }
+  - { bad: "Using YAML for all configuration, with no Schema", instead: "Choose the format by its consumer, and give machine-read config a Schema" }
+  - { bad: '`run: echo "${{ github.event.pull_request.title }}"`', instead: 'Put it in env first, then reference it as `"$PR_TITLE"`' }
+  - { bad: "Validating expressions for every scheduler with an online cron website", instead: "Check against the target scheduler's own parsing results" }
+sources:
+  - { id: S01, title: Google Shell Style Guide, url: "https://google.github.io/styleguide/shellguide.html", publisher: Google, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S02, title: "GNU Bash Reference Manual: The Set Builtin", url: "https://www.gnu.org/software/bash/manual/html_node/The-Set-Builtin.html", publisher: GNU, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: ShellCheck, url: "https://github.com/koalaman/shellcheck", publisher: ShellCheck, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "ShellCheck wiki: SC2086", url: "https://www.shellcheck.net/wiki/SC2086", publisher: ShellCheck, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "mvdan/sh (shfmt)", url: "https://github.com/mvdan/sh", publisher: mvdan, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: OWASP OS Command Injection Defense Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/OS_Command_Injection_Defense_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S07, title: PSScriptAnalyzer overview, url: "https://learn.microsoft.com/en-us/powershell/utility-modules/psscriptanalyzer/overview", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: just, url: "https://github.com/casey/just", publisher: casey, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: Task, url: "https://github.com/go-task/task", publisher: go-task, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: "GNU Make Manual: Phony Targets", url: "https://www.gnu.org/software/make/manual/html_node/Phony-Targets.html", publisher: GNU, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: JSON Schema 2020-12, url: "https://json-schema.org/draft/2020-12", publisher: JSON Schema, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: check-jsonschema, url: "https://github.com/python-jsonschema/check-jsonschema", publisher: python-jsonschema, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: YAML 1.2.2 Specification, url: "https://yaml.org/spec/1.2.2/", publisher: YAML, date: "2021-10-01", kind: standard, checked: 2026-11-13 }
+  - { id: S14, title: "RFC 8259: The JSON Data Interchange Format", url: "https://www.rfc-editor.org/rfc/rfc8259", publisher: IETF, date: "2017-12", kind: standard, checked: 2026-11-14 }
+  - { id: S15, title: yamllint, url: "https://github.com/adrienverge/yamllint", publisher: adrienverge, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "yamllint: Rules", url: "https://yamllint.readthedocs.io/en/stable/rules.html", publisher: yamllint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: Prettier, url: "https://github.com/prettier/prettier", publisher: Prettier, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: Tombi, url: "https://github.com/tombi-toml/tombi", publisher: tombi-toml, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "Taplo: The future of the project (issue #715)", url: "https://github.com/tamasfe/taplo/issues/715", publisher: Taplo, date: "2024-12-20", kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "The Twelve-Factor App: Config", url: "https://12factor.net/config", publisher: Twelve-Factor, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S21, title: "POSIX.1-2024: Environment Variables", url: "https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap08.html", publisher: The Open Group, date: "2024", kind: standard, checked: 2026-11-14 }
+  - { id: S22, title: "Docker: Building best practices", url: "https://docs.docker.com/build/building/best-practices/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Docker: Build secrets", url: "https://docs.docker.com/build/building/secrets/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Docker: Build checks", url: "https://docs.docker.com/reference/build-checks/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: hadolint, url: "https://github.com/hadolint/hadolint", publisher: hadolint, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: "Docker: Multi-stage builds", url: "https://docs.docker.com/build/building/multi-stage/", publisher: Docker, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Docker: Build context and .dockerignore", url: "https://docs.docker.com/build/concepts/context/", publisher: Docker, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: SQLFluff, url: "https://github.com/sqlfluff/sqlfluff", publisher: SQLFluff, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: "SQLFluff: Rules reference", url: "https://docs.sqlfluff.com/en/stable/reference/rules.html", publisher: SQLFluff, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: "GitHub Actions: Secure use reference", url: "https://docs.github.com/en/actions/reference/security/secure-use", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: "GitHub Actions: Script injections", url: "https://docs.github.com/en/actions/concepts/security/script-injections", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S32, title: actionlint, url: "https://github.com/rhysd/actionlint", publisher: rhysd, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: zizmor, url: "https://github.com/zizmorcore/zizmor", publisher: zizmor, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: "GitLab: CI Lint API", url: "https://docs.gitlab.com/api/lint/", publisher: GitLab, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: "GitHub Actions: Workflow dependency lockfiles", url: "https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: "GitHub Actions: Late March 2026 updates (schedule supports time zones)", url: "https://github.blog/changelog/2026-03-26-github-actions-late-march-2026-updates", publisher: GitHub, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: "crontab(5) — Linux manual page", url: "https://man7.org/linux/man-pages/man5/crontab.5.html", publisher: man7.org, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S38, title: Sourcemeta JSON Schema CLI, url: "https://github.com/sourcemeta/jsonschema", publisher: Sourcemeta, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S39, title: pgFormatter, url: "https://github.com/darold/pgFormatter", publisher: darold, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S40, title: bats-core, url: "https://github.com/bats-core/bats-core", publisher: bats-core, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S41, title: Pester, url: "https://github.com/pester/Pester", publisher: Pester, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S42, title: EditorConfig Specification, url: "https://spec.editorconfig.org/", publisher: EditorConfig, date: null, kind: standard, checked: 2026-11-13 }
+open_questions:
+  - "Status of GitHub's workflow dependency lockfiles: the official docs say public preview, while third-party reports say it went GA on 2026-10-28; accounts differ on whether it covers all plans and whether it locks transitive dependencies"
+  - "The timezone field for GitHub Actions schedule: confirmed by the official changelog, but the exact changelog date (03-19 or 03-26) and the details of daylight saving time handling have not been verified against the official docs"
+  - "Support for `set -o pipefail` in target sh implementations (dash, BusyBox ash) has not been verified one by one"
+  - "Whether Tombi can fully replace Taplo (config migration, editor support, long-term maintainer count) needs tracking; whether Biome has switched to Tombi for TOML is only seen in a third-party PR description"
+  - "Whether Biome supports YAML formatting yet (which affects the division of labor in CFG-022) has not been verified"
+  - "The Docker documentation and PSScriptAnalyzer documentation findings are carried over from the original research and were not re-verified in this round"
+  - "Research to add: how toolchain version pinning approaches (mise, aqua, etc.) apply to script and config tools; needs to align with the choices in 10"
+  - "Research to add: recommended minimal config files for hadolint, yamllint, zizmor, and SQLFluff, and the specific rule IDs corresponding to each hard requirement"
+  - "Research to add: which shell to use when running just and Task on Windows; how to write GitLab CI reuse (extends, !reference, components)"
+  - "Research to add: whether zsh scripts need a separate checking tool"

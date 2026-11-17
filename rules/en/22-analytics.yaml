@@ -1,0 +1,619 @@
+id: "22"
+slug: analytics
+title: Data Analysis and Statistics
+summary: How to define tracking and events, how to write product metric definitions, where to store and how to process analytics data, what makes an A/B experiment count, how to choose and draw charts, how to keep cost ledgers, and how to check data quality.
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - "Tracking and event conventions: engineering practices for naming, properties, versioning, identity, sampling, and consent state"
+    - "Product metric definitions: definition documents, metric owners, versioning and changes"
+    - "Analytics storage and processing: PostgreSQL, DuckDB, ClickHouse, dbt, Python data processing, notebooks"
+    - Data quality checks and backfills
+    - "A/B experiments: experiment plans, sample size, stopping rules, SRM checks; feature flags used for experiments"
+    - "Charts and reports: chart type selection, readability, information dashboards must display"
+    - "General cost ledger: recording resource and third-party call costs by feature, tenant, and project"
+  excludes:
+    - { what: "Legal basis for processing personal information, notice and consent copy, legal retention requirements, cross-border data transfer", see: "27" }
+    - { what: "Redaction of frontend error and performance reports (WEB-029), chart component library selection", see: "07" }
+    - { what: "Chart color tokens, font sizes, and other visual tokens", see: "08" }
+    - { what: "Contrast, not relying on color alone, alternative text for charts", see: "09" }
+    - { what: "Event envelope format, event schema registry and compatibility rules", see: "16" }
+    - { what: "Outbox tables, monetary column types, read replicas, schema migrations", see: "17" }
+    - { what: "Message queues, job scheduling, and workflow engines", see: "18" }
+    - { what: "Tenant isolation and authorization models", see: "19" }
+    - { what: "Token metering for model calls, model price tables, and budgets", see: "24" }
+    - { what: "Service runtime monitoring, OTel, logs, alerts, SLOs", see: "26" }
+    - { what: "Unified open-source license policy and license scanning tools", see: "27" }
+    - { what: "Python dependency locking and toolchain", see: "12" }
+overview: |
+  1. **Tracking is not a ledger.** Business facts such as orders, acceptance, settlement, and billing are derived only from server-side transactions or business events; browser and client tracking is only for looking at paths, funnels, and feature usage.
+  2. **Keep four kinds of data apart.** Business facts, cost metering, experiment assignment and exposure, and optional behavioral telemetry differ in source, whether they may be lost, whether they may be sampled, and retention period; do not mix them into one catch-all table.
+  3. **Register events before shipping them.** Name, version, owner, property allowlist, privacy level, retention period, and sampling method go into an event registry in the repository, validated by CI; every event carries a unique ID and two timestamps, and consumers are idempotent by ID.
+  4. **Consent and offline operation are engineering problems.** Before the user consents, optional telemetry loads no scripts, sends no requests, and writes no identifiers; on-premises deployments disable it by default and send nothing out when offline. Legal requirements are in 27.
+  5. **Write metrics as executable definitions.** Every key metric has an owner and a version, states grain, numerator and denominator, time zone, and zero-denominator handling, and comes with sample-data tests; changing a definition bumps the version, never a silent SQL edit.
+  6. **Start with PostgreSQL; upgrade only when measurements show it is not enough.** Use DuckDB for batch processing and local analysis, ClickHouse for large-scale event analysis; before adopting one, benchmark with the same data and queries.
+  7. **Set the rules for an experiment in advance.** Before launch, write down the hypothesis, primary metric, sample size, and stopping rule; record assignment and exposure separately; draw no conclusion when the SRM check fails; if the sample is too small, do not force an A/B test.
+  8. **A chart answers one question.** Choose the chart type by the question, start bar charts at zero, label units and definitions; core dashboards show the metric version and the data-as-of time.
+  9. **Record costs as an immutable ledger.** Use exact decimals for amounts, snapshot price lists, write corrections as reversing entries, keep estimates and actual bills apart, and list what cannot be attributed separately.
+  10. **Read the license before embedding.** Self-hosting as a standalone service and integrating into a distributed product are two different things; the main repositories of Metabase, Grafana, and Unleash are AGPL, PostHog self-hosting is officially unsupported, and the full distribution of next-generation dbt is under a proprietary license.
+rules:
+  # ── Data classification and sources of truth ──
+  - id: DATA-001
+    title: Business facts such as orders, acceptance, settlement, and billing are derived only from server-side transactions or business events, never inferred from client tracking
+    level: hard
+    check: semi
+    how: "Review data lineage: the source tables for bills, settlement, and core business metrics must be server-side fact tables; events marked authoritative in the event registry may only originate on the server"
+    applies: [kind:data, kind:service]
+    why: Client tracking can be blocked, lost, duplicated, or forged; using it to compute money or decide acceptance produces numbers that cannot be audited.
+    detail: |
+      - Persist business events and business state in the same transaction (outbox or a structured business event table), and send them asynchronously to analytics storage after commit.
+      - Do not push events to an analytics platform separately before the transaction commits and then assume they will be neither lost nor duplicated.
+    see: [DB-026]
+  - id: DATA-002
+    title: Split business facts, cost metering, experiment assignment and exposure, and optional behavioral telemetry into four categories, stored separately with separately defined retention periods
+    level: soft
+    check: manual
+    how: "Review the event registry: every event states its category; check that each category has its own table or partition and retention period"
+    applies: [kind:data]
+    why: The four kinds differ in whether they may be lost, whether they may be sampled, and whether they may be off by default; mixing them into one table harms correctness, privacy boundaries, and cost all at once.
+    detail: |
+      | Category | Source | May be lost? | May be sampled? |
+      |---|---|---|---|
+      | Business facts | Server-side transactions | No; retry and deduplicate | No |
+      | Cost metering | Billing service, resource counters, vendor bills | Not silently; failures must be backfilled | No |
+      | Experiment assignment and exposure | Assignment service and real exposure points | No; run completeness checks | No |
+      | Optional behavioral telemetry | Browser, client, backend tracking | Lossy is acceptable | Yes; record the probability |
+  # ── Tracking and event conventions ──
+  - id: DATA-003
+    title: Before a new event ships, register it in the repository's event registry with its name, version, owner, trigger, property allowlist, privacy level, retention period, and sampling method
+    level: soft
+    check: auto
+    how: CI validates the registry format with JSON Schema and scans event names reported in code, failing on unregistered ones
+    applies: [kind:data]
+    why: Unregistered events have no maintainer, their meaning is guesswork, and no one can review what data they carry.
+    detail: |
+      Example (neutral):
+      ```yaml
+      events:
+        order_paid:
+          owner: Orders team
+          version: 1
+          category: business      # business / cost / experiment / telemetry
+          authoritative: true
+          trigger: After the payment callback confirms success and the transaction commits
+          privacy: internal
+          retention: business_audit
+          sampling: none
+          properties: [order_id, amount_minor, currency]
+        ui_report_viewed:
+          owner: Product analytics team
+          version: 1
+          category: telemetry
+          authoritative: false
+          trigger: First render of the report page completes
+          privacy: pseudonymous
+          retention: optional_telemetry
+          sampling: deterministic_by_session
+          properties: [report_key]
+      ```
+  - id: DATA-004
+    title: "Use one event naming style across the codebase: lowercase snake_case, \"object_past-tense-verb\"; give UI interactions a common prefix, and do not use names without business meaning such as click, success, test, or event1"
+    level: soft
+    check: auto
+    how: CI validates event names in the registry with a regex and checks them against a banned-word list
+    applies: [kind:data]
+    why: Inconsistent naming gives the same thing several event names, so queries and definitions stop matching.
+    detail: |
+      - Good: `order_paid`, `invoice_issued`, `ui_report_viewed`.
+      - Bad: `click`, `btnClick2`, `PaySuccess`, `test_event`.
+      - Use the past tense for things that happened; use nouns or adjectives for state values.
+  - id: DATA-005
+    title: Every event must carry a unique event ID, event name, schema version, occurrence time and receipt time (UTC), and source; in multi-tenant systems it must also carry the tenant ID
+    level: hard
+    check: auto
+    how: Validate with JSON Schema at ingestion, rejecting and counting events with missing fields; contract tests cover every event type
+    applies: [kind:data]
+    why: Without a unique ID you cannot deduplicate; with only a receipt time you cannot handle offline uploads and late arrivals; without a tenant ID you cannot isolate.
+    detail: |
+      - Optional fields (session ID, anonymous ID, trace_id, experiment ID, variant ID, sampling probability) must also be listed in the schema's properties so they are not rejected by `additionalProperties: false`.
+      - Enable `format` validation in the validator (such as ajv-formats for Ajv); otherwise `uuid` and `date-time` are just comments.
+      - The common event envelope format is defined in 16.
+    see: ["16"]
+  - id: DATA-006
+    title: Event properties contain only allowlisted fields; never full URLs and query parameters, free text, file names, email addresses, phone numbers, IP addresses, tokens, or raw prompt text
+    level: hard
+    check: semi
+    how: The reporting SDK has a shared filtering hook with unit tests; CI scans property names in the registry for sensitive terms; periodically sample ingested data for inspection
+    applies: [kind:data, platform:web, platform:mobile]
+    why: These fields are either personal information or credentials; once in the analytics store they get copied into BI, export files, and third parties.
+    detail: |
+      - Convert error messages into controlled error codes before reporting.
+      - Redaction rules for frontend monitoring reports are in WEB-029; the legal definition of personal information is in 27.
+    see: [WEB-029, "27"]
+  - id: DATA-007
+    title: Bump the schema version when renaming, retyping, or changing the meaning of event fields, and run old and new versions in parallel for a while; adding only optional properties does not bump the version
+    level: soft
+    check: auto
+    how: CI diffs registry and schema changes and fails when it finds an incompatible change without a version bump
+    applies: [kind:data]
+    why: Silently changing the structure mixes historical and new data in the same calculation, with no visible break on the chart.
+    see: ["16"]
+  - id: DATA-008
+    title: Store times in UTC and declare the business time zone in reports; use typed columns for amounts, counts, times, and the like instead of stuffing everything into one JSON field
+    level: soft
+    check: semi
+    how: "Review the schema: whether fields used by core queries are typed columns; whether report definitions state the time zone"
+    applies: [kind:data]
+    why: An unclear time zone makes cross-day statistics off by a day; numbers inside JSON cannot be type-constrained and are hard to index.
+  - id: DATA-009
+    title: Generate anonymous IDs only after optional telemetry is enabled; link identities after login with an explicit event; do not identify users by IP, UA, or device fingerprint; clear anonymous state after logout or tenant switch
+    level: hard
+    check: semi
+    how: End-to-end tests check that no identifier is generated when telemetry is off; cross-tenant tests check that identities do not leak across a switch; review identity-merge logic
+    applies: [kind:data, platform:web, platform:mobile]
+    why: Fingerprinting and cross-tenant identity mix-ups produce wrong numbers and are privacy problems.
+    see: ["27"]
+  - id: DATA-010
+    title: Business facts, cost metering, and experiment assignment and exposure must not be sampled; when behavioral telemetry is sampled, sample deterministically by a stable key and record the sampling probability
+    level: hard
+    check: semi
+    how: Scan collection configuration; events in authoritative categories must have a sampling rate of 1; telemetry event schemas must have a sampling probability field
+    applies: [kind:data]
+    why: Sampling ledger and experiment data causes unrecoverable bias; without recorded probabilities you cannot reweight.
+    detail: |
+      - Total event counts can be estimated by weighting with Σ(1/p); distinct user counts, retention, and funnels cannot be recovered this way directly and need a separate design.
+  - id: DATA-011
+    title: Analytics-side event consumption is idempotent by event ID; replaying the same input batch twice yields the same result, and out-of-order and late events can be recomputed and corrected
+    level: hard
+    check: auto
+    how: Integration tests replay the same batch of events (including duplicates, out-of-order, and late events) twice and compare that the aggregates match
+    applies: [kind:data]
+    why: Delivery is at-least-once, so duplicates and reordering will happen; without idempotency you over-count.
+    see: [DB-027]
+  - id: DATA-012
+    title: "Gate optional telemetry on the user's consent state: before consent, load no analytics scripts, send no requests, and write no tracking cookies or local identifiers; after consent is withdrawn, stop immediately and clear identifiers"
+    level: hard
+    check: auto
+    how: End-to-end tests record network requests and storage writes in both the not-consented and withdrawn states, failing on any request to an analytics domain or any tracking identifier
+    applies: [kind:data, platform:web, platform:mobile]
+    why: Laws in many regions require prior consent for non-essential tracking; hiding the UI while the backend keeps reporting is unlawful collection.
+    detail: |
+      - Consent state is itemized by purpose (analytics, session recording, ad attribution, etc.), carries a version and timestamp, and is readable on the server too.
+      - Business auditing and cost accounting required for the system to operate are not optional telemetry and are not controlled by this switch.
+      - Which purposes need consent and how to write the notice are in 27.
+    see: ["27"]
+  - id: DATA-013
+    title: In on-premises or air-gapped deployments, optional telemetry is off by default; analytics scripts and dependencies are hosted locally, with zero outbound traffic in offline environments
+    level: hard
+    check: auto
+    how: Run installation, startup, upgrade, and dashboard use in an environment that blocks external DNS and HTTP, recording outbound requests; there must be zero
+    applies: [kind:data, kind:onprem]
+    why: If telemetry is "off" but scripts still reach a CDN and the geo-IP database still updates over the network, data leaves the customer's intranet.
+    detail: |
+      - Images, DuckDB extensions, geo-IP data, fonts, and chart libraries must all be packaged in advance.
+    sources: [S06]
+    see: ["26", "07"]
+  # ── Metric definitions ──
+  - id: DATA-014
+    title: "Write key metrics as machine-readable definitions in the repository: ID, version, owner, meaning, grain, numerator and denominator, deduplication and exclusion rules, time window, business time zone, zero-denominator handling, data sources, plus sample-data tests"
+    level: soft
+    check: auto
+    how: CI validates metric definition files against a schema and runs sample-data tests for each metric
+    applies: [kind:data]
+    why: When a definition exists only in someone's head or in some BI card, different reports give different numbers.
+    detail: |
+      Example (neutral):
+      ```yaml
+      id: order.repeat_purchase_rate
+      version: 1
+      owner: Growth team
+      description: Share of users who ordered during the period and paid again within 30 days
+      grain: user_id
+      numerator: "first_paid_at in window AND second_paid_within_30d"
+      denominator: "first_paid_at in window"
+      exclusions: [test_account, refunded_all]
+      window: calendar_month
+      business_timezone: Configured per project
+      zero_denominator: return_null
+      sources: [fact_order_payment]
+      tests:
+        - "fixture: 3 first-order users, 1 of whom repurchases within 30 days => 1/3"
+        - "0 <= value <= 1"
+      ```
+      - For ratio metrics, numerator and denominator use the same grain; a zero denominator returns null, not 0.
+      - A semantic-layer platform is not required up front; SQL views plus YAML are enough, and dbt comes in once there are many models.
+    sources: [S08]
+  - id: DATA-015
+    title: When changing a metric definition, bump the metric version, run old and new versions side by side for a while, and mark the change point on charts; never silently edit the SQL
+    level: soft
+    check: auto
+    how: CI fails when a metric's SQL or definition changes without a version bump
+    applies: [kind:data]
+    why: After a silent definition change, the jump in the trend chart gets mistaken for a business change.
+  - id: DATA-016
+    title: Read primary metrics together with guardrail metrics; do not evaluate individuals on a single metric; per-person statistics must state their purpose and restrict who can view them
+    level: soft
+    check: manual
+    how: "Review metric definitions: whether primary metrics list guardrails; whether per-person reports have a purpose statement and access settings"
+    applies: [kind:data]
+    why: Once a metric becomes a target it gets gamed and distorted; per-person detail is sensitive data.
+    see: ["06", "27"]
+  - id: DATA-017
+    title: Core dashboards and metric cards show the metric version, reporting period, data-as-of time, and data quality status; exports are re-authorized on the server
+    level: soft
+    check: semi
+    how: UI tests check that this information is present on core cards; review authorization of export endpoints
+    applies: [kind:data]
+    why: Viewers need to be able to answer "where does this number come from, and is it fresh", or they will make decisions on stale or still-backfilling data.
+  # ── Storage and processing ──
+  - id: DATA-018
+    title: By default, do analytics on PostgreSQL with indexes, partitions, and summary tables; before adopting OLAP, benchmark with the same data and real queries and record the results in an ADR
+    level: soft
+    check: manual
+    how: "Review the ADR: whether it compares latency, resources, and operating cost of the baseline and candidates under the same data, queries, and concurrency"
+    applies: [kind:data]
+    why: Deploying a cluster because data "might get big someday" means paying operating costs even while idle.
+    detail: |
+      - Quarterly reports, offline verification, cross-source CSV/Parquet: start with DuckDB batch processing.
+      - Large-scale behavioral events, complex cohort retention, many concurrent users persistently exceeding requirements: validate ClickHouse.
+      - Frequent multi-table JOINs, primary-key updates, high-concurrency BI: compare Doris, StarRocks, and ClickHouse on the same data.
+      - Benchmarks cover realistic data spans, TopN, funnels, retention, distinct counts, JOINs, as well as deletion, backup and restore, and tenant isolation.
+    see: ["05", "17"]
+  - id: DATA-019
+    title: BI and analytics queries use read-only accounts granted only to analytics databases or schemas; large scans do not run on the primary business database
+    level: hard
+    check: auto
+    how: "Audit database roles: BI accounts have no write permission and no access to business schemas; analytics queries point at a read replica or analytics database"
+    applies: [kind:data]
+    why: If a BI account can write or runs large queries on the primary, one mistake or slow query can take the business down.
+    see: [DB-032]
+  - id: DATA-020
+    title: Tenant filtering for multi-tenant reports and embedded dashboards is enforced on the server or in the database, never trusting tenant parameters from the frontend; embeds lock parameters with a server-side signature
+    level: hard
+    check: semi
+    how: "Cross-tenant tests: tampering with frontend parameters, embed tokens, and export requests must not yield another tenant's data"
+    applies: [kind:data, kind:service]
+    why: A tenant dropdown in the frontend is not isolation; changing one parameter exposes someone else's data.
+    detail: |
+      - Metabase signed embeds must lock the tenant parameter; its guest embeds do not inherit row and column permissions and cannot serve as row-level isolation.
+      - When using another BI tool, isolate at the SQL, data source, or database account layer in the same way.
+    sources: [S14]
+    see: ["19"]
+  - id: DATA-021
+    title: The raw data layer is append-only; cleaning, facts and dimensions, and metrics are processed in layers, with each layer's transformation SQL in version control, reviewed, and tested
+    level: soft
+    check: semi
+    how: Review whether transformation code lives in the repository; check that the raw layer has no UPDATE or DELETE (except retention-based cleanup)
+    applies: [kind:data]
+    why: Once the raw layer is modified it cannot be recomputed; transformation logic scattered across BI cards cannot be reviewed by anyone.
+    detail: |
+      - Small projects: scheduled SQL or application jobs with cursors, execution history, and compensation are enough.
+      - Use dbt once there are many models and lineage and tests are needed.
+      - At-least-once delivery plus consumer-side idempotency is more achievable than claiming end-to-end exactly-once.
+    sources: [S08]
+  - id: DATA-022
+    title: Use DuckDB for embedded analytics and batch processing, not as a central service with many concurrent writers; preinstall required extensions or bake them into the image
+    level: soft
+    check: semi
+    how: Review the deployment architecture; in air-gapped environments check that extensions are not downloaded at runtime
+    applies: [kind:data]
+    why: DuckDB is an in-process engine; concurrent writes and service isolation are not its design goals; installing extensions at runtime fails in air-gapped environments.
+    sources: [S05, S06]
+  - id: DATA-023
+    title: Python data processing uses columnar, vectorized APIs (Polars, DuckDB SQL, or pandas vectorized operations), not row-by-row loops; lock dependencies per 12
+    level: soft
+    check: semi
+    how: In review, check for row-by-row iteration over DataFrames (such as iterrows or row-wise apply calls)
+    applies: [kind:data, lang:python]
+    why: Row-by-row processing is orders of magnitude slower and prone to errors with types and nulls.
+    see: [PY-002]
+  - id: DATA-024
+    title: Notebooks committed to the repository must have their outputs cleared and contain no secrets or real customer data
+    level: hard
+    check: auto
+    how: A pre-commit hook runs nbstripout (or a similar tool) and CI rechecks; run secret scanning on notebooks
+    applies: [kind:data]
+    why: Notebook output cells store query results, personal information, and tokens verbatim in version history, where they cannot be fully removed.
+    see: ["25"]
+  - id: DATA-025
+    title: Notebooks are for exploration only; logic that goes into scheduled jobs, reports, or metrics moves into modules or SQL, with tests
+    level: soft
+    check: manual
+    how: In review, check whether scheduled jobs and reports call notebooks directly
+    applies: [kind:data]
+    why: Notebooks depend on execution order and hidden state, and rerunning top to bottom often gives different results, so they are unfit as production code.
+  # ── Data quality ──
+  - id: DATA-026
+    title: "Key tables must have automated data quality checks: primary-key uniqueness, required non-null fields, referential relationships, value ranges, and freshness; failures block downstream publishing or flag the dashboard"
+    level: hard
+    check: auto
+    how: Run dbt data tests, Great Expectations, or SQL assertions after each processing run; failures return non-zero and alert
+    applies: [kind:data]
+    why: Once dirty data reaches the aggregate layer, it quietly shows up in every report.
+    detail: |
+      - Freshness is measured by ingestion or refresh completion time, not substituted by `MAX(event_time)`.
+      - Consistency: split amounts sum to the pre-split amount; the difference between event-based counts and ledger counts stays within the agreed range.
+      - Production and test data carry source labels; test data does not enter official metrics.
+      - Projects without dbt can write equivalent assertions in SQL or a test framework.
+    sources: [S08, S09]
+  - id: DATA-027
+    title: Backfills and recomputations must be scoped, write to a new version or temporary table, verify row counts, unique keys, and amount totals before an atomic switch, leave a record, and be reversible
+    level: soft
+    check: semi
+    how: Backfill scripts use a common template, and pre- and post-run verification results and approval records are attached to the ticket or PR
+    applies: [kind:data]
+    why: Overwriting historical data directly means that if the calculation is wrong, the original numbers are gone.
+    detail: |
+      - Try large backfills first on a small tenant or a small time window.
+      - Reports show the current data watermark and whether a backfill is in progress.
+  # ── Experiments ──
+  - id: DATA-028
+    title: "Before a formal A/B experiment launches, write an experiment plan: hypothesis, primary metric and guardrails, randomization unit, allocation ratio, minimum detectable effect, sample size and duration, stopping rule"
+    level: hard
+    check: manual
+    how: A plan file exists in the experiment platform or repository, and traffic can be enabled only after it passes review; the analysis report references the plan version
+    applies: [kind:data]
+    why: Looking at the data before choosing metrics and stopping times almost always finds a "significant" result, and the conclusion cannot be trusted.
+  - id: DATA-029
+    title: Compute the sample size in advance with a power analysis; do not repeatedly check p-values and stop once significant; if early stopping is needed, declare it in advance and use sequential testing or Bayesian methods
+    level: hard
+    check: manual
+    how: "Review the experiment report: the actual stopping time matches the plan, or the plan declared a sequential method"
+    applies: [kind:data]
+    why: When a fixed-sample test is peeked at repeatedly, the false-positive rate is far higher than the nominal level.
+    ref_value: A significance level of 0.05 and power of 0.8 are common industry reference values; adjust them to business risk and write them into the experiment plan.
+  - id: DATA-030
+    title: Record assignment and exposure separately and analyze by randomization unit; when the SRM (sample ratio across groups does not match the design) check fails, draw no conclusion and do not auto-ramp
+    level: hard
+    check: auto
+    how: The experiment analysis pipeline runs a chi-square test on per-group sample counts; on failure the report is flagged red and declaring a winner is blocked
+    applies: [kind:data]
+    why: A wrong sample ratio means assignment or logging is broken, and any effect estimate may then be biased.
+    ref_value: A chi-square test with p < 0.001 is commonly used to declare SRM; this is a reference value.
+    detail: |
+      - Each exposure is linked to the experiment ID, variant ID, randomization unit ID, assignment time, exposure time, and configuration version.
+      - When the same unit appears in multiple variants, exposures are duplicated, or the randomization unit differs from the analysis unit, fix the data before analyzing.
+      - If the primary metric is unavailable, data is stale, or guardrails degrade, block auto-ramping.
+      - Tools like GrowthBook have built-in SRM checks; prefer existing ones.
+    sources: [S19]
+  - id: DATA-031
+    title: When there are too few users or customers to reach the required sample size, do not run an A/B test; use gradual rollout, before/after comparison, or blind evaluation instead, and state the strength of evidence in the conclusion
+    level: soft
+    check: manual
+    how: "Review the experiment plan: compare the computed sample size with the traffic actually available"
+    applies: [kind:data]
+    why: Underpowered experiments produce only noise and get misread as "no effect" or "has an effect".
+    detail: |
+      - When users within the same tenant or project influence one another, use cluster randomization by tenant or project.
+  - id: DATA-032
+    title: Feature flags are not a substitute for authorization; permission-related decisions are made on the server
+    level: hard
+    check: semi
+    how: "Security testing: after changing flag values on the client, protected features and data remain inaccessible"
+    applies: [kind:service, kind:data]
+    why: Flag values can be tampered with on the client and can be misconfigured; using them as access control opens a back door.
+    sources: [S17]
+    see: ["19"]
+  - id: DATA-033
+    title: Register an owner, purpose, default value, environments, and expiry time for each dynamic flag and clean it up when it expires; use one flag snapshot within a single request or execution, and record the flag and variant
+    level: soft
+    check: auto
+    how: CI checks that flag registry fields are complete and alerts on expired flags
+    applies: [kind:service, kind:data]
+    why: Unclaimed flags pile up; if a flag changes mid-execution, experiment data and behavior become inconsistent.
+    detail: |
+      - Set defaults by risk: sensitive features and external connections default to off; stable basic features may default to on.
+      - When the flag service is unavailable, use the last trusted configuration or an explicit safe default; core features must not go down.
+      - Evaluate flags in code through a unified interface such as OpenFeature so the backend can be swapped.
+    sources: [S16, S17]
+  # ── Charts and reports ──
+  - id: DATA-034
+    title: "Choose the chart type by the question being answered: line for change over time, bar for category comparison, stacked bar for composition, histogram or box plot for distribution, scatter for relationships; no 3D charts"
+    level: soft
+    check: manual
+    how: When reviewing a dashboard, check chart by chart that the type and title correspond to one clear question
+    applies: [kind:data]
+    why: The wrong chart type makes readers work harder and makes proportions easy to misread.
+    detail: |
+      - Use pie and donut charts only for the composition of a few categories; with many categories, switch to bars.
+      - Dual Y axes easily create spurious correlation; split into two charts when possible.
+      - One chart answers one question; the title states the conclusion or the question itself.
+  - id: DATA-035
+    title: Value axes of bar and area charts start at zero; axes are labeled with units, time axes use real intervals; the title or notes state the definition and the data-as-of time
+    level: soft
+    check: semi
+    how: Chart components wrap default configuration (bar chart Y axis from zero, unit required); spot-check in review
+    applies: [kind:data]
+    why: A truncated value axis magnifies small differences into large ones; numbers without units and definitions cannot be compared.
+  - id: DATA-036
+    title: Chart colors use only the design system's data palette; with many series, merge into "Other" or split the chart; do not distinguish series by color alone, and provide a data table or a written conclusion
+    level: soft
+    check: semi
+    how: Check that colors in chart configuration reference palette tokens; in review, look for a means of distinction beyond the legend and for a data table
+    applies: [kind:data]
+    why: Too many colors become indistinguishable, and users with color vision deficiency and screen reader users cannot get the information.
+    see: [DSN-017, A11Y-021, A11Y-022]
+  # ── Cost ledger ──
+  - id: DATA-037
+    title: Cost amounts use exact decimals or integers in an agreed unit, with the currency recorded; for multiple currencies, keep the original-currency amount and an exchange-rate snapshot
+    level: hard
+    check: auto
+    how: Check the type of amount columns in the schema; unit tests cover rounding and currency conversion
+    applies: [kind:data]
+    why: Floating-point accumulation produces errors that do not reconcile; without the original currency and exchange rate, nothing can be rechecked.
+    sources: [S12]
+    see: [DB-005]
+  - id: DATA-038
+    title: Cost entries are not modified after being written; corrections are written as reversing entries; price lists carry effective periods and versions, and price changes do not rewrite history
+    level: hard
+    check: semi
+    how: Database permissions forbid UPDATE and DELETE on entry tables; ledger tests cover reversal and price-change scenarios
+    applies: [kind:data]
+    why: Editing history in place makes past reports and bills disagree and makes auditing impossible.
+    sources: [S12]
+  - id: DATA-039
+    title: Record usage, estimated cost, and actual bills separately; every cost carries attribution dimensions such as feature, tenant, and project plus the allocation-rule version; list what cannot be attributed as unallocated, and reconcile against vendor bills regularly
+    level: soft
+    check: semi
+    how: Ledger tests check that totals are equal before and after allocation; reconciliation reports show the difference from vendor bills and the unallocated share
+    applies: [kind:data]
+    why: Mixing estimates and actuals misleads budgets; forcing shared costs onto a dimension creates false precision.
+    detail: |
+      - Subtotals by person, project, and feature are different views of the same money and cannot be added up into a total cost.
+      - Allocate shared resources by explainable proxies (CPU time, storage volume, request volume); fixed costs may be listed separately.
+      - Budget alerts can have multiple thresholds and forecast overspend; on overspend you may block optional jobs, but do not interrupt irreversible business operations already in progress.
+      - Imports of external cloud bills can follow the fields of the FOCUS specification; internal tables need not copy every field.
+      - Token metering and price tables for model calls are in 24.
+    ref_value: Budget alert thresholds are commonly set at three levels, 50%, 80%, and 100%; these are only reference values.
+    sources: [S11, S12]
+    see: ["24"]
+  # ── Selection and licensing ──
+  - id: DATA-040
+    title: Before adopting an analytics component, document its license and mode of use (standalone or integrated into a distributed product); components under AGPL or proprietary licenses must pass license review before being embedded in deliverables
+    level: hard
+    check: semi
+    how: The dependency inventory records each component's license and mode of use; license scanning tools and reviews decide according to the policy in 27
+    applies: [kind:data]
+    why: For the same BI or analytics tool, the obligations for internal use and for embedding it in a product sold to customers are entirely different; a README saying "open source" does not mean it can be embedded freely.
+    sources: [S02, S10, S13, S18]
+    see: ["27"]
+  - id: DATA-041
+    title: For BI, experiment statistics, and product analytics, prefer mature off-the-shelf tools; do not build your own SQL editor, report permission system, or significance-testing engine
+    level: soft
+    check: manual
+    how: In design review, check whether a corresponding off-the-shelf solution exists and the reason for not using it
+    applies: [kind:data]
+    why: These systems have many edge cases and their correctness is hard to audit; maintaining a homegrown one costs far more than expected.
+choices:
+  - category: Business facts and cost data
+    pick: Structured event tables and cost ledger tables in the business database, written in the same transaction via outbox
+    when: All data used to compute money, decide acceptance, or support audits
+    avoid:
+      - { name: "Using a third-party analytics SDK's events as the source of truth", why: "They can be lost, duplicated, or blocked, and cannot be audited" }
+  - category: Website and product behavior analytics (self-hosted)
+    pick: Umami
+    when: You need lightweight page and custom event statistics that can be self-hosted and run offline
+    alternatives:
+      - { name: Plausible Community Edition, when: "Privacy and a simple UI matter more; requires PostgreSQL plus ClickHouse, and the Community Edition differs in features from the cloud version" }
+      - { name: Matomo, when: "You need traditional web analytics and complex traffic attribution and can accept operating PHP plus MySQL" }
+      - { name: PostHog Cloud, when: "A public cloud service is acceptable and you need analytics, session recording, flags, and experiments in one" }
+    avoid:
+      - { name: "Shipping self-hosted PostHog in customer deliverables", why: "Officially, self-hosting is unsupported and has no tagged stable releases, so you must track security fixes yourself; features in the ee directory require a commercial license" }
+    license: Umami is MIT; Plausible is AGPL-3.0 (the frontend tracking script is MIT); Matomo is GPL-3.0; PostHog is mainly MIT, with the ee directory under a proprietary license
+    sources: [S01, S02, S03, S04, S23]
+  - category: Analytics storage
+    pick: PostgreSQL (indexes, partitions, summary tables, materialized views)
+    alternatives:
+      - { name: DuckDB, when: "Local analysis, embedded reports, batch processing over Parquet/CSV" }
+      - { name: ClickHouse, when: "Large-scale behavioral events, complex cohort retention, benchmarks show PostgreSQL is not enough" }
+      - { name: Apache Doris / StarRocks, when: "Frequent multi-table JOINs, primary-key updates, high-concurrency BI, and already compared with ClickHouse on the same data" }
+    avoid:
+      - { name: "Deploying an OLAP cluster without benchmarking", why: "You pay operating costs even while idle" }
+      - { name: "Using DuckDB as a service with many concurrent writers", why: "That is not its design goal" }
+    license: PostgreSQL is under the PostgreSQL License; DuckDB is MIT; ClickHouse is Apache-2.0; Doris and StarRocks are Apache-2.0
+    sources: [S05, S07]
+  - category: Data transformation and modeling
+    pick: SQL files, views, and scheduled jobs in version control
+    alternatives:
+      - { name: dbt Core or dbt OSS, when: "There are many models and you need lineage, tests, and documentation" }
+    avoid:
+      - { name: "Introducing heavy components such as Airflow or Kafka for a few daily aggregates", why: "Over-engineering; when needed, select separately per 18" }
+    license: dbt Core is Apache-2.0, and the vendor states it will keep maintaining it for several years; dbt OSS, the open-source subset of next-generation dbt, is Apache-2.0; the full distribution (formerly the Fusion engine) is a proprietary binary used under the dbt Product Licensing Agreement
+    notes: Before using next-generation dbt, confirm whether you are using the open-source subset or the proprietary distribution; their licenses differ.
+    sources: [S08, S10]
+  - category: Python data processing
+    pick: Polars or the DuckDB Python API
+    alternatives:
+      - { name: pandas, when: "A library you depend on accepts only pandas objects, or there is already a lot of pandas code" }
+  - category: notebook
+    pick: Jupyter, with outputs cleared by nbstripout before commit
+    avoid:
+      - { name: "Using notebooks as scheduled jobs or production reports", why: "They depend on execution order and hidden state and are not reproducible" }
+  - category: Data quality checks
+    pick: dbt data tests (when using dbt) or SQL assertions
+    alternatives:
+      - { name: Great Expectations (GX Core), when: "Not using dbt and need fairly complex validation in a Python pipeline" }
+      - { name: Soda Core, when: "Internal use, accepting the restrictions of Elastic License 2.0" }
+    license: GX Core is Apache-2.0; Soda Core has changed from Apache-2.0 to Elastic License 2.0 (source-available, not an OSI open-source license, and offering it as a hosted service is prohibited)
+    sources: [S08, S09, S20, S21]
+  - category: Dashboards and self-service BI
+    pick: In-product dashboards use your own frontend plus server-side aggregation APIs; self-service analysis for operations uses Metabase
+    alternatives:
+      - { name: Apache Superset, when: "Multiple data sources, complex SQL, multi-role BI, and you can accept heavier configuration" }
+      - { name: Grafana, when: "Time-series trends and operational metrics; runtime monitoring is in 26" }
+    avoid:
+      - { name: "Building your own SQL editor and report permission system", why: "Costly and hard to audit" }
+    license: Metabase's open-source edition is AGPL, and embedding it in a product requires checking its embedding license terms; Superset is Apache-2.0; Grafana is mainly AGPL-3.0
+    notes: Chart component library selection is in 07.
+    sources: [S13, S14, S15, S22]
+  - category: Experimentation platform
+    pick: GrowthBook
+    when: You need statistically rigorous A/B experiments and have enough sample size
+    avoid:
+      - { name: "Building your own significance-testing engine", why: "Many statistical details, hard to audit" }
+    license: Mainly MIT, with some enterprise features under a commercial license
+    sources: [S19]
+  - category: Feature flags
+    pick: Versioned configuration files plus the OpenFeature evaluation API
+    when: Few flags and few environments
+    alternatives:
+      - { name: Unleash, when: "Gradual rollout across multiple services, strategies, and flag lifecycle governance" }
+      - { name: Flagsmith, when: "You need flags plus remote configuration and multi-language SDKs" }
+    avoid:
+      - { name: "Treating OpenFeature as a flag service or experiment statistics engine", why: "It only unifies the evaluation API" }
+    license: OpenFeature is Apache-2.0; the Unleash main repository switched to AGPL-3.0 starting with v8, while the official Docker images and SDKs remain under permissive licenses; Flagsmith core is BSD-3-Clause
+    sources: [S16, S17, S18]
+antipatterns:
+  - { bad: "Computing order counts or settlement amounts from frontend click tracking", instead: "Derive them from server-side transactions and business events" }
+  - { bad: "One events table mixing fees, acceptance, and telemetry in JSON", instead: "Categorized fact tables plus a validatable common envelope" }
+  - { bad: "Sampling 10% and then computing DAU and retention directly", instead: "Keep business facts complete; sample telemetry with recorded probabilities, and design distinct-count metrics separately" }
+  - { bad: "Treating the tenant dropdown in the UI as isolation", instead: "Enforce tenant conditions on the server or in the database" }
+  - { bad: "Telemetry switch is off, but scripts still connect to an external CDN", instead: "Record outbound requests in an offline test; there must be zero" }
+  - { bad: "Shipping as soon as p < 0.05 appears", instead: "Fix sample size and stopping rules in advance, and conclude only after passing SRM checks and guardrails" }
+  - { bad: "Treating an assignment record as proof the user actually saw it", instead: "Record assignment and exposure separately, with consistent analysis definitions" }
+  - { bad: "Adding subtotals by person, project, and feature to get the total cost", instead: "One ledger sliced along multiple dimensions; subtotals are not added up" }
+  - { bad: "Editing the price list in place after a price change, recomputing historical bills with it", instead: "Snapshot price lists and write corrections as reversing entries" }
+  - { bad: "Deploying Kafka, ClickHouse, dbt, and Superset all at once for \"real time\"", instead: "PostgreSQL plus SQL aggregation; upgrade only when benchmarks prove it is not enough" }
+  - { bad: "Committing notebooks with outputs", instead: "Clear outputs before committing and move logic into modules" }
+  - { bad: "Assuming Metabase guest embeds inherit row and column permissions", instead: "Lock parameters with a server-side signature, or isolate at the database layer" }
+sources:
+  - { id: S01, title: Self-host PostHog, url: "https://posthog.com/docs/self-host", publisher: PostHog, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: PostHog LICENSE, url: "https://github.com/PostHog/posthog/blob/master/LICENSE", publisher: PostHog, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Umami (repository and LICENSE)", url: "https://github.com/umami-software/umami", publisher: Umami Software, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Plausible Analytics (repository and LICENSE)", url: "https://github.com/plausible/analytics", publisher: Plausible, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "DuckDB (repository and LICENSE)", url: "https://github.com/duckdb/duckdb", publisher: DuckDB Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: "DuckDB: Installing extensions", url: "https://duckdb.org/docs/stable/extensions/installing_extensions", publisher: DuckDB, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "ClickHouse (repository and LICENSE)", url: "https://github.com/ClickHouse/ClickHouse", publisher: ClickHouse, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "dbt: Data tests", url: "https://docs.getdbt.com/docs/build/data-tests", publisher: dbt Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "dbt: Source freshness", url: "https://docs.getdbt.com/docs/deploy/source-freshness", publisher: dbt Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: dbt Licensing FAQ, url: "https://www.getdbt.com/licenses-faq", publisher: dbt Labs, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: "FinOps Framework: Allocation", url: "https://framework.finops.org/framework/capabilities/allocation/", publisher: FinOps Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S12, title: "FOCUS: Cost and Usage dataset", url: "https://focus.finops.org/docs/specification/v1-3/datasets/cost-and-usage/", publisher: FinOps Foundation, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S13, title: Metabase License, url: "https://www.metabase.com/license", publisher: Metabase, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: "Metabase: Securing embeds", url: "https://www.metabase.com/docs/latest/embedding/securing-embeds", publisher: Metabase, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: Apache Superset release catalog, url: "https://release-catalog.apache.org/superset/index.html", publisher: Apache Software Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "OpenFeature: Provider", url: "https://openfeature.dev/docs/reference/concepts/provider/", publisher: OpenFeature, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Unleash: Feature flag best practices", url: "https://docs.getunleash.io/guides/feature-flag-best-practices", publisher: Unleash, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: Unleash is moving to AGPLv3, url: "https://www.getunleash.io/blog/unleash-moving-to-agplv3", publisher: Unleash, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "GrowthBook (repository and LICENSE)", url: "https://github.com/growthbook/growthbook", publisher: GrowthBook, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Great Expectations (repository and LICENSE)", url: "https://github.com/great-expectations/great_expectations", publisher: Great Expectations, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: "Soda Core License Update: Moving to Elastic License 2.0", url: "https://soda.io/blog/soda-core-license-update-moving-to-elastic-license", publisher: Soda, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: Grafana LICENSING, url: "https://github.com/grafana/grafana/blob/main/LICENSING.md", publisher: Grafana Labs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: "Matomo (repository and LICENSE)", url: "https://github.com/matomo-org/matomo", publisher: Matomo, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "Not verified online (carried over from the 2026-11-13 report): Plausible is AGPL-3.0 with an MIT tracking script, Superset is Apache-2.0, Grafana is AGPL-3.0, Matomo is GPL-3.0, GrowthBook is MIT plus an enterprise tier, Flagsmith core is BSD-3-Clause, Doris and StarRocks are Apache-2.0"
+  - "Not verified: the licenses of Polars, pandas, and nbstripout"
+  - The DuckDB and ClickHouse licenses were corroborated only through third-party pages; check the LICENSE in the official repositories directly before inclusion
+  - Sources disagree on exactly when and in which version Soda Core switched to Elastic License 2.0; check the official release notes
+  - "The obligations when embedding Metabase's open-source edition in a product (free embedding with branding vs. paid embedding license) need confirmation by legal per the policy in 27"
+  - The exact licensing of ee directory features under self-hosted PostHog has not been fully confirmed
+  - "Research needed: tracking SDK selection (client and server, including mobile)"
+  - "Research needed: data ingestion (ETL/ELT, CDC) tools such as Airbyte, dlt, and Debezium, their selection and licenses"
+  - "Research needed: whether semantic-layer tools (such as Cube and MetricFlow) are worth recommending"
+  - "Research needed: selection of domestic Chinese BI and OLAP products and their compatibility with China's Xinchuang (IT application innovation) requirements"
+  - "Research needed: consent management platform (CMP) selection and a standard format for consent state"
+  - "Research needed: external references for A/B experiment statistical methods (power analysis, CUPED, sequential testing, SRM thresholds); current rules are based mainly on common industry practice and lack citations"
+  - "Research needed: authoritative sources for chart type selection and readability rules"
+  - "Research needed: the boundary between product analytics events and OpenTelemetry collection, to be aligned with 26"

@@ -1,0 +1,74 @@
+# Shared vocabulary. All topics use these terms; do not introduce a second set.
+
+级别:
+  hard:
+    名称: Hard constraint
+    含义: "Must be followed. It meets all three conditions: there is a reliable source, or violating it has serious and widely recognized consequences; a concrete check can be written; it contains no soft wording and states its preconditions."
+  soft:
+    名称: Soft guidance
+    含义: Follow by default; you may deviate for a reason, but state the reason.
+
+检查方式:
+  auto:
+    名称: Automated
+    含义: A tool or CI can decide directly.
+  semi:
+    名称: Semi-automated
+    含义: A tool finds candidate problems; a human confirms them.
+  manual:
+    名称: Manual
+    含义: Only review or drill records can confirm it; the rule must state the review points.
+
+# Applicability tags. rules[].applies may only use values from this list.
+# Tags in the same class (lang:, platform:, kind:) are ORed; different classes are ANDed.
+# [lang:python, kind:service] applies only to services written in Python. A rule containing all always applies.
+适用范围:
+  all: All projects
+  lang:ts: TypeScript / JavaScript / Node
+  lang:go: Go
+  lang:python: Python
+  lang:rust: Rust
+  lang:jvm: Java / Kotlin (server-side)
+  lang:shell: Scripts and configuration
+  platform:web: Web frontend
+  platform:android: Android
+  platform:ios: iOS
+  platform:desktop: Desktop applications
+  platform:mobile: Mobile (cross-platform)
+  kind:service: Backend service exposed to clients
+  kind:library: Library or SDK used by others
+  kind:cli: Command-line tool
+  kind:agent: Repository developed with coding agents
+  kind:llm: Application that calls large language models
+  kind:data: Data analysis and statistics
+  kind:onprem: Private or air-gapped deployment
+
+# Change-risk levels: determine required checks and approvals (details in 04). A change author may only raise the level; when unsure, use the higher one.
+风险分级:
+  R0: Very low. Comments, formatting, documentation that does not affect acceptance rules.
+  R1: Low. Local pure functions, low-impact copy.
+  R2: Medium. New interfaces, database queries, ordinary page flows, new dependencies.
+  R3: High. Permissions, money, privacy, data migration, irreversible operations, concurrency consistency, breaking API changes, cross-tenant boundaries, release channels.
+
+# Status names below are referenced by topics as needed; do not invent new ones.
+优先级:
+  P0: Handle immediately; it blocks release or is causing losses.
+  P1: Handle within this iteration.
+  P2: Schedule it.
+  P3: Do it when there is spare time.
+
+任务状态: [Needs clarification, Ready, In progress, In review, Awaiting acceptance, Done, Cancelled]
+
+事故等级:
+  SEV1: Core functionality unavailable or data damaged, affecting most users.
+  SEV2: Important functionality damaged or some users unable to use the service.
+  SEV3: Minor functionality damaged; a workaround exists.
+  SEV4: Slight issue with no obvious user impact.
+
+证据状态: [Not run, Passed, Failed, Skipped]
+
+来源类型:
+  standard: Standard or specification (RFC, W3C, ISO, national standards, regulations)
+  official: Official documentation or official announcement
+  community: Community consensus or well-known project practice
+  case: Case study from one company or individual

@@ -1,0 +1,546 @@
+id: "31"
+slug: desktop
+title: Desktop Applications
+summary: "How to choose a framework for Windows, macOS, and Linux desktop apps, hold the security boundary between the renderer and the operating system, sign and notarize, package, auto-update, report crashes, and run acceptance on real hardware."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - "Desktop framework selection (Electron, Tauri, Wails, Flutter desktop, Compose Multiplatform, Qt, etc.)"
+    - Process isolation and permission configuration between the renderer and the operating system
+    - "Code signing, macOS notarization, Windows signing"
+    - "Installer formats and distribution channels, auto-update"
+    - "Local credential and data storage, offline first launch"
+    - "System integration: tray, notifications, launch at login, deep links, file associations"
+    - Crash reporting
+    - Multi-platform real-device acceptance and desktop E2E tools
+  excludes:
+    - { what: "Protecting local HTTP services (listen on loopback only, token authentication, Host/Origin validation)", see: "32" }
+    - { what: "Sandboxing, process reaping, and running as a service for local background processes", see: "32" }
+    - { what: "Contrast, keyboard accessibility, screen readers, internationalization behavior", see: "09" }
+    - { what: "General conventions for test layering, coverage, and acceptance evidence", see: "04" }
+    - { what: "General supply-chain rules such as lockfiles, SBOM, dependency scanning, and signing key management", see: "25" }
+    - { what: "General conventions for open-source license obligations; cross-border transfer of crash data", see: "27" }
+    - { what: "Login flows and token lifecycle", see: "19" }
+    - { what: "General engineering rules for Rust, Go, and TypeScript", see: "10-15" }
+    - { what: "Mobile cross-platform strategy", see: "28" }
+overview: |
+  1. **Choose the framework by application type; there is no single answer.** To reuse a web frontend or build a lightweight tool, default to Tauri; for consistent Chromium rendering or a dependency on Node native modules, use Electron; for Go-centric teams, Wails is an option; if you already have Flutter, Kotlin, or C++/Qt code, keep using it. Record the choice in a decision record.
+  2. **Always treat the renderer as low-trust.** The UI may only call named, narrow commands with type validation and per-method authorization; never expose general-purpose shell, file, or process interfaces to the UI.
+  3. **Turn all Electron security switches on by default.** Enable contextIsolation, sandbox, and webSecurity, disable nodeIntegration; preload exposes named methods only via contextBridge; IPC validates the sender and arguments; intercept navigation and new windows. Keep the major version within the three latest officially supported.
+  4. **Grant Tauri least privilege per window.** Bind capabilities to specific windows, do not enable general command execution, and review changes to permission files.
+  5. **OS signing and update-package signing are two separate layers of trust.** macOS distribution outside the App Store requires Developer ID signing, Hardened Runtime, notarization, and stapling; public Windows releases require Authenticode signing with a timestamp. The updater's own signature does not replace these.
+  6. **Each installation channel has exactly one update owner.** Pick one of enterprise IT, the system package manager, or the in-app updater; use a mature updater, do not write your own.
+  7. **Think through offline use in advance.** First launch must not depend on a CDN or remote fonts; offline Windows targets must ship the WebView2 offline installer or have it preinstalled by IT.
+  8. **Store credentials only in the system credential store; crash data does not leave the machine without consent.**
+  9. **Real hardware is the final word.** Install every declared "OS × CPU × installer format" combination on real hardware; passing web tests does not mean the desktop app passes. For domestic Chinese operating systems, only real hardware identical to the customer's counts.
+  10. **Protection for local HTTP services is in 32**, contrast and keyboard accessibility are in 09; this topic only references them.
+rules:
+  # ── Selection and versions ──
+  - id: DSK-001
+    title: "Document the support matrix: for each target, the OS and version, CPU architecture, windowing system (Linux), installer format, and distribution channel; the CI build matrix must match it"
+    level: soft
+    check: semi
+    how: The repository contains a structured support matrix file; a CI script compares the matrix with the build jobs and fails when anything is missing
+    applies: [platform:desktop]
+    why: "\"Supports Linux\" or \"supports Windows\" is not a boolean; without spelling it out, you cannot decide build targets, test machines, or installer formats."
+    detail: |
+      - For Linux, specify the distribution and version, the glibc and WebKitGTK baselines, and X11 vs. Wayland.
+      - If you still need to support OS versions that have reached end of support (such as Windows versions past end of support), document the reason and the risk.
+    sources: [S14]
+  - id: DSK-002
+    title: "Record the framework choice in a decision record, listing at least one alternative, the trade-off rationale, and the conditions for reversal; the standard does not mandate \"always use framework X\""
+    level: soft
+    check: manual
+    how: Review whether the decision record includes candidates, trade-offs, and reversal conditions; when feasible, attach a comparison of installer size, memory, and startup time from a small prototype of the same scenario
+    applies: [platform:desktop]
+    why: "Advertised numbers such as bundle size and memory depend heavily on whether a runtime is bundled; without measuring once in your own scenario, the choice is based on impressions."
+    see: ["01"]
+  - id: DSK-003
+    title: "When using open-source Qt, meet LGPLv3 obligations: link dynamically, allow users to replace and relink the Qt libraries, ship the license text and how to obtain the source, and do not use GPL-only modules; if you cannot, buy a commercial license"
+    level: hard
+    check: manual
+    how: "Before release, the owner checks: linking method, licenses of the Qt modules used, bundled license notices, and source-availability instructions; refer anything uncertain to legal"
+    applies: [platform:desktop]
+    why: "Qt is dual-licensed commercial and open source, and some modules are GPL-only; you may not distribute if LGPL requirements are not met, and locked-down devices or static linking may also breach the license."
+    detail: |
+      - Static linking may bring the application itself under LGPL obligations; Qt officially recommends dynamic linking.
+      - LGPLv3 requires providing enough installation information for users to run a relinked program, which is essentially impossible on locked-down devices.
+      - Some app store terms may conflict with the LGPL; check before publishing.
+    sources: [S27]
+    see: ["27"]
+  - id: DSK-004
+    title: "Production release builds do not use alpha, beta, or nightly versions of the framework, packaging tools, or updater"
+    level: soft
+    check: auto
+    how: CI checks that the versions of these dependencies in the lockfile contain no prerelease tags
+    applies: [platform:desktop]
+    why: "Prerelease APIs, permission defaults, and signing formats can still change, and security issues may not get patches."
+    detail: "When you need to try new features, put them in a separate prerelease channel; do not mix them into the stable channel."
+    see: ["25"]
+  - id: DSK-005
+    title: "Electron apps use a major version still officially supported (one of the three latest stable majors) and upgrade with security patches"
+    level: hard
+    check: auto
+    how: CI or a scheduled job compares the project's Electron major version with the official release timeline and fails when it falls outside the support window
+    applies: [platform:desktop]
+    why: "Electron ships a major version every 8 weeks and only fixes security issues in the three latest stable majors; older versions carry publicly known Chromium vulnerabilities."
+    ref_value: "\"Three latest stable major versions\" and \"one major version every 8 weeks\" come from Electron's official release timeline."
+    sources: [S02]
+    see: ["25"]
+  # ── Boundary between the renderer and the operating system ──
+  - id: DSK-006
+    title: "The UI calls system capabilities only through named, narrow commands with type and argument validation and per-method authorization; never expose interfaces that execute arbitrary commands, read or write arbitrary files, or kill arbitrary processes"
+    level: hard
+    check: semi
+    how: List and review every command the bridge layer exposes; use lint or architecture checks to forbid generic execution, arbitrary-path, or PID-based interfaces in the bridge layer; write a rejection test case for each command
+    applies: [platform:desktop]
+    why: "Once the renderer is taken over by cross-site scripting or malicious content, the attacker gets whatever the bridge layer exposes."
+    detail: |
+      - Design commands around business semantics (e.g. "start task 123"); the host layer looks up the corresponding resource and acts on it, and does not accept command lines, absolute paths, or process IDs from the UI.
+      - Each command has request and response schemas and error codes; state-changing commands log the caller, time, and result, never plaintext secrets.
+    sources: [S01, S09]
+  - id: DSK-007
+    title: "All Electron windows must keep contextIsolation, sandbox, and webSecurity enabled and nodeIntegration disabled"
+    level: hard
+    check: auto
+    how: Lint or static scanning checks every BrowserWindow / webPreferences configuration; assert the actual values of these options at startup
+    applies: [platform:desktop]
+    why: "These switches are baseline items on Electron's official security checklist; turning off any one of them can turn a script vulnerability in the renderer into local code execution."
+    sources: [S01]
+  - id: DSK-008
+    title: "Electron preload exposes only specific named methods via contextBridge; never expose ipcRenderer, require, or entire modules to the page"
+    level: hard
+    check: auto
+    how: Statically scan preload files and fail on code that exposes ipcRenderer, require, or passes through arbitrary channel names
+    applies: [platform:desktop]
+    why: "Exposing the whole ipcRenderer lets the page send messages on any channel, making the allowlist meaningless, and it only ever grows wider."
+    sources: [S01]
+  - id: DSK-009
+    title: Every IPC handler in the Electron main process validates the message sender and the argument structure
+    level: hard
+    check: semi
+    how: "Register handlers in one place; unit tests cover two kinds of negative cases: \"from an unexpected source\" and \"invalid arguments\""
+    applies: [platform:desktop]
+    why: "Any page or subframe that can be loaded may send IPC messages; not validating the sender is equivalent to opening the handler to every source."
+    detail: "Register handlers once at app startup, not inside the window-creation function; otherwise opening a second window registers them again."
+    sources: [S01]
+  - id: DSK-010
+    title: "Intercept uncontrolled page navigation and new windows; when opening external links, allow only allowlisted protocols, and never pass user input directly to shell.openExternal or similar APIs"
+    level: hard
+    check: semi
+    how: "Tests cover navigation to unexpected addresses, window.open, `file:` protocol links, and custom protocol links; statically scan openExternal call sites"
+    applies: [platform:desktop]
+    why: "A window that can be lured to an external page hands native capabilities to that page; passing a malicious address to openExternal may directly execute a local program."
+    sources: [S01]
+  - id: DSK-011
+    title: "Production builds set a reviewed Content Security Policy (CSP), load no remote scripts, and do not use eval"
+    level: hard
+    check: auto
+    how: Statically check the CSP in pages and packaging configuration; a post-launch smoke test reads the CSP actually in effect
+    applies: [platform:desktop]
+    why: "CSP is the last line of defense against injected scripts executing; once a remote script is tampered with, it runs with the app's identity."
+    sources: [S01]
+  - id: DSK-012
+    title: "Untrusted remote web pages, third-party plugin content, and HTML previews are not loaded into windows with a native bridge; when they must be shown, use an isolated view without a bridge or hand off to the system browser"
+    level: hard
+    check: manual
+    how: During review, list the content source loaded by each window and view, and verify that views loading remote content have no preload or capability
+    applies: [platform:desktop]
+    why: "Once remote content suffers script injection, it can call local capabilities directly."
+    sources: [S01, S09]
+  - id: DSK-013
+    title: "Tauri capabilities must be bound to specific windows and grant only the permissions that window uses; never grant general command-execution permission"
+    level: hard
+    check: auto
+    how: "CI parses the capabilities directory, checks that every capability specifies windows and contains no permissions on the deny list (such as the shell plugin's general execute permission); changes to permission files require security review"
+    applies: [platform:desktop]
+    why: "Permissions from multiple capabilities matching the same window are merged, so one broad configuration gives every window high-risk capabilities."
+    detail: "When you need to call an external program, use a sidecar or the shell plugin's scope to restrict the program name and arguments; do not open up arbitrary commands."
+    sources: [S09, S10]
+  - id: DSK-014
+    title: "Changes to preload, main-process window configuration, Tauri capabilities, deep-link handling, credential storage, the updater, and signing scripts must be reviewed by the security owner"
+    level: soft
+    check: auto
+    how: Add these paths to CODEOWNERS and require owner approval via branch protection
+    applies: [platform:desktop]
+    why: "These files define the security boundary; all-green functional tests will not reveal that permissions have been loosened."
+    see: ["03", "23"]
+  - id: DSK-015
+    title: "Prefer the framework's built-in inter-process communication between the UI and the local backend; if a local HTTP port is truly needed, follow the local service protection rules in 32"
+    level: soft
+    check: semi
+    how: During review, check whether a new listening port was opened; if so, verify RUN-038, RUN-039, and RUN-040 item by item
+    applies: [platform:desktop]
+    why: Every extra port is one more entry point reachable by web pages and other programs on the same machine.
+    see: ["RUN-038", "RUN-039", "RUN-040"]
+  # ── Credentials and local data ──
+  - id: DSK-016
+    title: "Tokens and passwords are stored only in the system credential store (macOS Keychain, Windows Credential Manager or DPAPI, Linux Secret Service), never in localStorage, plaintext config files, or logs"
+    level: hard
+    check: semi
+    how: Secret scanning covers the repository and build logs; after logging in, tests check that there are no plaintext tokens in the app data directory or browser storage
+    applies: [platform:desktop]
+    why: "Plaintext files and browser storage get backed up, synced, and read by other programs, and leaks are hard to notice."
+    detail: "The system credential store cannot stop malware running with the same user's privileges; still combine it with short-lived tokens and server-side revocation."
+    sources: [S05]
+    see: ["19"]
+  - id: DSK-017
+    title: "On Linux, when no secure credential backend is available (e.g. Electron safeStorage falls back to basic_text), do not store sensitive tokens; prompt the user to configure a credential service or log in each time instead"
+    level: hard
+    check: auto
+    how: "At startup, read the storage backend actually in use and take a dedicated branch on fallback; test on GNOME, KDE, and a no-keyring environment"
+    applies: [platform:desktop]
+    why: "The \"encryption\" in basic_text uses a fixed password, which is effectively plaintext."
+    sources: [S05]
+  - id: DSK-018
+    title: "User data is written to the OS-designated user data directory, not the installation directory; if there is a local database, test migration with data from the previous version on every upgrade"
+    level: soft
+    check: semi
+    how: "Tests run with a read-only installation directory and normal user privileges; before release, run an upgrade with a data sample from the previous version"
+    applies: [platform:desktop]
+    why: "The installation directory is replaced on upgrade and uninstall, and normal users often lack write permission to it; a failed migration can leave users unable to open the app."
+    see: ["17"]
+  # ── System integration ──
+  - id: DSK-019
+    title: "Deep links accept only a fixed protocol name, strictly validate parameters against a schema, and map only to predefined actions; never execute commands from the link or directly open file paths in the link"
+    level: hard
+    check: semi
+    how: Fuzz the deep-link parsing function; test that a deep link is handed to the existing instance when the app is already running (single instance)
+    applies: [platform:desktop]
+    why: "Deep links can be triggered by any web page or document; they are untrusted external input."
+    sources: [S15]
+  - id: DSK-020
+    title: "Implement tray, notifications, launch at login, and file associations with the framework's official APIs or plugins; launch at login is off by default and can be disabled by both the user and enterprise policy"
+    level: soft
+    check: semi
+    how: Dependency review confirms official plugins are used; tests toggle the settings switch and read the actual state in the OS
+    applies: [platform:desktop]
+    why: "These features have many OS differences and lifecycle edge cases, so building them yourself is error-prone; silently launching at login annoys users and enterprise IT."
+    detail: "Make it clear whether \"closing the window\" quits or minimizes to the tray, and notify the user the first time it minimizes to the tray."
+    sources: [S06, S15]
+  # ── Offline ──
+  - id: DSK-021
+    title: "When offline use is required, first launch does not depend on a dev server, CDN, remote fonts, or remote configuration; all critical resources are bundled in the package"
+    level: hard
+    check: semi
+    how: Install and first-launch in a clean, disconnected virtual machine while recording DNS and network requests; statically scan the build output for external addresses
+    applies: [platform:desktop, kind:onprem]
+    why: "On an intranet or offline, a single remote font or script failing to load can cause a blank screen."
+  - id: DSK-022
+    title: "When apps using the system WebView (Tauri, Wails) target Windows environments without internet access, the installer bundles the WebView2 offline installer or a fixed-version runtime, or IT preinstalls it and it is verified"
+    level: hard
+    check: semi
+    how: Check how WebView2 is installed in the packaging configuration; do a first install and first launch on a disconnected Windows virtual machine
+    applies: [platform:desktop, kind:onprem]
+    why: "The default download bootstrapper and the embedded bootstrapper both need to download the runtime during installation, so installation fails offline."
+    ref_value: "Tauri's official orders of magnitude: the offline installer adds about 127 MB, and the fixed-version runtime adds about 180 MB."
+    sources: [S12]
+  - id: DSK-023
+    title: "When builds must run on an intranet, prepare dependency mirrors for npm, Cargo, Go, etc., download mirrors for framework binaries, and offline installation materials in advance, and complete a full build once in an environment without internet access"
+    level: soft
+    check: semi
+    how: "On a disconnected build machine, starting from a clean state, complete dependency restore, build, signing, and packaging"
+    applies: [platform:desktop, kind:onprem]
+    why: "Frameworks such as Electron download additional binaries during installation; without mirrors, the build fails."
+    sources: [S08]
+    see: ["25", "26"]
+  # ── Signing and notarization ──
+  - id: DSK-024
+    title: "macOS apps and installers distributed outside the Mac App Store must be signed with a Developer ID certificate, enable Hardened Runtime, be notarized with notarytool, and have the notarization ticket stapled"
+    level: hard
+    check: auto
+    how: "The release job runs `codesign --verify --deep --strict`, `spctl -a -vv`, and `xcrun stapler validate`; any failure blocks the release"
+    applies: [platform:desktop]
+    why: "Software distributed with Developer ID must be notarized, otherwise Gatekeeper blocks it; once stapled, offline machines can also verify it."
+    detail: |
+      - Use the Developer ID Application certificate for .app and the Developer ID Installer certificate for .pkg; signatures include a secure timestamp.
+      - Helper programs, dynamic libraries, and sidecars inside the app bundle must all be signed.
+      - Since 2023-11-01, Apple no longer accepts notarization submissions via altool.
+      - Notarization requires internet access; fully air-gapped customers can receive finished artifacts that were signed, notarized, and stapled in a connected pipeline.
+      - Electron apps must be signed before auto-update works on macOS.
+    sources: [S18, S03]
+  - id: DSK-025
+    title: "Windows installers and executables distributed to the public must be Authenticode-signed with a publicly trusted certificate and timestamped; when using a private certificate inside an enterprise, there must be evidence that IT has deployed the root certificate"
+    level: hard
+    check: auto
+    how: The release job uses signtool verify or Get-AuthenticodeSignature to check the signature status and timestamp of every executable and installer
+    applies: [platform:desktop]
+    why: "Unsigned programs are blocked by SmartScreen with a warning; signatures without a timestamp become invalid once the certificate expires."
+    detail: "Extended Validation (EV) certificates no longer automatically bypass SmartScreen prompts; newly signed apps still need to build reputation."
+    sources: [S19, S20]
+  - id: DSK-026
+    title: "Signing certificates and private keys are kept in a hardware security module or cloud signing service and used only in protected release jobs; never in the repository, ordinary files, or developer machines"
+    level: soft
+    check: semi
+    how: Secret scanning covers the repository; review the release pipeline to confirm the signing step runs only on protected branches and environments
+    applies: [platform:desktop]
+    why: "If the signing private key leaks, attackers can publish malware under your identity."
+    sources: [S21]
+    see: ["25"]
+  - id: DSK-027
+    title: "Linux deb and rpm packages are distributed via signed package repositories; standalone files such as AppImage come with both checksums and signatures, plus instructions for verification"
+    level: soft
+    check: semi
+    how: The release job checks that repository metadata signatures and checksum files exist; installation tests install from the repository
+    applies: [platform:desktop]
+    why: "An unsigned package cannot prove it has not been replaced; AppImage itself does not verify signatures automatically."
+  # ── Installers and distribution ──
+  - id: DSK-028
+    title: "Installers intended for centralized enterprise deployment must support silent install, upgrade, and uninstall, with reliable exit codes"
+    level: hard
+    check: semi
+    how: "In a virtual machine, install, upgrade, and uninstall with silent parameters, and check exit codes and detection rules"
+    applies: [platform:desktop]
+    why: "Deployment tools such as Intune require Win32 apps to install silently; installers that need user clicks cannot be deployed in bulk."
+    detail: "Document whether installation is per-user or per-machine, the install path, and whether administrator rights and a reboot are required."
+    sources: [S23, S24]
+  - id: DSK-029
+    title: "Build the Linux version on the oldest supported distribution, or build separately on each target distribution; do not treat a single AppImage as supporting all of Linux"
+    level: soft
+    check: semi
+    how: The CI build environment matches the oldest distribution in the support matrix; launch once on real hardware for each target distribution
+    applies: [platform:desktop]
+    why: "Programs built on a newer system depend on a newer glibc and fail to start on older systems; AppImage still depends on the host's glibc, FUSE, and WebKitGTK."
+    sources: [S13, S32]
+  - id: DSK-030
+    title: "Flatpak apps access files and system capabilities through portals, and do not hold broad permissions such as host filesystem access"
+    level: soft
+    check: auto
+    how: CI checks finish-args in the Flatpak manifest and requires a written justification when broad filesystem permissions appear
+    applies: [platform:desktop]
+    why: "Broad permissions break sandbox isolation and may also fail the distribution platform's review requirements."
+    sources: [S25]
+  # ── Auto-update ──
+  - id: DSK-031
+    title: "Each installation channel designates exactly one update owner (enterprise IT, the system package manager, or the in-app updater); enterprise-deployed MSI, MSIX, PKG, deb, and rpm packages are controlled by IT by default, with in-app updates disabled"
+    level: hard
+    check: manual
+    how: The release configuration names the update owner for each channel; review verifies that in-app updates are disabled in enterprise packages
+    applies: [platform:desktop]
+    why: "When app self-update and IT deployment modify the same installation, they overwrite each other, versions get mixed up, and the enterprise change process is bypassed."
+    sources: [S03]
+  - id: DSK-032
+    title: "Use a mature updater for auto-update; do not write your own; update packages must be signed, and the signature, version, and target architecture are verified before installation"
+    level: hard
+    check: semi
+    how: Review the updater choice; test that tampered update packages and packages for the wrong architecture are rejected
+    applies: [platform:desktop]
+    why: "Signature verification, power-loss recovery, locked files, and rollback are all hard to get right; once the update channel can be tampered with, malware can be pushed to every user's machine."
+    detail: |
+      - Tauri's updater plugin enforces update signature verification, and it cannot be disabled.
+      - electron-updater verifies code signatures on both macOS and Windows, performing Authenticode verification on Windows.
+      - Update-package signing and OS code signing are two layers of trust; neither can replace the other.
+    sources: [S11, S04]
+  - id: DSK-033
+    title: "Before release, test update failure cases: interrupted downloads, tampered update packages, downgrades, and data usability after upgrading from the previous stable release"
+    level: soft
+    check: semi
+    how: The release test checklist includes these scenarios and records the results
+    applies: [platform:desktop]
+    why: "A failed update can leave users stuck on a version that will not open, and it only surfaces during real upgrades."
+    see: ["04"]
+  # ── Crash reporting ──
+  - id: DSK-034
+    title: "Integrate crash reporting covering native crashes and uncaught exceptions in the main and renderer processes; keep symbol files and source maps at release time so stacks can be symbolicated"
+    level: soft
+    check: semi
+    how: "Each release's artifact manifest includes symbol files; deliberately trigger a crash in a test build and confirm the symbolicated stack is visible"
+    applies: [platform:desktop]
+    why: "Desktop apps run in wildly varying environments; without crash reporting, you can only guess at problems from user descriptions."
+    sources: [S30]
+    see: ["26"]
+  - id: DSK-035
+    title: "Do not upload crash reports or usage data to the public internet without user consent or enterprise configuration; redact before uploading, and the reporting endpoint can be pointed at a customer-hosted service or turned off"
+    level: hard
+    check: semi
+    how: Capture traffic in the not-consented state to confirm no outbound requests; unit-test the redaction function; check that the reporting endpoint is a configuration item
+    applies: [platform:desktop, kind:onprem]
+    why: "Crash dumps may contain memory fragments, local paths, tokens, and business data; sending them out without consent carries privacy and compliance risks."
+    see: ["27", "25"]
+  # ── Testing and acceptance ──
+  - id: DSK-036
+    title: "For every declared \"OS × CPU architecture × installer format\" combination, complete install, first launch, upgrade, and uninstall on real hardware or a matching virtual machine before release; successful cross-compilation or x64 emulation is not a substitute"
+    level: soft
+    check: manual
+    how: The release record attaches installation logs or screenshots for each item in the support matrix
+    applies: [platform:desktop]
+    why: "Problems with CPU architecture, system certificates, WebView versions, and native modules only surface on the target machine."
+    detail: "On Windows ARM64, Electron native modules must be recompiled for ARM64."
+    sources: [S07]
+    see: ["04"]
+  - id: DSK-037
+    title: "Test reports present results for four layers separately: web functionality, bridge layer, system integration, and installation/release; passing web E2E must not be reported as passing desktop integration"
+    level: hard
+    check: semi
+    how: The test report template has fixed sections for the four layers; review checks the evidence for each layer
+    applies: [platform:desktop]
+    why: "Tests in a browser cannot exercise the tray, installer, credential store, system notifications, or signing; reporting them together hides what was not tested."
+    sources: [S17, S16]
+    see: ["04"]
+  - id: DSK-038
+    title: "On each target OS, verify dark mode, system scaling, input methods, multiple monitors, recovery after sleep/wake, and network loss; test keyboard and screen readers manually per 09"
+    level: soft
+    check: manual
+    how: Record each item on a real-device checklist; on Windows, use Accessibility Insights to assist
+    applies: [platform:desktop]
+    why: "These are high-frequency failure points specific to desktop apps that automated tests struggle to cover."
+    sources: [S31]
+    see: ["09"]
+  - id: DSK-039
+    title: "Claim support for domestic Chinese operating systems and CPUs (UnionTech, Kylin, Loongson, Phytium, Kunpeng, etc.) only after verification on real hardware with the same OS and CPU as the customer; do not infer it from \"supports Linux\""
+    level: soft
+    check: manual
+    how: The support matrix marks the verification status and the verified hardware model for each domestic platform
+    applies: [platform:desktop, kind:onprem]
+    why: "The kernel, CPU instruction set, WebKitGTK availability, and desktop environment may all differ; untested promises only surface at delivery."
+choices:
+  - category: Desktop frameworks with web-technology UIs
+    pick: Tauri (system WebView + Rust host)
+    when: "Reusing React or other web frontend code to build lightweight tools, consoles, or offline clients"
+    alternatives:
+      - { name: Electron, when: "Consistent Chromium rendering across platforms is required, or you depend on Node native modules or the mature Electron ecosystem" }
+      - { name: Wails, when: "Business logic is mainly in Go; if there are untrusted subframes or remote content, check its security advisories first" }
+    avoid:
+      - { name: "Treating WKWebView or WebKitGTK as if it were Chrome", why: "Rendering and APIs differ; verify separately on all three OSes" }
+      - { name: "Ruling out Electron solely because \"Electron bundles are big\"", why: "Rendering consistency, the Node ecosystem, and debugging cost also count" }
+    license: Tauri is dual-licensed MIT or Apache-2.0; Electron is MIT
+    notes: "Tauri and Wails depend on the system WebView, so offline Windows environments must ship WebView2; on Linux, check WebKitGTK on the target distributions."
+    sources: [S14, S12, S35]
+  - category: Cross-platform desktop UIs without web technology
+    pick: "Stick with the team's existing stack: Flutter desktop if you already use Flutter, Compose Multiplatform if you already use Kotlin, and Qt if you already use C++ or need embedded or industrial scenarios"
+    avoid:
+      - { name: "Choosing Flutter or Compose to reuse React code", why: "The UI has to be rewritten in another language, so nothing is reused" }
+      - { name: "Using open-source Qt in a closed-source product without checking the license", why: "LGPLv3 imposes obligations such as dynamic linking and relinkability, and some modules are GPL-only (see DSK-003)" }
+    license: "Flutter core is BSD-3-Clause; Compose Multiplatform is Apache-2.0; Qt is commercial or dual-licensed LGPLv3/GPL"
+    sources: [S33, S34, S27]
+  - category: Electron packaging tools
+    pick: Electron Forge (maintained by the Electron project)
+    alternatives:
+      - { name: electron-builder, when: "You need electron-updater, or want to produce multiple formats such as NSIS, AppImage, deb, and rpm in one go" }
+    avoid:
+      - { name: Using two packaging tools at the same time, why: "Configurations and artifacts conflict with each other and are hard to debug" }
+  - category: Electron auto-update
+    pick: "Match the packaging tool: electron-builder with electron-updater; Forge with Electron's built-in autoUpdater"
+    avoid:
+      - { name: Writing your own updater, why: "Signature verification, power-loss recovery, and rollback are hard to get right" }
+      - { name: Relying on the built-in autoUpdater on Linux, why: "The built-in autoUpdater supports only macOS and Windows; leave Linux to the package manager" }
+    notes: "The built-in autoUpdater is based on Squirrel.Mac on macOS, and on Windows uses MSIX updates or Squirrel.Windows depending on the packaging method; electron-updater supports dmg, NSIS, AppImage, deb, rpm, etc., but not Squirrel.Windows. Auto-update on macOS requires the app to be signed."
+    sources: [S03, S04]
+  - category: Tauri auto-update
+    pick: Tauri's official updater plugin (enforces update signature verification)
+    sources: [S11]
+  - category: Installation and updates on enterprise devices
+    pick: "Windows: MSI or MSIX + a management tool such as Intune; macOS: signed and notarized PKG + MDM; Linux: signed deb/rpm private repository"
+    avoid:
+      - { name: Installers that require user clicks, why: Cannot be deployed silently in bulk }
+      - { name: Enabling in-app updates and IT deployment at the same time, why: "They overwrite each other and bypass the enterprise change process" }
+    notes: "Tauri officially produces only MSI and NSIS; MSIX requires separate packaging."
+    sources: [S23, S24]
+  - category: Download and install by individual users
+    pick: "Windows: NSIS; macOS: signed and notarized DMG; Linux: AppImage or distribution packages"
+    alternatives:
+      - { name: Flatpak, when: "You want to run in a sandbox and access system capabilities through portals" }
+      - { name: "Mac App Store, Microsoft Store", when: "Store distribution is needed; rules pending further research" }
+    avoid:
+      - { name: Using an unsigned ZIP as the installer, why: "It gets blocked by the OS and cannot prove its origin" }
+    notes: "Flatpak single-file bundles do not necessarily include the runtime; prepare it separately for offline distribution."
+    sources: [S13, S26]
+  - category: Windows code signing
+    pick: "A cloud-hosted signing service (such as Microsoft Artifact Signing, formerly Trusted Signing), when eligible"
+    alternatives:
+      - { name: "Organization Validation (OV) certificate from a commercial CA, with the private key in a hardware security module or cloud key service", when: "Your region or entity type is not eligible for the hosted signing service" }
+      - { name: Enterprise private certificate, when: "Distributed only within the enterprise, and IT has deployed the root certificate to all endpoints" }
+    avoid:
+      - { name: Keeping the private key file in the repository or on developer machines, why: "If leaked, it can be used to sign malware under your name" }
+      - { name: Relying on an EV certificate to bypass SmartScreen prompts, why: "EV no longer bypasses it automatically; reputation still has to be built" }
+    notes: "Artifact Signing's publicly trusted certificates are available only to organizations in certain countries and regions, and eligibility for individuals is not clearly listed officially; verify in the official documentation and portal before use."
+    sources: [S21, S22, S19, S20]
+  - category: Local credential storage
+    pick: "System credential store (macOS Keychain, Windows Credential Manager or DPAPI, Linux Secret Service); safeStorage for Electron"
+    avoid:
+      - { name: "localStorage, plaintext JSON config", why: "Easily read and synced; leaks are hard to notice" }
+      - { name: Encrypting yourself with a hard-coded password, why: "The password is in the program, so it is effectively unencrypted" }
+    sources: [S05]
+  - category: Crash reporting
+    pick: "Local redacted logs and dumps + an SDK speaking the Sentry protocol (sentry-electron for Electron), with a configurable reporting endpoint"
+    alternatives:
+      - { name: Self-hosted GlitchTip, when: "On-premises deployment needing a lightweight error collection service; verify its native dump support first" }
+      - { name: Self-hosted Sentry, when: "You need the full feature set and accept its license terms" }
+    avoid:
+      - { name: Uploading to a public cloud service by default, why: "On-premises customers usually do not allow it, and dumps may contain sensitive data" }
+    license: "GlitchTip is MIT; the Sentry self-hosted repository is FSL-1.1-Apache-2.0, which is not a permissive license; review per 27 before integrating or offering it as a service"
+    sources: [S30, S28, S29]
+  - category: Desktop E2E testing tools
+    pick: "Electron: Playwright's Electron support; Tauri: WebdriverIO (the WebDriver approach described in Tauri's official docs)"
+    alternatives:
+      - { name: "Appium or OS UI automation APIs (Windows UI Automation, etc.)", when: "Testing UI outside the framework, such as installers, the tray, and system dialogs" }
+    avoid:
+      - { name: Running only web tests in a browser, why: "They cannot cover system integration or installation and release" }
+    license: Playwright is Apache-2.0
+    notes: "Playwright's Electron support is still marked experimental; the tray, installers, and accessibility must be tested separately."
+    sources: [S17, S16, S31]
+antipatterns:
+  - { bad: "Enabling nodeIntegration or disabling sandbox in Electron for convenience", instead: "Keep all security switches on and expose named methods through preload" }
+  - { bad: Exposing the entire ipcRenderer to the page, instead: "contextBridge exposes only specific methods, and the main process validates each one" }
+  - { bad: Granting command-execution permission globally in Tauri, instead: Use a sidecar or scopes to restrict the program name and arguments }
+  - { bad: The UI passes a process ID to the host to have it kill the process, instead: "The host looks up the business resource by ID and acts on it after authorization" }
+  - { bad: "Executing the deep link `app://run?cmd=...` directly", instead: "Parse only predefined actions and IDs, and strictly validate parameters" }
+  - { bad: "Treating the updater's signature as OS code signing", instead: Do both layers — OS signing and notarization plus update-package signing }
+  - { bad: "Treating a signed .app as notarized", instead: "After signing, notarize with notarytool and staple the ticket" }
+  - { bad: "Treating Tauri's embedded bootstrapper as offline WebView2", instead: Use the offline installer or have IT preinstall it }
+  - { bad: Loading fonts and styles from a CDN at page runtime, instead: Bundle all critical static resources in the package }
+  - { bad: In-app updates and Intune both updating the same installation, instead: Designate exactly one update owner per channel }
+  - { bad: Uploading all crash dumps to a public cloud by default, instead: "Keep redacted data locally, and report to a designated endpoint only with consent or per enterprise configuration" }
+  - { bad: "Statically linking open-source Qt and distributing closed source", instead: "Link dynamically and meet LGPL obligations, or buy a commercial license" }
+  - { bad: Treating a successful compile on one CI machine as support for every platform, instead: Verify installation on real hardware for each item in the support matrix }
+sources:
+  - { id: S01, title: "Electron: Security", url: "https://www.electronjs.org/docs/latest/tutorial/security", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S02, title: "Electron Releases (timelines and support policy)", url: "https://www.electronjs.org/docs/latest/tutorial/electron-timelines", publisher: Electron, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Electron: autoUpdater", url: "https://www.electronjs.org/docs/latest/api/auto-updater", publisher: Electron, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "electron-builder: Auto Update", url: "https://www.electron.build/docs/features/auto-update", publisher: electron-builder, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S05, title: "Electron: safeStorage", url: "https://www.electronjs.org/docs/latest/api/safe-storage", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "Electron: app (setLoginItemSettings)", url: "https://www.electronjs.org/docs/latest/api/app", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Electron: Windows on ARM", url: "https://www.electronjs.org/docs/latest/tutorial/windows-arm", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Electron README (download mirror instructions)", url: "https://github.com/electron/electron/blob/main/README.md", publisher: Electron, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: "Tauri: Capabilities", url: "https://v2.tauri.app/security/capabilities/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "Tauri: Shell plugin", url: "https://v2.tauri.app/plugin/shell/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "Tauri: Updater plugin", url: "https://v2.tauri.app/plugin/updater/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "Tauri: Windows Installer", url: "https://v2.tauri.app/distribute/windows-installer/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "Tauri: AppImage", url: "https://v2.tauri.app/distribute/appimage/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "Tauri: Webview Versions", url: "https://tauri.app/reference/webview-versions/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "Tauri: Official plugins", url: "https://v2.tauri.app/plugin/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Tauri: WebDriver testing", url: "https://tauri.app/develop/tests/webdriver/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Playwright: Electron", url: "https://playwright.dev/docs/api/class-electron", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: "Apple: Notarizing macOS software before distribution", url: "https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution", publisher: Apple, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "Microsoft: Code signing options for Windows app developers", url: "https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: "Microsoft: SmartScreen reputation for Windows app developers", url: "https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: "What is Artifact Signing?", url: "https://learn.microsoft.com/en-us/azure/artifact-signing/overview", publisher: Microsoft, date: 2026-01-02, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: "Artifact Signing quickstart", url: "https://learn.microsoft.com/azure/artifact-signing/quickstart", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: "Intune: Add and assign Win32 apps", url: "https://learn.microsoft.com/en-us/mem/intune-service/apps/apps-win32-add", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Manage MSIX deployment with Intune", url: "https://learn.microsoft.com/en-us/windows/msix/desktop/managing-your-msix-deployment-intune", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "Flatpak: Sandbox Permissions", url: "https://docs.flatpak.org/en/latest/sandbox-permissions.html", publisher: Flatpak, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: "Flatpak: Single-file bundles", url: "https://docs.flatpak.org/en/latest/single-file-bundles.html", publisher: Flatpak, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: "Qt: Obligations of the open-source LGPL license", url: "https://www.qt.io/licensing/open-source-lgpl-obligations", publisher: The Qt Company, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "GlitchTip: Installation", url: "https://glitchtip.com/documentation/install/", publisher: GlitchTip, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: "Sentry self-hosted", url: "https://github.com/getsentry/self-hosted", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "Sentry SDK for Electron", url: "https://github.com/getsentry/sentry-electron", publisher: Sentry, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: "Microsoft: Accessibility testing", url: "https://learn.microsoft.com/en-us/windows/apps/design/accessibility/accessibility-testing", publisher: Microsoft, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S32, title: "Tauri: RPM", url: "https://v2.tauri.app/distribute/rpm/", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: "Flutter: Desktop support", url: "https://docs.flutter.dev/platform-integration/desktop", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: "Compose Multiplatform", url: "https://github.com/JetBrains/compose-multiplatform", publisher: JetBrains, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: "Tauri repository", url: "https://github.com/tauri-apps/tauri", publisher: Tauri, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "Tauri 2 is still being released continuously; the stage of v3 (the report says alpha) is unverified."
+  - "Wails v3 has been officially released, security advisory GHSA-2p5f-2gx8-mh8m is only partially fixed, and Linux now defaults to GTK4/WebKitGTK 6.0: claims from the report, unverified."
+  - "The Electron safeStorage synchronous APIs are deprecated and will be removed in a later major version: a claim from the report, unverified; check the official docs when upgrading the Electron major version."
+  - "The countries and regions where Artifact Signing is open to individual developers are not clearly listed officially, and community accounts vary; whether entities in mainland China can use it is unverified."
+  - "EV certificates no longer automatically bypass SmartScreen prompts: based on the Microsoft documentation cited by the report, not re-verified this time."
+  - "How exactly to test Tauri with WebdriverIO on macOS (the report says the native tauri-driver may depend on a commercial solution on macOS) is vague and pending verification."
+  - "GlitchTip's level of support for native crash dumps (minidump) is unverified."
+  - "Pending research: selection and licensing of .NET desktop frameworks (MAUI, Avalonia, WinUI)."
+  - "Pending research: native SwiftUI/AppKit desktop apps; Qt's per-module license list and commercial license terms."
+  - "Pending research: Snap distribution, and Mac App Store and Microsoft Store listing rules."
+  - "Pending research: app store listing, signing systems, and WebKitGTK availability for domestic Chinese operating systems such as UnionTech UOS and Kylin."
+  - "Pending research: recommended tools for signed Linux deb/rpm repositories and AppImage signing."

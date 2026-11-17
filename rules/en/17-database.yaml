@@ -1,0 +1,593 @@
+id: "17"
+slug: database
+title: Databases and Storage
+summary: "How to handle relational modeling and naming, schema migration principles, transactions and concurrency control (isolation levels, optimistic locking, row-lock claiming, leases), outbox and idempotency tables, connection pools and query performance, backup and restore drills, object storage, and vector storage."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - "Data modeling and naming, primary keys and IDs, time and money types, constraints and indexes"
+    - "Schema migration principles: versioning, expand-contract, compatibility with the previous application version, fix-forward first, testing on the target database"
+    - "Transaction boundaries, isolation levels, retrying serialization failures and deadlocks"
+    - "Optimistic locking, row locks and SKIP LOCKED, leases and fencing tokens"
+    - "Outbox tables, database-level idempotency tables"
+    - "Connection pool budgets, read-replica consistency, execution plans"
+    - "Backups, point-in-time recovery, restore drills (drill frequency is defined only in this topic)"
+    - Object storage selection and metadata
+    - Vector storage (pgvector, etc.) selection
+    - Dialect testing for PostgreSQL- / MySQL-compatible databases (such as openGauss)
+  excludes:
+    - { what: "Per-language migration tools, database drivers, and query-layer code", see: "10-15" }
+    - { what: "Idempotency semantics (422 when the same key maps to a different request, 409 while processing), pagination APIs, event formats", see: "16" }
+    - { what: "Message queues, caches, job scheduling, distributed lock services, relaying the outbox to messaging components", see: "18" }
+    - { what: "Multi-tenant isolation models, login and authorization", see: "19" }
+    - { what: "Security checks for uploaded files, security requirements for presigned URLs, key management", see: "25" }
+    - { what: "Operational processes for database deployment, monitoring and alerting, and high-availability failover drills", see: "26" }
+    - { what: "Regulatory requirements for data retention periods, personal-data deletion obligations, open-source licensing considerations", see: "27" }
+    - { what: "Chunking, retrieval, and reranking strategies for vector search", see: "24" }
+    - { what: General requirements for test layering and migration testing, see: "04" }
+overview: |
+  1. **Default to PostgreSQL for new projects.** If the customer already runs MySQL or mandates a domestic database, stay with it; databases that are "PostgreSQL / MySQL compatible" need their own dialect tests—don't assume equivalence.
+  2. **Put constraints in the database.** Express primary keys, NOT NULL, unique, foreign key, and check constraints in the database; use time-zone-aware types for points in time, and never use floating point for money.
+  3. **Change schemas only through versioned migrations.** Add before you remove (expand-contract) so the old and new application versions can run side by side; roll back by fixing forward, not with down scripts. Test migrations on the same database product and version, with realistic data volumes.
+  4. **DDL takes locks too.** Set a lock wait timeout first; build indexes on large tables concurrently; add constraints without validating existing rows, then validate separately; backfill in batches that can resume.
+  5. **Keep transactions short and explicit.** Draw transaction boundaries at the use-case layer, and don't call external services inside a transaction; when using a higher isolation level, be able to retry the whole transaction on serialization failure.
+  6. **Protect concurrent writes.** Optimistic locking checks the affected row count; multiple workers claim jobs with SKIP LOCKED plus leases and fencing tokens; if an existing queue library fits, don't hand-roll one (see 18).
+  7. **Outbox goes in the same transaction as the business change.** Delivery is at-least-once, and consumers are idempotent by event ID; idempotency-table results are committed together with the business change.
+  8. **A replica is not a backup.** When you need point-in-time recovery, use base backups plus continuous WAL archiving; only backups that have been successfully restored in a drill count.
+  9. **Start with simple storage.** For vectors, start with pgvector and switch to a dedicated database only if load tests say so; for object storage, depend only on the common subset of S3, and don't choose the archived MinIO community edition for new projects.
+rules:
+  # ── Modeling and naming ──
+  - id: DB-001
+    title: Every table with a business identity must have a primary key; pure join tables may use a composite primary key
+    level: hard
+    check: auto
+    how: CI queries the system catalog, lists tables without a primary key, and compares them against the registered exception list
+    applies: [all]
+    why: Rows without a primary key cannot be reliably updated, referenced, or deduplicated, and features such as logical replication are restricted.
+  - id: DB-002
+    title: Name tables, columns, constraints, and indexes in lowercase with underscores; don't use mutable business numbers as technical primary keys—add a separate unique constraint
+    level: soft
+    check: semi
+    how: Check naming with a migration linter or a custom script; in review, check whether a business number such as an order number is used as the primary key
+    applies: [all]
+    why: Consistent naming is portable across databases; business-number rules change, and changing a primary key ripples through every foreign key.
+    see: ["02"]
+  - id: DB-003
+    title: Use UUIDv7 for IDs that are exposed externally or generated across systems; high-write tables internal to a single database may use auto-increment bigint; no ID is ever treated as an access credential
+    level: soft
+    check: semi
+    how: Check primary key types when reviewing schemas; search the code for endpoints where "knowing the ID grants access"
+    applies: [all]
+    why: UUIDv7 is roughly time-ordered, giving better index locality than random UUIDs, and can still be generated independently in many places; RFC 9562 states explicitly that UUIDs must not be used as security credentials, and a UUIDv7 also reveals its creation time.
+    detail: |
+      - If the database has no built-in UUIDv7 generator, generate them in the application with a well-tested library.
+      - Where you don't want to expose the creation time (such as object storage keys), use random values.
+      - Use ULID only where a ULID ecosystem already exists; it is not the default.
+    sources: [S17, S16]
+  - id: DB-004
+    title: Columns that represent a moment in time use a time-zone-aware type (timestamptz in PostgreSQL); where local business time is needed, also store the IANA time zone name
+    level: hard
+    check: semi
+    how: A migration linter or script lists time columns without a time zone; review confirms whether each is an exception such as a "local date-time"
+    applies: [all]
+    why: Moments stored without a time zone are silently miscalculated across time zones, daylight saving time, and server time-zone changes.
+    detail: "For local-time rules such as \"every day at 9 a.m.\", store the local time plus the time zone name; don't convert to UTC in advance."
+    sources: [S26]
+  - id: DB-005
+    title: Use numeric/decimal or integers in an agreed unit (such as cents) for money and values that must be exact; never use floating-point types
+    level: hard
+    check: semi
+    how: A migration linter or script lists columns of type real, double precision, or float; review confirms they are not money or measured quantities
+    applies: [all]
+    why: Floating-point numbers are binary approximations, so sums and comparisons drift; the PostgreSQL documentation recommends numeric for money.
+    sources: [S18]
+    see: ["02"]
+  - id: DB-006
+    title: Express NOT NULL, unique, foreign key, and check constraints in the database; removing a constraint such as a foreign key requires a written reason and registration
+    level: soft
+    check: semi
+    how: When reviewing migrations, check that new tables declare constraints; migrations that drop constraints must include a reason in the PR
+    applies: [all]
+    why: If only application code guards consistency, any write path that bypasses it (scripts, background jobs, another service) will write dirty data.
+    detail: |
+      - When status values are few and stable, use a CHECK constraint or a lookup table; removing or reordering values in a native PostgreSQL enum is painful.
+      - JSONB suits sparse, fast-changing extension fields; stable attributes that are often filtered or joined on become their own columns. Document who owns the structure of each JSON field and how it evolves.
+  - id: DB-007
+    title: "Decide deletion semantics first: hard delete by default; use soft delete only when there is a real need for recovery or retention, and handle unique constraints with partial unique indexes"
+    level: soft
+    check: manual
+    how: In design review, confirm the deletion approach for each entity type and who is responsible for cleaning up object storage, search, vector copies, and downstream events
+    applies: [all]
+    why: Open-ended soft deletes leave personal data that can never be fully deleted, and deleted rows keep occupying unique constraints.
+    detail: |
+      On soft-delete tables, unique constraints apply only to non-deleted rows, for example:
+      `CREATE UNIQUE INDEX ... ON documents (tenant_id, slug) WHERE deleted_at IS NULL`.
+      Deleting a row from the main table does not mean the whole pipeline is cleaned up. Legal deletion obligations are covered in 27.
+    see: ["27"]
+  - id: DB-008
+    title: When multiple tenants share a table, unique constraints, foreign keys, and common indexes all include the tenant column
+    level: hard
+    check: semi
+    how: A script lists unique constraints and foreign keys on tenant-scoped tables that don't include the tenant column; review confirms
+    applies: [kind:service]
+    why: A foreign key on entity ID alone lets tenant A's records attach to tenant B's objects; unique constraints without the tenant make different tenants collide.
+    detail: How to choose a tenant isolation model (shared tables, separate schemas, separate databases) is covered in 19.
+    see: ["19"]
+  - id: DB-009
+    title: When using PostgreSQL row-level security (RLS), the role the application connects with must not be the table owner, a superuser, or have the BYPASSRLS attribute, and FORCE ROW LEVEL SECURITY must be enabled on the table
+    level: hard
+    check: auto
+    how: CI queries pg_roles and pg_class to check the application role's attributes and the table's relforcerowsecurity; cross-tenant negative tests then verify it
+    applies: [kind:service]
+    why: Superusers and BYPASSRLS roles always bypass RLS, and table owners bypass it by default; without checking the role, RLS is meaningless.
+    detail: |
+      - RLS is a second line of defense and does not replace application-level authorization.
+      - Set the tenant context with transaction-scoped settings (such as `set_config(..., true)`), not session-scoped ones, so it doesn't linger when connections are reused (see DB-032).
+    sources: [S10]
+    see: ["19", "01"]
+  - id: DB-010
+    title: Use partitioning only for a clear lifecycle, query, or data-volume need; if you partition, pre-create future partitions automatically and have a cleanup process
+    level: soft
+    check: semi
+    how: Monitor row growth in the default partition; when reviewing a partitioning scheme, check the cleanup and archiving steps
+    applies: [all]
+    why: Partitioning does not speed things up automatically and restricts unique constraints (they must include the partition key); forgetting to create new partitions sends writes into the default partition or makes them fail outright.
+    detail: Before dropping or detaching old partitions, confirm they have been archived or backed up.
+    sources: [S15]
+  # ── Migrations ──
+  - id: DB-011
+    title: Production schemas change only through versioned migrations; migrations run as a separate release step under a dedicated role, not via automatic sync at application startup or on every instance
+    level: hard
+    check: semi
+    how: Search production code for ORM auto-sync or table-creation calls; check that migration is a separate step in the deployment pipeline; business roles have no DDL privileges
+    applies: [all]
+    why: Auto-sync leaves no record and cannot be reviewed, and multiple instances running migrations at once fight over locks.
+    detail: Choose the migration tool by language; see 10–15. SQL generated by ORM auto-generated migrations must be reviewed by a human.
+    see: ["10-15"]
+  - id: DB-012
+    title: "Make incompatible schema changes step by step with expand-contract: add first, then backfill and switch, and finally remove the old structure; every step must allow the current and previous application versions to run at the same time"
+    level: hard
+    check: semi
+    how: CI runs a smoke test of the previous application version against the database after the new migration; in review, check that column drops, renames, and type changes are split across multiple releases
+    applies: [kind:service]
+    why: During rolling deployments, old and new application versions access the database at the same time; a one-shot rename or column drop breaks the old version immediately.
+    detail: |
+      Typical steps: add a nullable column or new table → backfill in batches → verify (nulls, counts, sampled comparisons) → switch the application to the new structure → remove the old structure after at least one release cycle.
+      The migration that removes the old structure gets its own review.
+    sources: [S21]
+  - id: DB-013
+    title: Roll back mainly by fixing forward; mark migrations that delete data as irreversible, and don't rely on down scripts to claim they can be undone
+    level: hard
+    check: manual
+    how: The PR template requires stating whether the migration is reversible, how to roll back the application if something goes wrong, and the data repair plan; review confirms
+    applies: [all]
+    why: Down scripts cannot restore columns and data that have already been dropped; when something really goes wrong, shipping a fix migration is usually faster and safer than rolling back.
+    detail: Before migrating, confirm that backups and point-in-time recovery are available (see DB-033).
+    see: ["04"]
+  - id: DB-014
+    title: "Verify migrations on the same database product and major version as production: run them both from an empty database and on an anonymized data snapshot from the previous version"
+    level: hard
+    check: semi
+    how: CI starts a database container with the same version as production and runs the migrations; before release, rehearse on an anonymized snapshot and record the duration
+    applies: [all]
+    why: Migrations that run fine on an empty database often fail on real data (duplicates, nulls, large tables); DDL behavior differs across databases and even across major versions.
+    see: ["04"]
+  - id: DB-015
+    title: "Write PostgreSQL migrations safely: set lock_timeout before DDL; build indexes on large tables with CREATE INDEX CONCURRENTLY outside a transaction, and check the index is valid afterwards; add constraints as NOT VALID first, then VALIDATE separately"
+    level: hard
+    check: auto
+    how: CI runs Squawk on migration files; after migrations run, query pg_index.indisvalid
+    applies: [all]
+    why: DDL waiting on a lock blocks all subsequent reads and writes; a plain index build blocks writes; adding a constraint directly scans the whole table while holding the lock.
+    detail: |
+      - When the lock cannot be acquired, let the migration fail fast (error code 55P03) and retry; that beats blocking the business.
+      - A failed `CREATE INDEX CONCURRENTLY` leaves an invalid index behind, which must be dropped and rebuilt.
+      - Adding NOT NULL: first add `CHECK (col IS NOT NULL) NOT VALID`, then `VALIDATE CONSTRAINT`, and once confirmed, `SET NOT NULL`.
+    sources: [S11, S12, S13, S09, S19]
+  - id: DB-016
+    title: PRs that change large tables state the lock level, whether the table is rewritten, the expected duration, and the execution window; risks that lint can't catch are reviewed by a human
+    level: soft
+    check: manual
+    how: The PR template has fixed fields for these; reviewers confirm against table size and traffic
+    applies: [all]
+    why: Static checks don't know how large production tables are or how much traffic they get; the same ALTER finishes instantly on a small table and can cause an outage on a large one.
+    sources: [S13]
+  - id: DB-017
+    title: Backfill data in batches, idempotently, with the ability to pause and resume, and never in the same transaction as DDL
+    level: hard
+    check: semi
+    how: An integration test interrupts a backfill midway and restarts it, checking the result is correct and nothing is processed twice
+    applies: [all]
+    why: Backfilling in one large transaction holds locks for a long time, generates large amounts of log, and on failure must start over from scratch.
+    detail: Batch by a primary-key cursor with a short transaction per batch; record the cursor position, processed count, and failure count; set a statement timeout and throttle.
+  - id: DB-018
+    title: MySQL migrations don't carry over PostgreSQL's transactional DDL assumptions; online changes specify ALGORITHM and LOCK explicitly and are verified on an instance of the same version
+    level: hard
+    check: semi
+    how: A migration linter checks that ALTER statements specify ALGORITHM/LOCK; rehearse on MySQL of the same version, including interruption midway
+    applies: [all]
+    why: MySQL DDL implicitly commits the current transaction and cannot be rolled back as a whole on failure; whether a given ALTER can run online depends on the version and the table structure.
+    detail: Only when native online DDL is insufficient, consider gh-ost or pt-online-schema-change, and first review their limitations around foreign keys, triggers, and replication.
+    sources: [S24, S25]
+  - id: DB-019
+    title: Databases that are "PostgreSQL compatible" or "MySQL compatible" (such as openGauss, KingbaseES, TiDB, OceanBase) get their own dialect tests; don't assume they are equivalent to the original
+    level: hard
+    check: semi
+    how: "CI or the acceptance environment runs the same contract test suite against each target database: types, time zones, uniqueness and nulls, upsert, lock waits, SKIP LOCKED, isolation levels, DDL, error codes"
+    applies: [all, kind:onprem]
+    why: Compatible databases differ in syntax, functions, extensions, locking, and DDL—TiDB, for example, officially lists unsupported features; promising compatibility without testing means problems surface at the customer site.
+    detail: Each migration file states which dialects it applies to; SQL not tested on the target database is not copied over.
+    sources: [S35]
+  # ── Transactions and concurrency ──
+  - id: DB-020
+    title: Transaction boundaries are drawn at the use-case layer; no external services such as LLMs, email, or remote HTTP are called inside a transaction
+    level: hard
+    check: semi
+    how: Review calls inside transaction blocks; monitor long transactions and "idle in transaction" connections
+    applies: [kind:service]
+    why: When an external call is slow or hangs, the transaction holds locks and a connection for a long time, dragging down the whole database; external side effects also cannot be rolled back with the transaction.
+    detail: |
+      - For external side effects, first write an outbox or job record inside the transaction, then execute after commit (see DB-027).
+      - PostgreSQL can set `idle_in_transaction_session_timeout` as a backstop.
+      - Per-language transaction code (begin, rollback, checking commit errors) is covered in 10–15.
+    see: ["10-15", "01"]
+  - id: DB-021
+    title: Choose the isolation level explicitly per use case; under the default Read Committed level, "read then write" paths with races are protected by row locks, optimistic locking, or a higher isolation level
+    level: soft
+    check: manual
+    how: Review "query then modify" code paths to see which protection is used; reproduce races with concurrency tests
+    applies: [kind:service]
+    why: PostgreSQL defaults to Read Committed; when two transactions read the same old value and each writes, one side's change is lost or a business rule is broken.
+    detail: |
+      - Single-row updates: use `SELECT ... FOR UPDATE` or optimistic locking (DB-023).
+      - Invariants spanning multiple rows: consider the Serializable level and retry per DB-022.
+    sources: [S02]
+    see: ["01"]
+  - id: DB-022
+    title: Under Repeatable Read or Serializable, serialization failures (40001) and deadlocks (40P01) must retry the entire transaction, with a retry cap and backoff; unique violations (23505) are handled as business cases, not blindly retried
+    level: hard
+    check: semi
+    how: Check how the transaction wrapper classifies SQLSTATE; concurrency tests provoke serialization failures and confirm they are retried and the final result is correct
+    applies: [kind:service]
+    why: The PostgreSQL documentation states that at these two levels applications must be prepared to retry serialization failures; retrying only the failed statement is wrong—the whole transaction must be redone from the start.
+    detail: |
+      - Retry only entire database use cases that are safe to repeat; the transaction must not contain external side effects that have already happened.
+      - A unique violation usually means "already exists"; turn it into a business error or route it through idempotency logic.
+    ref_value: There is no official standard for retry count and backoff; as a reference, about 3 attempts with exponential backoff and random jitter, bounded by the overall request timeout budget.
+    sources: [S02, S19]
+  - id: DB-023
+    title: Optimistic locking uses a version column; updates include the expected version and increment it, and check the affected row count; on conflict, return a business error rather than overwriting automatically
+    level: hard
+    check: semi
+    how: "Concurrent update test: two simultaneous modifications to the same row; one side must receive a conflict error"
+    applies: [kind:service]
+    why: Without checking the affected row count, a version conflict is treated as success, and the later writer silently overwrites the earlier one.
+    detail: |
+      `UPDATE t SET ..., version = version + 1 WHERE id = $1 AND version = $2`; when 0 rows are affected, distinguish "does not exist" from "version conflict".
+      Editing conflicts should usually prompt the user to reload; retry automatically only where discarding the old value is acceptable. How conflicts are expressed in the API is covered in 16.
+    see: ["01", "16"]
+  - id: DB-024
+    title: SKIP LOCKED is used only for multiple consumers claiming jobs from a queue-like table, not for ordinary queries that need a consistent view
+    level: hard
+    check: semi
+    how: Search the code for SKIP LOCKED and confirm every use is on a job-claiming path
+    applies: [all]
+    why: The PostgreSQL documentation states that skipping locked rows gives an inconsistent view of the data, unsuitable for general-purpose work and suited only to keeping multiple consumers from contending for the same row.
+    detail: Where retries, priorities, scheduling, or monitoring are needed, prefer an existing database-backed queue library over a hand-rolled one (see 18).
+    sources: [S03]
+    see: ["18"]
+  - id: DB-025
+    title: "When multiple workers claim jobs, use leases: record the expiry with the database clock so expired leases can be reclaimed; increment a fencing token on every claim, and verify it on completion, renewal, and result writes"
+    level: hard
+    check: semi
+    how: "Fault test: pause the worker holding a lease until it expires; after another worker takes over, the original worker's writes on resuming must be rejected"
+    applies: [kind:service]
+    why: With only a timeout and no fencing token, an old worker waking up from a pause overwrites the new worker's results.
+    detail: |
+      - Claim: `FOR UPDATE SKIP LOCKED` selects pending rows or rows whose lease has expired, updates the status, holder, and expiry, and increments the token by 1.
+      - Write: `WHERE id = $1 AND lease_token = $2`; if 0 rows are affected, treat the lease as lost and stop processing.
+      - Use the database's `now()` rather than each worker's local clock; the lease duration must be clearly longer than the heartbeat interval.
+      - External side effects still depend on business idempotency. Distributed lock services are covered in 18.
+    sources: [S03, S20]
+    see: ["18"]
+  # ── Outbox and idempotency tables ──
+  - id: DB-026
+    title: When a business write and a pending event must be atomic, the outbox record is committed in the same transaction as the business change
+    level: hard
+    check: semi
+    how: "Fault-injection tests: when the business transaction rolls back, the outbox must have no record; if the relay crashes after commit but before delivery, the event is still sent after restart"
+    applies: [kind:service]
+    why: Committing and then sending, or sending and then committing, loses events or emits events for things that don't exist when a crash happens in between.
+    detail: The principle is in ARC-015. Where change data capture (CDC) is available, it can replace polling the outbox table.
+    sources: [S22]
+    see: ["01"]
+  - id: DB-027
+    title: "Design the outbox relay for at-least-once delivery: claim leases, a retry cap, escalation to manual handling on failure, and periodic cleanup of sent records; consumers are idempotent by event ID"
+    level: hard
+    check: semi
+    how: Test the relay crashing after delivery but before marking the record sent, and confirm consumers process duplicate events only once
+    applies: [kind:service]
+    why: The relay can crash after sending but before recording it, so duplicate delivery is unavoidable; a table alone, without a claim and retry protocol, is not a usable outbox.
+    detail: |
+      - Minimum fields: event ID, aggregate type and ID, event type, payload, occurred-at time, status, attempt count, next attempt time, sent-at time.
+      - When ordering within an aggregate is required, add an explicit sequence number; don't infer it from UUIDv7 or commit time.
+      - Relaying to messaging components and consumer frameworks is covered in 18; event formats and versioning in 16.
+    sources: [S22]
+    see: ["18", "16"]
+  - id: DB-028
+    title: The idempotency table has a unique constraint on "tenant + operation + idempotency key" and stores a request fingerprint; the processing result is committed in the same transaction as the business change
+    level: hard
+    check: semi
+    how: "Concurrency tests: sending the same key twice at once executes only once; the same key with different request content returns a conflict as defined in 16"
+    applies: [kind:service]
+    why: Check-then-insert alone executes twice under concurrency; without a fingerprint you can't tell a retry from a misused key.
+    detail: |
+      - Claim with `INSERT ... ON CONFLICT`; on compatible databases that don't support this syntax, insert and catch the unique violation, then query, after first testing its concurrency semantics.
+      - Compute the request fingerprint from normalized content (field order doesn't affect the result).
+      - Once a record expires, replay is allowed; money operations must use a long-lived business operation ID, not just a short-lived key.
+      - Status codes and response semantics (422 for a different request, 409 while processing) follow 16.
+    see: ["16"]
+  # ── Connections and performance ──
+  - id: DB-029
+    title: "Connection budget: the sum over services of \"pool limit × instance count\", plus admin and migration connections, does not exceed the connections the database allows"
+    level: hard
+    check: semi
+    how: A deployment-config check script computes the total at the maximum scaled-out instance count and compares it with the database limit; observe connection counts during load tests
+    applies: [kind:service]
+    why: Autoscaling multiplies connection counts, and exceeding the limit makes every new request fail.
+    detail: Create only one connection pool per process (per-language code in 10–15). Specific connection-count parameters depend on the database's sizing; no uniform number is given.
+    see: ["10-15"]
+  - id: DB-030
+    title: Before enabling a transaction-level pooler such as PgBouncer, test session state, prepared statements, temporary tables, LISTEN/NOTIFY, and the RLS tenant context
+    level: soft
+    check: semi
+    how: "Pooler integration test: two requests alternately reuse the same connection, checking that settings and tenant context don't leak between them"
+    applies: [kind:service]
+    why: Under transaction-level pooling, a client's next transaction may land on a different server connection, so session-level settings are lost or leak to someone else.
+    detail: Use only transaction-scoped settings for tenant context and session variables; support for prepared statements depends on the pooler configuration and driver and must be tested.
+    sources: [S23]
+    see: ["19"]
+  - id: DB-031
+    title: When adding a critical query or changing indexes, attach an execution plan on a representative data volume; each index serves a specific query—don't index every column
+    level: soft
+    check: semi
+    how: The PR attaches `EXPLAIN (ANALYZE, BUFFERS)` output; periodically use pg_stat_statements to find slow queries and look for unused indexes
+    applies: [all]
+    why: Plans on small data volumes can be completely different on large tables; extra indexes slow down writes and take up disk.
+    detail: |
+      - Measure before optimizing: rule out query shape, N+1, returned columns, indexes, and statistics before considering a cache or read replica.
+      - Paginate large datasets with cursor-based keyset pagination backed by an index, and don't expose unbounded OFFSET externally; pagination API conventions are in 16.
+      - Running ANALYZE in production actually executes the statement; mind the cost and data anonymization.
+    see: ["16", "18"]
+  - id: DB-032
+    title: With read replicas, state the consistency requirement for each class of query; reading your own just-written data, authorization checks, and reads inside a transaction always go to the primary
+    level: hard
+    check: semi
+    how: "Review the data access layer's routing rules; consistency test: reading immediately after writing must not return a stale value"
+    applies: [kind:service]
+    why: Replicas have replication lag; routing every read to a replica means users don't see changes they just committed, and authorization checks may use stale permissions.
+  # ── Backup and recovery ──
+  - id: DB-033
+    title: Production data has written recovery objectives (RPO/RTO), a retention period, an owner, and a recovery runbook; the backup scope covers the database, object storage, configuration, and key recovery material
+    level: hard
+    check: manual
+    how: Before release, check that the recovery runbook exists and lists these items; follow the runbook during drills
+    applies: [kind:service, kind:onprem]
+    why: Without written objectives there's no way to judge whether the backup plan is sufficient; back up only the database, and losing object files or decryption keys still makes the business unrecoverable.
+    detail: RPO is the maximum amount of data, measured in time, you can afford to lose; RTO is how quickly you must recover. Values are set per business; no uniform value is given.
+  - id: DB-034
+    title: Primary-replica replication and storage snapshots are not backups; where point-in-time recovery is needed, use base backups plus continuous WAL archiving (for MySQL, base backups plus binlog), not pg_dump alone
+    level: hard
+    check: semi
+    how: Check that the backup tool configuration includes WAL archiving; restore to a specified point in time during recovery drills
+    applies: [all]
+    why: Accidental deletes, logical errors, and ransomware replicate to the standby; pg_dump is a logical snapshot and cannot restore to an arbitrary point in time.
+    sources: [S14]
+  - id: DB-035
+    title: Encrypt backups and keep the keys separate from them; keep at least one copy in a different failure domain that production accounts cannot delete or modify; alert on backup failures and WAL archiving lag
+    level: hard
+    check: semi
+    how: Audit backup storage permissions and locations; alert rules cover backup job failures, archiving lag, and low disk space
+    applies: [kind:service, kind:onprem]
+    why: When backups live in the same account and data center as production, one mistake or intrusion destroys both; backups quietly failing for weeks without anyone noticing is common.
+    detail: Alerting and on-call processes are covered in 26, key management in 25.
+    see: ["25", "26"]
+  - id: DB-036
+    title: Regularly perform real restore drills in an isolated environment, verify data integrity and application availability, and record the actual recovery time and data loss
+    level: hard
+    check: manual
+    how: "Check drill records: backup version, chosen recovery point, start and end times, verification SQL and results, actual data loss, owner"
+    applies: [kind:service, kind:onprem]
+    why: "A backup job showing success doesn't mean it can be restored: missing WAL segments, lost keys, and outdated restore scripts are only discovered by actually restoring."
+    detail: This rule is the single source for restore drill frequency; other topics reference it.
+    ref_value: "Reference values: for ordinary production, at least one sampled restore per quarter and at least one full restore every six months; more often for critical systems; an extra drill after a major database version upgrade or a change of backup tool or storage. There is no official uniform requirement; adjust to the recovery objectives and change frequency."
+    see: ["26"]
+  - id: DB-037
+    title: Stay on the database's current minor version with a major version within its community support period; before upgrading the database or backup tools, read the release notes and perform any extra steps they require
+    level: hard
+    check: semi
+    how: A script compares the running version with the official support list; the upgrade checklist includes a "read the release notes" item with its conclusion recorded
+    applies: [all]
+    why: Each PostgreSQL major version is supported for 5 years with minor releases at least every 3 months, and the project considers not applying minor releases riskier than upgrading; some minor releases require reindexing or taking a new full backup.
+    detail: Rules don't name specific version numbers; the version baseline is tracked separately and updated against the official support page.
+    sources: [S01]
+    see: ["26"]
+  # ── Object storage and vector storage ──
+  - id: DB-038
+    title: Applications use only the common subset of S3 through an adapter layer and run compatibility tests against the chosen storage product; database metadata and objects are kept in sync with a status field plus scheduled reconciliation
+    level: soft
+    check: semi
+    how: Run contract tests for upload, multipart upload, delete, list, and presign against the chosen backend; the reconciliation job reports orphaned and missing objects
+    applies: [kind:service, kind:onprem]
+    why: "\"S3-compatible\" products differ widely in multipart, versioning, object lock, and other behaviors; there is no distributed transaction between the database and object storage, so a failure leaves the two inconsistent."
+    detail: The metadata table records status, size, checksum, detected type, and owning tenant; incomplete multipart uploads need cleanup rules. Requirements for upload security checks and presigned URLs are in 25.
+    sources: [S33]
+    see: ["25"]
+  - id: DB-039
+    title: Object keys are generated by the server, unguessable, and tenant-prefixed; never use the user's original filename or personal data as a key
+    level: hard
+    check: semi
+    how: Upload integration tests check the generated keys; review how keys are built in code
+    applies: [kind:service]
+    why: Original filenames collide, can be guessed, and write personal data into logs and storage paths.
+    detail: Store the original filename in the metadata table.
+    see: ["25", "19"]
+  - id: DB-040
+    title: Start vector storage with pgvector; load-test recall, latency, and maintenance cost with your own data and filters, and switch to a dedicated vector database only if it falls short
+    level: soft
+    check: manual
+    how: "Load-test records: recall (compared with exact search), p95 latency, result count with filters, index build time, backup and restore time"
+    applies: [kind:llm]
+    why: Keeping vectors and business data in the same database lets them share transactions, backups, and permissions; spinning up a separate cluster without load testing adds another system to sync and operate.
+    detail: |
+      - Approximate indexes search the index first and filter afterwards, so strict filters can return too few results; pgvector offers iterative scans, partial indexes, and partitioning to mitigate this, which must be tested.
+      - Multiple tenants sharing one approximate index affect each other's recall and speed; you can partition or split tables by tenant, but don't let partitions grow without bound.
+      - Don't write thresholds like "above N rows you must switch to a dedicated database". Chunking, retrieval, and reranking strategies are covered in 24.
+    sources: [S04]
+    see: ["24"]
+choices:
+  - category: Relational database
+    pick: PostgreSQL, using a major version within its community support period and the latest minor version of that major version
+    when: New projects
+    alternatives:
+      - name: MySQL (LTS release line)
+        when: The customer mandates it, the team already has MySQL operations and backup practices, or there is a large existing installed base
+      - name: Domestic databases already accepted by the customer (openGauss, KingbaseES, Dameng, OceanBase, TiDB, etc.)
+        when: Xinchuang (domestic IT substitution) or customer mandate; first obtain the product, version, and a test environment and pass the dialect tests (DB-019)
+    avoid:
+      - name: Major versions that are out of support
+        why: No more security fixes
+      - name: Major versions not yet officially released
+        why: Not for production
+    license: PostgreSQL License; MySQL Community Edition is GPLv2, with a separate commercial license; licensing considerations in 27
+    sources: [S01]
+  - category: PostgreSQL migration static analysis
+    pick: Squawk
+    notes: It catches risky patterns such as building indexes without CONCURRENTLY or adding constraints without NOT VALID; passing the check does not mean there is no locking risk, and large-table changes still need human review (DB-016). Choose the migration execution tool by language; see 10–15.
+    license: Dual-licensed MIT or Apache-2.0
+    sources: [S09]
+  - category: PostgreSQL connection pooling
+    pick: The connection pool built into the application or driver
+    alternatives:
+      - name: PgBouncer
+        when: Many instances and ballooning connection counts; test per DB-030 before enabling transaction pooling mode
+    sources: [S23]
+  - category: PostgreSQL backup and point-in-time recovery
+    pick: pgBackRest
+    alternatives:
+      - name: WAL-G
+        when: Teams that mainly back up to object storage or already use WAL-G
+      - name: Barman
+        when: You want a backup server that centrally manages backups for multiple databases; with CloudNativePG, use its Barman Cloud plugin
+    avoid:
+      - name: pg_dump alone
+        why: Cannot restore to an arbitrary point in time (DB-034)
+      - name: Relying only on a standby or storage snapshots
+        why: Accidental deletes are replicated, and snapshots are not necessarily consistent
+    license: pgBackRest is MIT; WAL-G is Apache-2.0 (its lzo support is GPL-3.0+); Barman is GPL-3.0
+    notes: The pgBackRest repository was archived by its maintainers in 2026-04, resumed maintenance in 2026-05 with sponsorship from several companies, and still had official releases in 2026-10; the sponsorship model may change again, so watch the announcements on its website when adopting it.
+    sources: [S05, S06, S07]
+  - category: MySQL backup and online schema changes
+    pick: Percona XtraBackup plus binlog archiving; for schema changes, use native online DDL first
+    alternatives:
+      - name: gh-ost or pt-online-schema-change
+        when: When native online DDL is insufficient; first review the limitations around foreign keys, triggers, and replication
+    avoid:
+      - name: Assuming backup tools automatically support new MySQL major versions
+        why: Verify against the tool's compatibility matrix and run a restore drill
+    sources: [S24, S34]
+  - category: PostgreSQL high availability
+    pick: "Tier by recovery objectives: single node plus off-site backups → primary/standby with manual failover → Patroni automatic failover → CloudNativePG on Kubernetes"
+    when: Set RPO/RTO first (DB-033), then choose the tier
+    avoid:
+      - name: Jumping straight to a three-node automatic-failover cluster for a small single-node system
+        why: Operational complexity outweighs the benefit, and high availability does not replace backups
+      - name: Introducing Kubernetes just to run the database
+        why: One more platform to operate
+    sources: [S31, S32]
+  - category: Object storage
+    pick: Local filesystem plus a metadata table for a single node or few attachments; SeaweedFS for multiple nodes
+    alternatives:
+      - name: Garage
+        when: Lightweight, multi-site self-hosting; run an S3 feature PoC first, and note AGPLv3
+      - name: Ceph RGW
+        when: An existing Ceph operations team
+    avoid:
+      - name: MinIO Community Edition (new projects)
+        why: The official repository was archived on 2026-04-25 and is no longer maintained, and the community edition no longer ships prebuilt binaries; existing deployments should plan a migration
+      - name: Writing your own S3-compatible service
+        why: Protocol details such as signing, multipart, and versioning are hard to get fully right
+    license: SeaweedFS is Apache-2.0; Garage is AGPLv3; MinIO is AGPLv3. Obligations for distribution and network services are covered in 27
+    sources: [S08, S29, S30]
+  - category: Vector storage
+    pick: pgvector
+    alternatives:
+      - name: Qdrant
+        when: Load tests show pgvector falls short, and you need dedicated resources and optimized filtered approximate search
+      - name: Milvus
+        when: Very large scale and a team that can operate distributed systems
+    avoid:
+      - name: Standing up a separate vector cluster before hitting any bottleneck
+        why: One more system to sync, back up, and operate
+    license: pgvector is under the PostgreSQL License
+    sources: [S04, S27, S28]
+antipatterns:
+  - { bad: "\"PostgreSQL DDL is transactional,\" so it can be run anytime", instead: "Set lock_timeout, split large-table changes into expand-contract steps, and estimate locking and rewrites" }
+  - { bad: Relying on ORM auto-sync of schemas at deployment, instead: "Versioned migrations plus human review plus rehearsal on the target database" }
+  - { bad: Writing a down script for every migration and assuming it can be rolled back, instead: "Fix forward first; mark irreversible migrations and confirm backups are available" }
+  - { bad: Calling an LLM or third-party API inside a transaction, instead: "Write only an outbox or job record inside the transaction, and call after commit" }
+  - { bad: "Using SKIP LOCKED on ordinary queries to \"avoid waiting on locks\"", instead: "Use it only for job claiming; ordinary queries accept the wait or adjust lock granularity" }
+  - { bad: Job claiming with only a timeout and no fencing token, instead: "Increment the token on every claim and verify it on writes" }
+  - { bad: Skipping backups because there is primary-replica replication, instead: "Base backups plus WAL archiving, stored off-site, with regular restore drills" }
+  - { bad: Assuming a backup can be restored because the backup job shows success, instead: Regularly perform a real restore in an isolated environment and record the results }
+  - { bad: "Using PostgreSQL SQL as-is on a \"PostgreSQL compatible\" database", instead: Run dialect tests on the target database }
+  - { bad: Standing up a dedicated vector cluster first in case you need to migrate later, instead: "Start with pgvector and decide based on load-test results" }
+sources:
+  - { id: S01, title: "PostgreSQL: Versioning Policy", url: "https://www.postgresql.org/support/versioning/", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "PostgreSQL: Transaction Isolation", url: "https://www.postgresql.org/docs/current/transaction-iso.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "PostgreSQL: SELECT (The Locking Clause)", url: "https://www.postgresql.org/docs/current/sql-select.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: pgvector, url: "https://github.com/pgvector/pgvector", publisher: pgvector, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: pgBackRest, url: "https://pgbackrest.org/", publisher: pgBackRest, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: WAL-G, url: "https://github.com/wal-g/wal-g", publisher: WAL-G, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: Barman, url: "https://github.com/EnterpriseDB/barman", publisher: EnterpriseDB, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: "MinIO (GitHub repository)", url: "https://github.com/minio/minio", publisher: MinIO, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: Squawk, url: "https://github.com/sbdchd/squawk", publisher: Squawk, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: "PostgreSQL: Row Security Policies", url: "https://www.postgresql.org/docs/current/ddl-rowsecurity.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: "PostgreSQL: ALTER TABLE", url: "https://www.postgresql.org/docs/current/sql-altertable.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: "PostgreSQL: CREATE INDEX", url: "https://www.postgresql.org/docs/current/sql-createindex.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: "PostgreSQL: Explicit Locking", url: "https://www.postgresql.org/docs/current/explicit-locking.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "PostgreSQL: Continuous Archiving and Point-in-Time Recovery", url: "https://www.postgresql.org/docs/current/continuous-archiving.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "PostgreSQL: Table Partitioning", url: "https://www.postgresql.org/docs/current/ddl-partitioning.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "PostgreSQL: UUID Functions", url: "https://www.postgresql.org/docs/current/functions-uuid.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "RFC 9562: Universally Unique IDentifiers (UUIDs)", url: "https://www.rfc-editor.org/rfc/rfc9562.html", publisher: IETF, date: 2024-05, kind: standard, checked: 2026-11-14 }
+  - { id: S18, title: "PostgreSQL: Numeric Types", url: "https://www.postgresql.org/docs/current/datatype-numeric.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "PostgreSQL: Error Codes", url: "https://www.postgresql.org/docs/current/errcodes-appendix.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "How to do distributed locking", url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html", publisher: Martin Kleppmann, date: 2016-02-08, kind: community, checked: 2026-11-14 }
+  - { id: S21, title: "ParallelChange", url: "https://martinfowler.com/bliki/ParallelChange.html", publisher: martinfowler.com, date: 2014-05-13, kind: community, checked: 2026-11-14 }
+  - { id: S22, title: "Pattern: Transactional outbox", url: "https://microservices.io/patterns/data/transactional-outbox.html", publisher: microservices.io, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S23, title: "PgBouncer FAQ", url: "https://www.pgbouncer.org/faq.html", publisher: PgBouncer, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "MySQL: InnoDB Online DDL Operations", url: "https://dev.mysql.com/doc/refman/8.4/en/innodb-online-ddl-operations.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "MySQL: Statements That Cause an Implicit Commit", url: "https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: "PostgreSQL: Date/Time Types", url: "https://www.postgresql.org/docs/current/datatype-datetime.html", publisher: PostgreSQL Global Development Group, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: Qdrant, url: "https://github.com/qdrant/qdrant", publisher: Qdrant, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: Milvus, url: "https://github.com/milvus-io/milvus", publisher: Milvus, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S29, title: SeaweedFS, url: "https://github.com/seaweedfs/seaweedfs", publisher: SeaweedFS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: Garage, url: "https://github.com/deuxfleurs-org/garage", publisher: Deuxfleurs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: Patroni, url: "https://github.com/patroni/patroni", publisher: Patroni, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S32, title: "CloudNativePG: Barman Cloud Plugin", url: "https://cloudnative-pg.io/plugin-barman-cloud/docs/intro/", publisher: CloudNativePG, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S33, title: "Amazon S3: Sharing objects with presigned URLs", url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html", publisher: AWS, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: gh-ost, url: "https://github.com/github/gh-ost", publisher: GitHub, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S35, title: "TiDB: MySQL Compatibility", url: "https://docs.pingcap.com/tidb/stable/mysql-compatibility/", publisher: PingCAP, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "The licenses of PgBouncer, Patroni, Qdrant, Milvus, SeaweedFS, Garage, gh-ost, and Percona XtraBackup have not each been verified against the LICENSE in their official repositories (the report gives PgBouncer as ISC, Patroni as MIT, Qdrant and Milvus as Apache-2.0, SeaweedFS as Apache-2.0, Garage as AGPLv3, gh-ost as MIT)"
+  - "The account of pgBackRest being archived and then resuming maintenance in 2026 comes only from secondhand reports (no announcement seen on the official website); the long-term stability of the sponsorship model remains to be seen"
+  - "The report claims that the release notes of a certain PostgreSQL minor version require taking a new full backup and rebuilding some indexes; the original text has not been verified"
+  - "MySQL's new version naming scheme (LTS and Innovation release lines) and Percona XtraBackup's support for new MySQL major versions have not been verified"
+  - "The current state of CloudNativePG moving its built-in backups to the Barman Cloud plugin has not been verified"
+  - "The current stable versions and compatibility scope of Dameng and KingbaseES have not been verified"
+  - "Research pending: existing PostgreSQL queue libraries (to confirm ownership and the default recommendation jointly with 18)"
+  - "Research pending: industry basis for restore drill frequency (currently only reference values), and backup orchestration tools (to align with 26)"
+  - "Research pending: virus-scanning tool selection for object storage uploads (to align with 25)"
+  - "Research pending: the impact of MySQL's default isolation level (Repeatable Read) on DB-021 and DB-022, and gap-locking behavior"

@@ -1,0 +1,598 @@
+id: "24"
+slug: llm
+title: Model and LLM Engineering
+summary: "How to keep the whole process of an application calling large language models under control: how to choose and switch models, whether to use a gateway, how to manage prompts, how to wire up structured output and tool calling, how to evaluate, how to do RAG, how to account for cost, how to deploy local inference, and how to observe calls."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-02-14
+scope:
+  includes:
+    - Model selection, version pinning, and upgrades
+    - Model gateways and multi-vendor access
+    - Prompt management and versioning
+    - Structured output and tool calling
+    - "Evaluation (offline eval sets, regression evals, calibration of model-as-judge) and evaluation tooling"
+    - "RAG chunking, retrieval, reranking, and citation"
+    - "Model pricing, caching, and budgets"
+    - Local or on-premises inference deployment
+    - Observability of model calls
+  excludes:
+    - { what: "The deterministic check layer that can block a release (output structure, permissions, real state)", see: "04" }
+    - { what: "General security rules for prompt injection, data egress, secret management and scanning, and SSRF", see: "25" }
+    - { what: "Behavior standards for coding agents and the regression evaluation process for agent configuration", see: "23" }
+    - { what: "MCP protocol, tool interface contracts, and event formats", see: "16" }
+    - { what: "Object-level authorization for tool calls and MCP token validation", see: "19" }
+    - { what: "Parsing and conversion of untrusted documents (the step before chunking)", see: "20" }
+    - { what: "Vector store selection", see: "17" }
+    - { what: "General cost ledgers, monetary calculation, and reconciliation conventions", see: "22" }
+    - { what: "OTel deployment, alerting, canary rollout, and release", see: "26" }
+    - { what: "Labeling of generated content, algorithm filing, cross-border data transfer, and open-source license interpretation", see: "27" }
+overview: |
+  1. **Choose models by your own evaluation results.** Not by brand, leaderboard, or a single demo. Build your own eval set for each task type first, and compare candidate models pairwise on the same data.
+  2. **Pin versions; treat switching models as a dependency upgrade.** Business code references only logical names in configuration; the configuration specifies the vendor's concrete snapshot version, not an alias that drifts automatically. Switching models, changing prompts, changing tool definitions, or switching embeddings all require regression evals, canary rollout, and the ability to roll back.
+  3. **A gateway is not mandatory.** For a single vendor, the official SDK plus a thin wrapper is enough; adopt an off-the-shelf gateway (LiteLLM by default) only when you have multiple vendors or need unified keys and metering — do not write your own. Enterprise-edition features are licensed separately; check before choosing.
+  4. **Structured output only guarantees format.** Before writing to a database or executing, you still need to validate business constraints and handle refusals and truncation.
+  5. **A tool description is not authorization.** Tools authenticate and authorize independently on the execution side; write operations with side effects require approval, idempotency keys, and auditing.
+  6. **Evaluation has three layers.** Deterministic checks as the foundation (see 04), human-labeled eval sets for semantic quality, and production sampling as the backstop. Model-as-judge must first be calibrated against human labels; never let a release through on its score alone.
+  7. **Default eval tool is promptfoo; Python teams may use DeepEval.** Store eval data in a neutral format so tools can be swapped.
+  8. **RAG is not the default.** If you can query a database or call an API, do not do vector retrieval; when you do RAG, filter by permissions before retrieval, and have the server generate citations from chunk IDs.
+  9. **Record cost by source.** The bill, usage returned by the API, gateway estimates, and subscription quotas are four different things; claiming a hard budget requires reserving before the call.
+  10. **Measure local inference yourself.** High-concurrency GPU serving defaults to vLLM, dev machines use Ollama; inference services are never exposed bare on the network, and weight licenses are checked separately. If you claim offline support, run an air-gapped cold-start acceptance test.
+  11. **Do not log raw content by default.** Call logs and traces record only metadata such as versions, usage, and latency; raw prompts and outputs require authorized sampling and short retention.
+rules:
+  # ── Model selection and versions ──
+  - id: LLM-001
+    title: Business code calls models through logical names in configuration; vendor model IDs are not scattered throughout the code
+    level: soft
+    check: auto
+    how: CI scans business code with regex or syntax-tree rules for vendor model ID literals, allowing them only in model configuration files
+    applies: [kind:llm]
+    why: When model IDs are scattered everywhere, switching models, rolling back, and auditing all require changing code in many places, and it is easy to miss one.
+    detail: |
+      - Name logical names by purpose, e.g. "order summary" or "ticket classification"; the configuration maps them to vendor, model, and parameters.
+      - Validate the configuration file with a schema containing at least the vendor, concrete model version, sampling parameters, timeout, and applicable data classification level.
+  - id: LLM-002
+    title: Production configuration is pinned to the vendor's concrete model snapshot version, never an alias that automatically points to newer models
+    level: hard
+    check: auto
+    how: The configuration schema rejects floating aliases like `latest` and model names without a version; validated in CI
+    applies: [kind:llm]
+    why: Once the vendor replaces the model behind an alias, output, format adherence, and refusal behavior may all change — without you having run any evaluation.
+    detail: |
+      - The same applies to local models: reference weights by an immutable version or hash, not a movable tag.
+      - Dev and experimental environments may use aliases, but the eval report must record the version the alias actually resolved to.
+    see: [LLM-040]
+  - id: LLM-003
+    title: Choose models by evaluation results on your own tasks, comparing quality, cost, latency, data compliance, and maintainability together; not by leaderboard or brand
+    level: soft
+    check: manual
+    how: The selection record (e.g. an ADR) includes the eval dataset version, candidate model versions, and each result
+    applies: [kind:llm]
+    why: Public leaderboards differ from your business in task distribution, pricing, and available regions; ranking first on someone else's questions does not mean it works well on yours.
+    detail: |
+      - Pick candidates by task tier: for classification and extraction of known fields, consider rules or small fast models first; for long-document synthesis and complex reasoning, choose high-capability reasoning models; for tool planning, choose models that have been specifically evaluated on tool use; for high-risk decisions, use a model plus deterministic rules plus human review, never letting the model make the final call.
+      - Small models are not necessarily cheaper: rework, retries, and human review caused by poor quality also count toward total cost.
+      - Domestic and foreign models go through the same eval set and data compliance checks.
+    sources: [S19]
+    see: ["27"]
+  - id: LLM-004
+    title: Changing the model, prompt, tool definitions, retrieval index, or embedding model must first be compared pairwise against the current production version on a fixed eval set, and may go live only after passing
+    level: hard
+    check: semi
+    how: CI automatically runs regression evals when the relevant configuration or files change, with results as a required check for merge or release; regressions on key metrics require sign-off by the owner
+    applies: [kind:llm]
+    why: LLM regressions usually do not raise errors — things just quietly get worse; without comparison, you will not notice.
+    detail: |
+      - Both sides of the comparison specify exact versions, sampling parameters, inference settings, and gateway version; do not compare "the latest of A" against "some version of B".
+      - List non-regressable items separately: for example, all known privilege-escalation and data-exfiltration cases must be blocked, and this cannot be offset by an overall quality improvement.
+      - After passing, roll out via canary and keep the ability to roll back to the previous set of versions; see 26 for canary practices.
+    sources: [S19]
+    see: ["04", "26", LLM-020]
+  - id: LLM-005
+    title: For every vendor, model, and API combination in use, test which capabilities it actually supports; do not assume "compatible with such-and-such API" means fully compatible
+    level: soft
+    check: semi
+    how: Maintain a capability inventory (input types, context length, tool calling, structured output, streaming, available regions) and verify each item with a set of compatibility test cases
+    applies: [kind:llm]
+    why: Compatibility layers may silently drop fields, rewrite error semantics, or not support parts of a schema; discovering this after launch is costly.
+  # ── Call reliability ──
+  - id: LLM-006
+    title: Every model call must set a timeout, support cancellation, and limit concurrency
+    level: hard
+    check: semi
+    how: All calls go through a unified wrapper, and static checks forbid calling the SDK directly bypassing the wrapper; fault-injection tests verify that timeouts and cancellation take effect
+    applies: [kind:llm]
+    why: Model calls are slow and unstable; without timeouts and concurrency limits they can drag down the whole service and keep billing.
+    see: ["02"]
+  - id: LLM-007
+    title: Retry only on connection failures, rate limiting, and transient server errors, with exponential backoff and random jitter, a retry cap, and a total deadline, honoring Retry-After
+    level: soft
+    check: semi
+    how: Fault-injection tests cover 401, 403, 429, 5xx, and dropped connections; check that non-retryable errors are not retried
+    applies: [kind:llm]
+    why: Unlimited retries amplify failures and cause duplicate billing; retrying errors such as authentication failures, invalid schemas, or refusals is pointless.
+    detail: |
+      Before retrying, check the remaining deadline and budget. Not retryable: 401/403, invalid requests, model refusals, business-semantic errors.
+    see: ["18"]
+  - id: LLM-008
+    title: Once streamed output has been sent to the user, or a tool has already executed, the request must not be replayed automatically; return "execution status unknown" and go through a status query or compensation
+    level: hard
+    check: semi
+    how: Integration tests simulate a stream disconnecting midway and a timeout after tool execution, checking for no duplicated output and no duplicated side effects
+    applies: [kind:llm]
+    why: Silent replay can show users contradictory content, or cause operations such as charging or sending messages to execute twice.
+    see: ["16"]
+  - id: LLM-009
+    title: When degrading or failing over to a fallback model, the fallback must meet the same task's capability requirements and data compliance policy; a model refusal must not be retried on a more permissive model
+    level: hard
+    check: semi
+    how: The degradation policy is written into configuration, and tests cover refusing to fail over when "the fallback model is not in an approved vendor or region"
+    applies: [kind:llm]
+    why: Sending sensitive data to an unapproved overseas model for the sake of availability, or using a more permissive model to bypass a refusal, are both compliance incidents.
+    see: ["27", LLM-029]
+  # ── Structured output and tool calling ──
+  - id: LLM-010
+    title: Before writing to a database or executing, model output must pass schema validation and business constraint validation, with refusals, truncation, and invalid output handled explicitly
+    level: hard
+    check: auto
+    how: Unit tests cover five classes of output — valid, missing fields, out of range, refusal, truncated; static checks forbid using parsed output without validation
+    applies: [kind:llm]
+    why: A vendor's structured output only guarantees that the format conforms to the supported schema subset; it does not guarantee the values are correct, nor that the model will not refuse.
+    detail: |
+      - Recommended order: vendor-native structured output or constrained decoding in a local engine → strict local validation (Pydantic, Zod, JSON Schema) → business assertions → permissions and approval when there are side effects.
+      - "JSON mode" alone is not enough; it only guarantees valid JSON.
+      - On validation failure, a limited number of repair retries is allowed, keeping the original failure record; repair fixes only format and must not be treated as correcting facts.
+      - Write the schema sent to the model within the vendor's supported subset; do not pass arbitrary JSON Schema straight through.
+      - When you need structured results, use native structured output or tool calling, not regex to extract fields from free text.
+    sources: [S14]
+    see: [TST-033]
+  - id: LLM-011
+    title: Tools independently verify the caller's identity, permissions, target resource, and parameters on the execution side; neither tool definitions nor what the model says count as authorization
+    level: hard
+    check: semi
+    how: Every tool has negative privilege-escalation tests (different user, different tenant, different resource); review checks that authorization logic does not depend on model output
+    applies: [kind:llm]
+    why: Models can be injected or make mistakes; a tool schema is just a request format and cannot stop privilege escalation.
+    sources: [S07]
+    see: ["19", "25"]
+  - id: LLM-012
+    title: Tools that perform write operations with side effects (payment, deletion, publishing, sending, permission changes) must be approved by a human or released by deterministic rules, carry an idempotency key, and leave an audit record
+    level: hard
+    check: semi
+    how: Tools are annotated at registration as having side effects or not; tests check that nothing executes without approval, repeated calls take effect only once, and audit records are complete
+    applies: [kind:llm]
+    why: A model having more ability to act than it needs is a widely recognized high risk (OWASP calls it excessive agency); mistakes in irreversible operations cannot be undone.
+    detail: |
+      - For multiple parallel tool calls, aggregate arguments by the call IDs returned by the vendor, and execute only once arguments are complete and validated.
+      - Deduplicate timed-out, cancelled, and repeated tool calls by idempotency key; see 16 for idempotency semantics.
+    sources: [S07]
+    see: ["16", "19"]
+  - id: LLM-013
+    title: Give the model only the minimum tools and minimum permissions needed for each task; separate read-only tools from read-write tools
+    level: soft
+    check: manual
+    how: During review, compare against the tool list for the task and check for unused tools or excessive permissions
+    applies: [kind:llm]
+    why: The more tools are exposed, the larger the blast radius of injection and mistaken calls.
+    sources: [S07]
+  - id: LLM-014
+    title: Before integrating a third-party MCP server or tool, review its provenance and pin its version; treat its tool descriptions and returned content as untrusted data
+    level: soft
+    check: manual
+    how: Record the source, version, and reviewer at integration time; include tool descriptions and tool returns containing embedded instructions in regression evals
+    applies: [kind:llm]
+    why: Tool descriptions and tool returns go directly into the model's context, so malicious content can use them to inject instructions or induce data exfiltration.
+    sources: [S08]
+    see: ["16", "25"]
+  # ── Prompt management ──
+  - id: LLM-015
+    title: Production prompts live in version control and are reviewed together with code; changes come with eval results
+    level: soft
+    check: semi
+    how: Prompt file paths are listed in CODEOWNERS; CI requires regression eval results when prompts change
+    applies: [kind:llm]
+    why: Prompts are code; editing templates directly in production cannot be reviewed or rolled back, and you cannot tell whether things got better or worse.
+    detail: |
+      - If you use a prompt management platform, drafts on the platform must be approved and exported back to version control, or the platform itself must support immutable revisions, diffs, approval, and export.
+      - Categorize by purpose (safety policy, business task, style, retrieval, vendor parameter adaptation), and tighten edit permissions for the safety policy category.
+    see: [LLM-004]
+  - id: LLM-016
+    title: At runtime, load prompts by an immutable version number or content hash, and record the version used in the call record
+    level: hard
+    check: auto
+    how: The loader accepts only references with a version or hash; a tracing contract test checks that the prompt version field is present
+    applies: [kind:llm]
+    why: If you do not know which prompt version is running in production, problems cannot be reproduced, attributed, or rolled back.
+  - id: LLM-017
+    title: User input, retrieved content, and tool returns are placed into separate sections of the prompt via template variables, not concatenated into system instructions
+    level: hard
+    check: semi
+    how: Static checks ensure no string concatenation of external content where system prompts are constructed; regression tests with injection samples
+    applies: [kind:llm]
+    why: External content concatenated into system instructions is mixed in with the instructions and is the easiest to override by injection; but this only mitigates, it does not cure — authorization still relies on LLM-011.
+    sources: [S08]
+    see: ["25"]
+  # ── Evaluation ──
+  - id: LLM-018
+    title: Every type of model task has a versioned offline eval set covering normal, edge, adversarial, should-refuse, multi-turn, tool-calling, and real production-distribution cases
+    level: soft
+    check: semi
+    how: Eval sets live in version control with their source and labelers recorded; CI counts whether every sample category is present
+    applies: [kind:llm]
+    why: Testing with only a few hand-picked good examples will not surface long-tail failures or injection problems.
+    detail: |
+      - Production samples must be de-identified before entering the eval set.
+      - Multilingual products have samples for each language.
+      - Store eval data in neutral formats such as JSONL or CSV, not locked into any particular eval tool.
+    sources: [S19]
+  - id: LLM-019
+    title: Items that can be judged by deterministic assertions (format, fields, citation IDs, tool arguments, whether it refused) are judged by assertions, not handed to a model judge
+    level: soft
+    check: semi
+    how: Review the eval configuration and check that objective items use assertions
+    applies: [kind:llm]
+    why: Assertions are reproducible, free, and do not drift; model judges are biased and also cost money.
+    sources: [S19]
+    see: [TST-033]
+  - id: LLM-020
+    title: Before using a model as judge, calibrate its agreement on human-labeled samples first; an uncalibrated judge is not used as a release gate; high-risk changes and expanding model permissions cannot be approved on model-judge scores alone
+    level: hard
+    check: manual
+    how: The eval report includes agreement results between the judge model and human labels; during review, verify that every model-judge item used in a gate has a calibration record
+    applies: [kind:llm]
+    why: Model judges favor their own vendor's models, longer answers, and answers presented first, so uncalibrated scores cannot be taken as ground truth; the judge and the evaluated model may share blind spots, and automatically granting permissions amounts to letting the model approve itself.
+    detail: |
+      - Pin the judge model version, scoring rubric, judge prompt, and sampling parameters.
+      - In pairwise comparisons, randomly swap answer positions to check for position bias.
+      - Do not use the same model to answer, score, and automatically approve.
+      - Samples where calibration disagrees go to human arbitration, with periodic re-review.
+    sources: [S19]
+  - id: LLM-021
+    title: After launch, sample production calls at an authorized rate for quality checks, combined with user corrections and distribution drift, and add discovered problems back into the eval set
+    level: soft
+    check: manual
+    how: Periodically check sampling records and the eval set's update history
+    applies: [kind:llm]
+    why: Offline eval sets go stale and production distributions shift; only sampling can find newly emerging failure modes.
+    detail: User feedback is not automatically treated as ground truth; it must be confirmed by a human before entering the eval set.
+  # ── RAG ──
+  - id: LLM-022
+    title: "Confirm RAG is needed first: if you can query the database directly, call an existing API, or put the content directly into the prompt, do not do vector retrieval"
+    level: soft
+    check: manual
+    how: During design review, state why direct queries cannot be used, and attach results of a controlled comparison
+    applies: [kind:llm]
+    why: Wrapping a SQL query as vector retrieval is slower, more expensive, less accurate, and harder to trace.
+  - id: LLM-023
+    title: RAG filters by the current user's and tenant's permissions at retrieval time, not after the results are obtained
+    level: hard
+    check: auto
+    how: "Negative privilege-escalation tests: an unauthorized user queries content unique to a document they have no access to, and the check confirms it appears in neither the retrieval results nor the answer"
+    applies: [kind:llm]
+    why: Retrieving first and filtering afterward leaks unauthorized content through snippets, result counts, or the model's paraphrase; the vector store itself is not a permission boundary.
+    sources: [S07]
+    see: ["19"]
+  - id: LLM-024
+    title: After a source document is deleted, has its permissions changed, or is revised, the index must be updated within the agreed time; old chunks must not be returned before the update
+    level: hard
+    check: semi
+    how: Integration tests delete or revoke access to a document and then query, checking that it is no longer hit; monitor synchronization lag between the index and the source data
+    applies: [kind:llm]
+    why: Deleted or access-revoked content left in the index keeps leaking to people who should not see it.
+    see: ["27"]
+  - id: LLM-025
+    title: Chunk along structural boundaries such as headings, paragraphs, tables, and code blocks; each chunk stores its source ID, version, location, permission labels, and embedding model version
+    level: soft
+    check: semi
+    how: The index schema validates required metadata; chunking parameters are determined through offline experiments and recorded
+    applies: [kind:llm]
+    why: Mechanically chunking by length cuts through tables and meaning; without metadata you cannot do permission filtering, citation, or reindexing.
+    detail: There is no universally optimal chunk length; experiment with your own document types and do not treat any particular number as a permanent rule. See 20 for document parsing.
+    see: ["20"]
+  - id: LLM-026
+    title: Start retrieval with a keyword retrieval baseline (e.g. BM25), and add vector search, hybrid retrieval, and reranking based on eval results
+    level: soft
+    check: semi
+    how: Each added layer is compared against the previous layer in a controlled experiment, recording changes in recall and cost
+    applies: [kind:llm]
+    why: For exact queries such as IDs, clauses, names, and error codes, keyword retrieval is often more accurate than vectors; each added layer increases cost and latency.
+    detail: |
+      - Hybrid retrieval can merge results with Reciprocal Rank Fusion (RRF).
+      - Rerank with a dedicated reranking model (cross-encoder style), or with an evaluated model-based reranker.
+      - Do not blindly stack query rewriting, multi-route retrieval, and reranking.
+  - id: LLM-027
+    title: When citations are enabled, the server generates them from the IDs of the chunks actually retrieved and verifies that the cited chunk really supports the claim; do not let the model write links, page numbers, or line numbers itself
+    level: hard
+    check: auto
+    how: "Citation integrity tests: every citation can be traced back to a chunk in this retrieval's results, and the source version has not expired"
+    applies: [kind:llm]
+    why: Models fabricate plausible-looking links and page numbers, and users are most easily misled by such fake citations.
+  - id: LLM-028
+    title: "Evaluate RAG retrieval and generation separately: for retrieval, look at recall and ranking quality; for generation, look at correctness, faithfulness, citation accuracy, and whether it refuses when it should"
+    level: soft
+    check: semi
+    how: The eval report lists retrieval metrics and generation metrics separately, along with the unauthorized-access rate and latency
+    applies: [kind:llm]
+    why: Looking only at the final answer, you cannot tell whether retrieval went wrong or generation made things up, so you do not know which layer to fix.
+  # ── Data and secrets ──
+  - id: LLM-029
+    title: Before sending data to an external model, determine the allowed vendors, deployment regions, and logging level by data classification; changing vendor or region requires approval from the data owner
+    level: hard
+    check: manual
+    how: Each logical name in the model configuration specifies the allowed data level; during review, verify that the change has an approval record from the data owner
+    applies: [kind:llm]
+    why: Overseas models, log retention, and vendor training terms can all constitute cross-border data transfer or breach of contract, which cannot be remedied after the fact.
+    see: ["25", "27"]
+  - id: LLM-030
+    title: Browser, mobile, and desktop clients do not hold long-lived model vendor keys; clients call through your own backend or gateway using short-lived, scoped tokens
+    level: hard
+    check: auto
+    how: Run secret scanning on frontend build artifacts and client installation packages
+    applies: [kind:llm, platform:web, platform:mobile, platform:desktop]
+    why: Keys in a client will inevitably be extracted, and you bear the cost of fraudulent usage bills and data risk.
+    detail: See 25 for secret management and scanning tools.
+    see: ["25"]
+  # ── Cost and caching ──
+  - id: LLM-031
+    title: "Record model cost separately by source: vendor bills, usage returned by the API, gateway or internal estimates, subscription quotas, and local compute allocation — do not lump them into one number"
+    level: soft
+    check: semi
+    how: Cost records carry a source field; periodically reconcile against vendor bills and record estimation deviation
+    applies: [kind:llm]
+    why: Cache discounts, thinking tokens, batch processing, taxes, and exchange rates all make estimates differ from bills; usage of subscription products cannot be converted at API unit prices either.
+    detail: |
+      - Record unit prices versioned by effective date, storing the original-currency amount and the exchange-rate date separately.
+      - See 22 for monetary calculation and general ledger conventions.
+    sources: [S20, S21]
+    see: ["22"]
+  - id: LLM-032
+    title: When claiming a hard budget cap, atomically reserve the maximum possible spend before the call and settle by actual usage afterward; also limit maximum output length and maximum tool rounds per request
+    level: hard
+    check: semi
+    how: "Concurrency race tests: issue requests exceeding the budget simultaneously and check that the budget is not overdrawn"
+    applies: [kind:llm]
+    why: Calling first and tallying afterward will inevitably overspend under concurrency; relying only on a gateway's asynchronous aggregation cannot achieve a hard stop.
+    detail: A hard stop only guarantees that this system sends no new requests; vendor bills may lag. When communicating externally, make clear that this is the upper bound this system can guarantee.
+    see: ["22"]
+  - id: LLM-033
+    title: For long prompts, put stable content first to take advantage of the vendor's prompt caching, and verify against actual bills whether caching really saves money
+    level: soft
+    check: semi
+    how: Monitor cache read/write tokens and hit rate and reconcile against bills; after prompt changes, check changes in cache hits and budget
+    applies: [kind:llm]
+    why: Cache writes may incur extra charges, and any change to the prefix causes a miss, so "enabling caching saves money" does not necessarily hold.
+    detail: For context, first remove stale and duplicate history, then retrieve precise material, and compress only as a last step; when compressing sourced evidence, do not lose the citation locations.
+    sources: [S15, S16]
+  - id: LLM-034
+    title: For response caching the application implements itself, the cache key must include tenant, permission scope, model version, prompt version, and input; results involving personal or sensitive data are not cached by default
+    level: hard
+    check: auto
+    how: Security tests send identical requests from two tenants and check that neither hits the other's cache
+    applies: [kind:llm]
+    why: If the cache key lacks tenant or permissions, one person's answer will be returned to another.
+    see: ["18"]
+  # ── Observability ──
+  - id: LLM-035
+    title: Logs and traces do not record raw prompts, model outputs, tool arguments, or retrieved chunks by default; when needed, sample with authorization, de-identify, and limit the retention period
+    level: hard
+    check: semi
+    how: Sample logs and scan for sensitive fields and personal information; check the collection configuration of the observability platform
+    applies: [kind:llm]
+    why: Once raw content enters the observability platform and backups, sensitive data spreads to places with looser access control.
+    see: ["25", "27"]
+  - id: LLM-036
+    title: Tracing covers requests, model calls, tool calls, and retrieval, recording model version, prompt version, token usage, time to first token, retries, and degradation reasons
+    level: soft
+    check: auto
+    how: Contract tests check that each type of call produces a span with these fields
+    applies: [kind:llm]
+    why: Without versions and usage, you cannot tell which change caused shifts in quality, latency, or cost.
+    detail: Base field names on the OpenTelemetry semantic conventions for generative AI; these conventions are still evolving, so pin the version you use and maintain a field mapping. See 26 for OTel deployment.
+    sources: [S17]
+    see: ["26"]
+  # ── Local and on-premises inference ──
+  - id: LLM-037
+    title: Local inference services (Ollama, vLLM, etc.) are not exposed directly on the public internet or uncontrolled networks; they must sit behind an authenticated gateway or inside an internal network
+    level: hard
+    check: auto
+    how: Deployment checks verify the listen address; external port scans confirm that inference ports are unreachable from uncontrolled networks
+    applies: [kind:llm, kind:onprem]
+    why: Most local inference services have no authentication by default; once exposed, their compute gets freeloaded and models can be pulled or deleted.
+    sources: [S12]
+    see: ["25"]
+  - id: LLM-038
+    title: Select and launch local inference based on measurements with your own models and real workloads, recording engine version, weight hash, quantization format, hardware, drivers, context length, and concurrency
+    level: soft
+    check: semi
+    how: Benchmark results are archived as files, including the fields above plus time to first token, throughput, peak GPU memory, and error rate
+    applies: [kind:llm, kind:onprem]
+    why: Inference performance depends on the combination of model, quantization, hardware, drivers, and engine; other people's benchmark data cannot replace your own measurements.
+    detail: |
+      - Test cold and warm starts, long and short inputs, and fixed batches versus dynamic arrivals separately.
+      - GPU memory estimate: weight size ≈ parameter count × bits per parameter ÷ 8, which is only a lower bound; add KV cache, activations, and framework overhead.
+      - Domestic Chinese chips must be validated against the specific chip, driver, and toolchain; "runs on CUDA" does not mean compatibility has been verified.
+    sources: [S10, S11]
+  - id: LLM-039
+    title: Before using open-source model weights, check the weight license terms separately; the inference engine's license does not represent the license of the weights
+    level: hard
+    check: manual
+    how: Every model weight in the dependency inventory has a recorded license and a reviewer
+    applies: [kind:llm]
+    why: The engine may be Apache-2.0 while the weights restrict commercial use, user scale, region, or redistribution.
+    see: ["27"]
+  - id: LLM-040
+    title: Releases claiming offline or on-premises support must pass acceptance for cold start, inference, evaluation, and failure recovery in an air-gapped environment
+    level: hard
+    check: auto
+    how: The release process runs acceptance scripts in an air-gapped isolated environment and checks that there are no outbound connections
+    applies: [kind:llm, kind:onprem]
+    why: Image pulls, model downloads, dependency installation, price lists, telemetry, and version checks may all quietly depend on the internet.
+    detail: Model weights and images are pinned by hash or digest and delivered with the release; see 25 for SBOMs and signing.
+    see: ["25", "26"]
+  - id: LLM-041
+    title: Implement first with the official SDK plus a validation library; introduce an orchestration framework only when there is a clear need, and do not introduce a large framework for a single structured output
+    level: soft
+    check: manual
+    how: A PR introducing a framework states which problem it solves that the official SDK cannot
+    applies: [kind:llm]
+    why: Frameworks bring more dependencies, faster version churn, and abstraction layers that are harder to debug; "using a framework" also does not mean you have production governance.
+choices:
+  - category: Model selection
+    pick: Choose candidates by task tier, then decide after pairwise comparison on your own eval set
+    when: All applications that call LLMs
+    alternatives:
+      - { name: Rule engine or traditional model, when: "Tasks that can be solved deterministically, such as classification and extraction of known fields" }
+      - { name: Small fast model, when: "Low-risk classification, short summaries, and field extraction, where evals meet the bar" }
+      - { name: High-capability reasoning model, when: "Long-document synthesis, complex reasoning, code analysis, tool planning" }
+      - { name: Multimodal model, when: "Image or layout understanding is needed, and field-level evals exist" }
+    avoid:
+      - { name: Picking directly from the top of a public leaderboard, why: The task distribution differs from yours }
+      - { name: "Picking the \"strongest model\" based on a single demo", why: Long-tail failures and stability are invisible }
+      - { name: Using floating aliases in production configuration, why: The model can be swapped without your knowledge }
+    notes: This library does not list specific model names and versions because they change too fast; selection records state the eval date and versions.
+    sources: [S19]
+  - category: Model call integration
+    pick: "Vendor official SDK + validation library (Pydantic for Python, Zod for TypeScript)"
+    when: "Single vendor, simple call patterns"
+    alternatives:
+      - { name: Pydantic AI, when: Python projects that need typed tool calling and multi-turn interaction }
+      - { name: Vercel AI SDK, when: "TypeScript frontends that need streaming output and chat UIs; permissions and business flows remain on the backend" }
+      - { name: LlamaIndex, when: "Integrating many data sources and building complex retrieval chains" }
+      - { name: LangChain, when: You need its ready-made integrations and middleware }
+    avoid:
+      - { name: Introducing a large orchestration framework for a single JSON parse, why: "Many dependencies, frequent upgrades, hard to debug" }
+    license: "Pydantic AI, LangChain, and LlamaIndex are MIT; Vercel AI SDK is Apache-2.0 (per the original report, not individually re-verified)"
+    sources: [S25, S26]
+  - category: Model gateway
+    pick: LiteLLM Proxy
+    when: "Multiple vendors, when you need unified keys, routing, rate limiting, and usage records; a single vendor does not need a gateway"
+    alternatives:
+      - { name: Envoy AI Gateway or Higress, when: You already have an Envoy or Kubernetes gateway stack }
+      - { name: Portkey open-source gateway, when: "You only need lightweight forwarding, retries, and failover" }
+      - { name: Official SDK + thin wrapper + controlled egress, when: Single vendor or small scale }
+    avoid:
+      - { name: Every team writing its own multi-vendor proxy, why: "Parameter mapping and protocol differences require long-term upkeep; high cost" }
+      - { name: Assuming features of the vendor-hosted or enterprise edition are also in the open-source edition, why: "You discover missing features or license violations only after deployment" }
+    license: "In the LiteLLM repository, everything outside the enterprise/ directory is MIT; the enterprise/ directory has a separate commercial license, and production use requires a paid subscription. SSO for more than 5 users, role-based access control, audit logs, and similar features are enterprise-edition features. The Portkey open-source gateway is MIT."
+    notes: "Validate any gateway first: the APIs you actually use, error codes and billing and retry behavior on stream interruption, whether tool and schema fields get rewritten, whether rate limits and budgets are accurate under concurrency, whether cache and logs are isolated between two tenants, and whether it can start without network access. Do not assume a gateway's built-in budget is a precise hard cap under concurrency."
+    sources: [S04, S05, S22, S23]
+  - category: Evaluation tooling
+    pick: promptfoo
+    when: "Default choice: declarative YAML configuration, runs from the command line, independent of the project's language, and easy to put into CI for regression evals and red-teaming"
+    alternatives:
+      - { name: DeepEval, when: "Python teams that want to write evals as pytest-style test code, or need its ready-made RAG and agent metrics" }
+      - { name: Ragas, when: "You only need RAG-specific retrieval and generation metrics; check maintenance activity before choosing it" }
+    avoid:
+      - { name: "Using only model-as-judge, without deterministic assertions or human labels", why: "Judges are biased and scores drift" }
+      - { name: Storing eval data only in a tool's or platform's proprietary format, why: The data is lost when the tool is switched }
+    license: "promptfoo is MIT; DeepEval is Apache-2.0, and its hosted platform Confident AI is a separate commercial service that is not required"
+    notes: "OpenAI announced its acquisition of promptfoo in 2026-03 and officially stated it will continue open-source maintenance, but there is no binding guarantee about future governance. Keep eval sets and scoring rules in a neutral format in your own repository so you can switch to DeepEval at any time. The judge model must be replaceable with a local model so that data that cannot leave the network can be handled."
+    sources: [S01, S02, S03]
+  - category: Prompt management
+    pick: "Version control as the source of truth + loading immutable versions at runtime"
+    alternatives:
+      - { name: Langfuse prompt management, when: "Non-developers need to edit and canary in production; drafts must be approved and exportable back to version control" }
+    avoid:
+      - { name: Editing templates directly in production, why: "No review, no evaluation, no rollback" }
+    sources: [S06]
+  - category: Structured output
+    pick: "Vendor-native structured output or constrained decoding + strict local validation"
+    alternatives:
+      - { name: Limited repair retries, when: The model or engine does not support native structured output }
+    avoid:
+      - { name: Using only JSON mode, why: "It only guarantees valid JSON, not the fields or values" }
+      - { name: Extracting fields from free text with regex, why: Brittle }
+    sources: [S14]
+  - category: Model call observability
+    pick: "OpenTelemetry collection + your existing tracing and logging backend"
+    when: When you only need tracing and metrics
+    alternatives:
+      - { name: Langfuse, when: "You need an LLM-specific tracing UI alongside prompt management and evaluation; can be self-hosted" }
+      - { name: Arize Phoenix, when: "Oriented toward experiments and eval analysis; see open questions for its license" }
+    avoid:
+      - { name: Collecting all raw prompts and outputs by default, why: Sensitive data spreads into the observability platform }
+      - { name: Forcing a dedicated platform when you only need tracing, why: One more system to operate }
+    license: "In Langfuse, everything outside the ee/ directory is MIT, and all product features are in the MIT portion; the enterprise governance features under ee/ (e.g. SCIM, audit logs, project-level permissions, data retention policies) are commercially licensed and require a license key to enable"
+    notes: For on-premises delivery, disable the observability platform's built-in telemetry and online checks, and prove it with egress tests.
+    sources: [S06, S17]
+  - category: Retrieval
+    pick: "Keyword retrieval baseline, adding vector-based hybrid retrieval and a reranking model based on evals"
+    alternatives:
+      - { name: Query the database or call an API directly, when: The question can be solved deterministically }
+    avoid:
+      - { name: Building a vector store plus multi-route rewriting plus reranking from day one, why: "Complexity and cost spiral out of control, with no baseline for comparison" }
+    notes: "See 17 for vector store selection (default: pgvector)."
+  - category: "Local inference (server GPU, concurrency)"
+    pick: vLLM
+    alternatives:
+      - { name: SGLang, when: "Performs better on the target model after head-to-head measurement against vLLM; its runtime stack changes fast, so lock the complete environment" }
+    avoid:
+      - { name: Using Ollama for high-concurrency production serving, why: "It targets single-machine ease of use; its concurrency and scheduling capabilities need dedicated validation" }
+      - { name: Deciding directly from public benchmark leaderboards, why: Performance depends on your own model and hardware combination }
+    license: "vLLM and SGLang are Apache-2.0; weight licenses are checked separately (LLM-039)"
+    notes: "vLLM is a project hosted by the PyTorch Foundation, with a steady release cadence and an active community."
+    sources: [S09, S10, S11]
+  - category: "Local inference (dev machine, single machine, small scale)"
+    pick: Ollama
+    alternatives:
+      - { name: llama.cpp (llama-server), when: "CPU, Apple silicon, or non-NVIDIA hardware with GGUF quantized models; or when you need finer control" }
+    avoid:
+      - { name: Exposing the default configuration directly on the network, why: "No authentication by default (LLM-037)" }
+    license: "Ollama and llama.cpp are MIT"
+    notes: llama.cpp releases with rolling build numbers; pin to a specific build number or commit.
+    sources: [S12, S13]
+antipatterns:
+  - { bad: "Starting every AI feature with an orchestration framework, RAG, a vector store, and an agent platform", instead: "Build a minimal end-to-end prototype with the official SDK plus schema validation first, and add more only when there is a real need" }
+  - { bad: "Hardcoding vendor domains, model IDs, and keys in every service", instead: "Logical names plus centralized configuration, with keys only on the backend or gateway" }
+  - { bad: "Assuming \"OpenAI-compatible API\" means every field is compatible", instead: "Run compatibility tests item by item for each vendor, model, and API" }
+  - { bad: "Retrying indefinitely after 429 or 500", instead: "Retry only transient errors, with backoff, a retry cap, and a total deadline" }
+  - { bad: "When streaming output breaks halfway, automatically switching models and replaying without telling the frontend", instead: "Return execution status unknown, and let the user explicitly resubmit if needed" }
+  - { bad: Treating structured output as business data validation, instead: "Schema validation plus business constraints plus permission checks" }
+  - { bad: "Relying on a line like \"do not perform dangerous operations\" in the system prompt to guard tool calls", instead: "Execution-side authorization, approval, and idempotency" }
+  - { bad: Letting the model write citation links and page numbers itself, instead: The server generates citations from retrieved chunk IDs }
+  - { bad: "Using the same model to answer, score, and automatically approve", instead: "Deterministic assertions as the foundation, with the judge model first calibrated against human labels" }
+  - { bad: "Treating \"max tokens × unit price\" as the official bill", instead: "Record bills, usage, and estimates separately and reconcile periodically" }
+  - { bad: Aggregating usage once an hour and claiming a hard budget, instead: "Atomically reserve before the call and settle after completion" }
+  - { bad: "For on-premises deployment, only verifying that Docker Compose starts", instead: "Full acceptance of cold start, inference, and recovery in an air-gapped environment" }
+  - { bad: "Assuming that because the engine is Apache-2.0, the weights can be used freely too", instead: "Check the licenses of the engine, enterprise modules, and weights separately" }
+  - { bad: Automatically failing over to an overseas vendor on any failure, instead: The fallback model first passes data region and approved-list checks }
+sources:
+  - { id: S01, title: promptfoo, url: "https://github.com/promptfoo/promptfoo", publisher: promptfoo, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: OpenAI to acquire Promptfoo, url: "https://openai.com/index/openai-to-acquire-promptfoo/", publisher: OpenAI, date: 2026-03-09, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: DeepEval, url: "https://github.com/confident-ai/deepeval", publisher: Confident AI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: LiteLLM LICENSE, url: "https://github.com/BerriAI/litellm/blob/main/LICENSE", publisher: BerriAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: "LiteLLM: Enterprise", url: "https://docs.litellm.ai/docs/enterprise", publisher: BerriAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: Why is Langfuse open source?, url: "https://langfuse.com/docs/open-source", publisher: Langfuse, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: OWASP Top 10 for LLM Applications 2026, url: "https://genai.owasp.org/llm-top-10/", publisher: OWASP, date: 2026-08-04, kind: standard, checked: 2026-11-14 }
+  - { id: S08, title: "OWASP LLM Top 10: Prompt Injection", url: "https://genai.owasp.org/llmrisk/llm01-prompt-injection/", publisher: OWASP, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S09, title: PyTorch Foundation welcomes vLLM, url: "https://pytorch.org/blog/pytorch-foundation-welcomes-vllm/", publisher: PyTorch Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: vLLM, url: "https://github.com/vllm-project/vllm", publisher: vLLM, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: SGLang, url: "https://github.com/sgl-project/sglang", publisher: SGLang, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: Ollama, url: "https://github.com/ollama/ollama", publisher: Ollama, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: llama.cpp, url: "https://github.com/ggml-org/llama.cpp", publisher: ggml-org, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: "OpenAI: Structured Outputs", url: "https://developers.openai.com/api/docs/guides/structured-outputs", publisher: OpenAI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S15, title: "OpenAI: Prompt caching", url: "https://developers.openai.com/api/docs/guides/prompt-caching", publisher: OpenAI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: "Anthropic: Prompt caching", url: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: OpenTelemetry semantic conventions for generative AI, url: "https://opentelemetry.io/docs/specs/semconv/gen-ai/", publisher: OpenTelemetry, date: null, kind: standard, checked: 2026-11-13 }
+  - { id: S19, title: Demystifying evals for AI agents, url: "https://www.anthropic.com/research/demystifying-evals-for-ai-agents", publisher: Anthropic, date: 2026-01-09, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: Managing billing for ChatGPT and the API platform, url: "https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform", publisher: OpenAI, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: Why is Claude API usage billed separately from my paid Claude plan, url: "https://support.claude.com/en/articles/9876003-why-is-claude-api-usage-billed-separately-from-my-paid-claude-plan", publisher: Anthropic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: Portkey AI Gateway, url: "https://github.com/Portkey-AI/gateway", publisher: Portkey, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Higress, url: "https://github.com/higress-group/higress", publisher: Higress, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Pydantic AI, url: "https://github.com/pydantic/pydantic-ai", publisher: Pydantic, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: Vercel AI SDK, url: "https://github.com/vercel/ai", publisher: Vercel, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "The original report states that \"in 2026-09 Envoy AI Gateway was renamed Agent Router and its repository was migrated\"; unverified. The selection uses the original name for now"
+  - "The original report states that the OpenTelemetry semantic conventions for generative AI moved to a separate repository in 2026-05; unverified. LLM-036 only requires pinning the version used"
+  - "Arize Phoenix server license (the original report says Elastic License 2.0, which restricts offering it as a hosted service); unverified"
+  - "Ragas repository URL and maintenance activity (the repository URL given in the original report is questionable); unverified"
+  - "The full terms of the LiteLLM enterprise/ directory license and the list of enterprise features are as stated officially; this review only verified the LICENSE split and some of the features"
+  - "The closing date of OpenAI's acquisition of promptfoo, and whether its open-source license and governance changed after the acquisition, need to be rechecked at the next review"
+  - "The OWASP Top 10 for LLM Applications now has a 2026 edition (published 2026-08); cross-check item numbering together with 25"
+  - "Security recommendations for MCP and tool calling (official MCP security best practices, tool description poisoning) have not been verified item by item; the rules only cover general practices. Protocol details follow 16"
+  - "The licenses of Vercel AI SDK, Pydantic AI, LangChain, LlamaIndex, SGLang, Ollama, and llama.cpp are carried over from the original report and have not been individually re-verified against the official LICENSE files"
+  - "Research to be added: representative models for each task tier (including Chinese domestic models) and selection methods, with dates"
+  - "Research to be added: hardware tier recommendations for local inference (mapping GPU memory and concurrency to model size)"
+  - "Research to be added: selection of guardrail and content moderation tools (input/output filtering)"
+  - "Research to be added: selection and evaluation methods for embedding models and reranking models"
+  - "Research to be added: adaptation practices for domestic Chinese model gateways and domestic inference chips"

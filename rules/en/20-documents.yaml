@@ -1,0 +1,561 @@
+id: "20"
+slug: documents
+title: Document Parsing and Content Processing
+summary: "Parse and convert untrusted files safely and traceably: PDF, Office, images, archives, HTML, email, audio and video; OCR and layout analysis; format conversion; isolated parser execution; structured output."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - Parsing of PDF, Office, images, archives, HTML, email, audio and video
+    - OCR (optical character recognition), layout analysis, table extraction
+    - Format conversion (LibreOffice headless mode, Pandoc, HTML to PDF, etc.)
+    - "Isolated parser execution: sandboxing, resource limits, timeouts, no network"
+    - Protection against decompression bombs, path traversal, macros and XML external entities (XXE)
+    - Structured output of parsing results and provenance location
+    - License labeling of parsing components (code, model weights, fonts, codecs)
+  excludes:
+    - { what: "General security rules for upload entry points (authentication, storage, antivirus, filenames), SSRF, SBOM and dependency scanning", see: "25" }
+    - { what: "RAG chunking strategy, retrieval, multimodal model selection", see: "24" }
+    - { what: "Frontend file preview components, rich text display", see: "07" }
+    - { what: "Open source license usage policy, license scanning tools, cross-border data transfer", see: "27" }
+    - { what: "Deployment configuration for container images and resource quotas", see: "26" }
+    - { what: "General approach to testing methods such as golden samples and visual regression", see: "04" }
+overview: |
+  1. **Treat every uploaded file as malicious input.** First identify the real type by content signature, then set per-type limits on size, decompression ratio, entry count, page count, pixels and duration; stop as soon as a limit is exceeded.
+  2. **Keep parsers in a cage.** Separate process or container, non-root, network off by default, read-only root filesystem, with timeouts and memory limits; on timeout, kill the whole process group.
+  3. **Never execute "live" content inside files.** Disable DTDs and external entities for XML-based input; do not run Office macros or PDF scripts; do not load external resources when rendering HTML; invoke external commands with argument arrays, not through a shell.
+  4. **Read native formats natively first.** Use structural libraries for Office; for PDFs with a text layer, read text and coordinates directly; OCR only scanned pages.
+  5. **Store the original and the structured result; Markdown is only a derived view.** Record the provenance location of each block (page + coordinates, cell range, slide, timecode), along with the source file hash and parser version.
+  6. **Report failures.** Mark failure, partial success and success separately; never silently return empty; label model-filled content separately; leave confidence empty when there is none.
+  7. **Choose tools by testing on your own samples.** Docling is the general default; for complex Chinese PDFs, formulas and tables, compare it against MinerU and Marker; vendor leaderboards are reference only.
+  8. **Review licenses separately for code, weights, fonts and codecs.** PyMuPDF, MuPDF and Ghostscript are AGPL; MinerU is Apache-2.0 with additional terms; Marker's code is Apache-2.0 while its weights have a commercial threshold. Standalone tools and components distributed with a product have different obligations; see 27 for the policy.
+  9. **Offline only counts once tested with the network actually cut.** Bake models, language packs, fonts and browsers into the image, and pass an end-to-end smoke test in a network-disabled container.
+rules:
+  # ── Input identification and resource limits ──
+  - id: FILE-001
+    title: Identify the real type by file content signature before choosing a parser; reject when the type does not match the declaration or is not on the allowlist; never choose a parser by extension or client-supplied MIME type
+    level: hard
+    check: auto
+    how: Put samples whose extension does not match their content (such as a ZIP renamed to .pdf) into the test set, and assert they are rejected or handled according to their real type
+    applies: [all]
+    why: Both extension and MIME type are controlled by the uploader; choosing a parser by them sends files down the wrong, often more fragile, code path.
+    detail: |
+      - Identification tools: Apache Tika, libmagic (the `file` command).
+      - OOXML, ODF and EPUB are all ZIP containers with the same signature; inspect the manifest inside the container to determine the subtype.
+      - For general validation at upload entry points (size, filename, storage location, antivirus), see 25.
+    sources: [S01, S14]
+    see: ["25"]
+  - id: FILE-002
+    title: "Configure and enforce resource limits before parsing: raw size, total decompressed size, compression ratio, entry count, nesting depth, page count, decoded pixels, audio/video duration"
+    level: hard
+    check: auto
+    how: Configuration checks confirm every limit has a value; put decompression bombs, XML entity bombs, images with huge pixel counts and very long audio/video into the test set, and assert processing stops at the limit with an error
+    applies: [all]
+    why: Decompression bombs and decoding bombs exhaust memory and disk with tiny files, and are the most common denial-of-service technique against parsing services.
+    detail: |
+      - Count while decompressing; do not trust the sizes declared in the archive directory.
+      - Read the image header to get width and height before decoding, and reject outright if the pixel limit is exceeded (Pillow's `MAX_IMAGE_PIXELS`, ImageMagick's `policy.xml`).
+      - For audio/video, use `ffprobe` to read duration, tracks and codecs before deciding whether to process.
+    ref_value: Set concrete values per business needs; there is no universal standard. ImageMagick's official example policy suggests 8K pixels for single-image width/height, 512MiB memory and 30 seconds processing time.
+    sources: [S01, S23, S24]
+  - id: FILE-003
+    title: When extracting archives, reject entries with absolute paths, `..`, symbolic links or hard links; extract into a temporary directory dedicated to this task, and verify the extracted paths remain inside that directory
+    level: hard
+    check: auto
+    how: Put path traversal (Zip Slip) and symbolic link samples into the test set, and assert nothing is written outside the temporary directory; use static scanning to find extraction calls that do not validate paths
+    applies: [all]
+    why: Filenames inside archives are attacker-controlled; without validation they can overwrite arbitrary files.
+    detail: |
+      - Save extracted files under program-generated names; keep the original filename only as metadata.
+      - Use `filter="data"` with Python's `tarfile`; with `zipfile`, verify yourself that the `os.path.realpath` result is inside the target directory.
+    sources: [S30, S01]
+  - id: FILE-004
+    title: Stream large files or process them page by page; do not read an entire file into memory at once
+    level: soft
+    check: semi
+    how: During review, look for whole-file reads of untrusted files (such as `read()` without a length); watch peak memory during load testing
+    applies: [all]
+    why: Whole-file reads make memory usage grow linearly with input, so a single large file can bring down the process.
+  # ── Isolated execution ──
+  - id: FILE-005
+    title: Parsing and conversion of untrusted files must run in a separate process or container with wall-clock timeout, CPU, memory, temporary disk and concurrency limits; on timeout, kill the entire process group
+    level: hard
+    check: auto
+    how: Check resource limit fields in deployment configuration; fault injection tests (infinite-loop samples, oversized samples) assert the process is killed and no child processes remain
+    applies: [kind:service]
+    why: Document parsers (especially PDF, image and Office backends written in C/C++) have many vulnerabilities; inside the main service process, a single malformed file can crash the service or let it be taken over.
+    detail: |
+      - LibreOffice, Chromium and Ghostscript all spawn child processes; killing only the parent leaves orphan processes behind.
+      - For how to write container resource limits, see 26.
+    sources: [S01]
+    see: ["26"]
+  - id: FILE-006
+    title: Parsing processes run as non-root, with network disabled by default, a read-only root filesystem, and only this task's temporary directory mounted; exceptions that need network access must document the reason and be approved
+    level: hard
+    check: auto
+    how: Deployment policy checks (such as Kubernetes securityContext and NetworkPolicy, `docker run --network none --read-only`); capture network connections at runtime and assert there are no outbound connections
+    applies: [kind:service]
+    why: Even if a parser is compromised, the attacker must not gain network access or other tasks' files.
+    sources: [S01, S23]
+    see: ["25", "26"]
+  - id: FILE-007
+    title: Do not proactively fetch external resources (remote images, stylesheets, fonts, XInclude, linked files) during parsing and rendering; when a user-supplied URL genuinely must be fetched, apply the SSRF rules in 25
+    level: hard
+    check: auto
+    how: Put HTML, SVG, DOCX and PDF that reference external addresses into the test set, and assert no requests appear in packet captures or DNS logs
+    applies: [all]
+    why: External references in documents can exfiltrate internal addresses and file contents, or be used to probe the internal network.
+    detail: |
+      - When using Playwright for HTML to PDF, intercept all requests and allow only pre-provisioned local resources; disable JavaScript for untrusted HTML.
+      - With WeasyPrint, use a custom `url_fetcher` that rejects remote addresses and `file://`.
+    sources: [S28]
+    see: ["25"]
+  # ── Active content and injection ──
+  - id: FILE-008
+    title: Disable DTDs, external entities and XInclude when parsing XML-based input (XML, OOXML, ODF, SVG, XHTML, XMP)
+    level: hard
+    check: auto
+    how: Put XXE and entity bomb samples into the test set; use static scanning (Semgrep, etc.) to find unhardened XML parser construction
+    applies: [all]
+    why: XML external entities can read server files and make internal network requests; nested entities can exhaust memory.
+    detail: |
+      - Python: wrap standard library parsers with defusedxml; openpyxl officially recommends installing defusedxml.
+      - Java: enable `disallow-doctype-decl`, and disable external general entities and parameter entities (see the OWASP XXE Prevention Cheat Sheet for how).
+      - .NET: `XmlReaderSettings.DtdProcessing = Prohibit`.
+      - Even when using an Office library, confirm whether its underlying XML parsing is hardened.
+    sources: [S02, S22, S43]
+  - id: FILE-009
+    title: Do not execute Office macros, embedded scripts or OLE objects, or JavaScript and launch actions in PDFs; set the macro security level to the highest when converting with LibreOffice
+    level: hard
+    check: semi
+    how: Put samples with macros and auto-execute actions into the test set, and audit whether the conversion process spawns unexpected child processes or makes outbound connections
+    applies: [all]
+    why: Macros and embedded active content are the most common attack vectors in Office files.
+    sources: [S03]
+  - id: FILE-010
+    title: Pass arguments to external conversion tools as an argument array, not through a shell; do not splice user-controlled values into command strings; use program-generated temporary names for files
+    level: hard
+    check: auto
+    how: Rules in Semgrep, Bandit, gosec, etc. forbid `shell=True` and `exec` string concatenation
+    applies: [all]
+    why: Special characters in filenames and arguments turn into command injection.
+    detail: When an argument may start with `-`, put `--` before it so it is not treated as an option.
+    sources: [S01]
+    see: ["25"]
+  - id: FILE-011
+    title: "When processing untrusted images with ImageMagick, enable a restrictive policy.xml: disable external delegates and forbid reading formats such as MSL, URL, MVG, PS, PDF, SVG and XPS"
+    level: hard
+    check: auto
+    how: "Compare `magick identify -list policy` output against the required policy; put images disguised as MVG or PS into the test set"
+    applies: [all]
+    why: ImageMagick hands files to external programs such as Ghostscript for interpretation based on their content; the attack surface is large under the default configuration.
+    detail: When Pillow, Sharp or libvips meets the need, prefer them; their attack surface is smaller.
+    sources: [S23]
+  - id: FILE-012
+    title: Add `--sandbox` when processing untrusted input with Pandoc, and do not enable untrusted filters or Lua scripts
+    level: hard
+    check: auto
+    how: Check that the arguments of Pandoc invocations include `--sandbox`; put samples containing include directives or references to local files into the test set
+    applies: [all]
+    why: Pandoc officially states that the sandbox option should be used when processing untrusted input; otherwise readers and writers may read files beyond those on the command line.
+    detail: The sandbox only restricts file access by readers and writers; it does not restrict filters or PDF generation, which still rely on process isolation.
+    sources: [S17]
+  - id: FILE-013
+    title: Do not hand untrusted PostScript or EPS to Ghostscript; when it genuinely must be processed, keep SAFER mode on and run it in an isolated environment
+    level: soft
+    check: semi
+    how: During review, check the paths and arguments that invoke Ghostscript (including indirect calls via ImageMagick and OCRmyPDF)
+    applies: [all]
+    why: PostScript is a full programming language, and Ghostscript has had multiple sandbox escape vulnerabilities historically.
+    see: ["FILE-005"]
+  - id: FILE-014
+    title: Do HTML main-content extraction and security sanitization as two separate steps; HTML that will be displayed or returned must go through a dedicated sanitization library; Markdown conversion does not count as sanitization
+    level: hard
+    check: semi
+    how: Put XSS samples into the test set and assert the output contains no executable script; confirm during review that a sanitization step exists
+    applies: [all]
+    why: Main-content extraction only removes navigation and ads and does not guarantee safety; Markdown can also carry raw HTML.
+    detail: "Sanitization libraries: DOMPurify in the browser, nh3 for Python, ammonia for Rust. For frontend display rules, see 07."
+    sources: [S35, S36]
+    see: ["07", "25"]
+  - id: FILE-015
+    title: After MIME-decoding email, sanitize the HTML body first without loading external links, and process each attachment through the same type identification and isolation pipeline
+    level: soft
+    check: semi
+    how: Put email samples with remote images and nested attachments into the test set
+    applies: [all]
+    why: Email is a container for many untrusted formats, and external images also leak "read" status.
+  # ── Parsing routes ──
+  - id: FILE-016
+    title: "Read native formats natively first: use structural libraries for Office, and for PDFs with a text layer read text and coordinates directly; detect per page whether a text layer exists, and use OCR only for pages or regions with no text layer or a corrupted one"
+    level: soft
+    check: semi
+    how: Unit tests for the routing logic cover digital PDFs, scanned PDFs and mixed PDFs; record whether OCR was used on each page
+    applies: [all]
+    why: Converting everything to images and then running OCR loses copyable text, form objects and precision, and is slower and more expensive.
+  - id: FILE-017
+    title: Before choosing a parser or OCR engine, compare candidates on your own real samples (Chinese, scans, complex tables, formulas, etc.), not just vendor leaderboards
+    level: soft
+    check: manual
+    how: Attach the sample composition, metrics (character error rate, table structure, reading order, time, peak memory) and results to the selection record
+    applies: [all]
+    why: Rankings flip across document types, and vendors' self-reported numbers differ greatly from results on your own documents.
+    detail: Character error rate (CER) = edit distance ÷ number of annotated characters; for Chinese, prioritize CER. Set thresholds by business risk; there is no universal value.
+    see: ["04"]
+  - id: FILE-018
+    title: Before upgrading a parser, OCR engine or model, compare quality and resource metrics against the current version on a fixed sample set; do not ship if anything regresses
+    level: soft
+    check: semi
+    how: Run the comparison in CI or the release process, and record old and new results
+    applies: [all]
+    why: A new version is not necessarily more accurate; upgrades often silently change reading order, table structure and coordinates.
+    see: ["04"]
+  # ── Structured output ──
+  - id: FILE-019
+    title: Store the original and the structured intermediate result; Markdown and plain text are only derived views, never the sole storage format
+    level: soft
+    check: semi
+    how: Review the storage structure and confirm both the original and the structured result are saved
+    applies: [all]
+    why: Markdown loses coordinates, merged cells and block types; once lost, precise citation and re-chunking are impossible.
+  - id: FILE-020
+    title: "Where provenance must be cited, every output block must carry a traceable location: page number and bounding box (with the coordinate system stated), worksheet and cell range, slide and shape, DOM path, or audio/video timecode"
+    level: hard
+    check: auto
+    how: "Round-trip test: use each block's recorded location to fetch content from the original, and assert it matches the block content"
+    applies: [all]
+    why: Without precise locations, citations cannot be verified, nor highlighted or annotated on the original.
+    detail: |
+      - Different parsers differ in coordinate origin, units and rotation handling; convert everything to one agreed coordinate system and state it in the output.
+      - Compute block IDs from the source file hash, normalized location and block type; after re-parsing, link changes to old IDs with a mapping.
+    sources: [S29]
+  - id: FILE-021
+    title: Output records the source file's SHA-256, size and detected type, plus the parser and model names, versions and a configuration digest; retries with the same input and same configuration produce identical results
+    level: soft
+    check: auto
+    how: Validate output fields with JSON Schema; parse the same sample repeatedly and compare output hashes
+    applies: [all]
+    why: Results may change whenever the parser version changes; recording these makes reproduction, comparison and rollback possible.
+  - id: FILE-022
+    title: Parsing results must explicitly mark status (not attempted, failed, partially succeeded, succeeded) and warnings; never silently return empty content on failure
+    level: hard
+    check: auto
+    how: Error injection tests (corrupted files, encrypted files, timeouts) assert the status and warning fields are correct
+    applies: [all]
+    why: An empty result gets treated as "the file has no content", and downstream retrieval and Q&A give wrong answers without anyone noticing.
+  - id: FILE-023
+    title: Where table structure must be preserved, keep merged cells, row and column order, headers and original value types, not just the displayed strings
+    level: soft
+    check: auto
+    how: Run comparison tests on samples with merged cells, tables spanning pages, numbers and dates
+    applies: [all]
+    why: Storing only strings loses numeric precision and row/column relationships, so statistics and data Q&A go wrong.
+  - id: FILE-024
+    title: OCR and speech transcription results record the engine, language, and location or timecode; when the engine provides no confidence, leave the field empty rather than inventing a value; record "OCR was used" and "low quality" separately
+    level: hard
+    check: auto
+    how: Validate fields with a schema; check that confidence comes only from the engine's raw output
+    applies: [all]
+    why: Invented confidence values make downstream systems wrongly trust or discard content.
+  - id: FILE-025
+    title: Label content filled in or inferred by models (vision models, LLMs) with its source separately; do not mix it in as facts extracted from the original
+    level: hard
+    check: semi
+    how: The output schema distinguishes "extracted" from "generated"; manually spot-check whether generated content is labeled
+    applies: [all, kind:llm]
+    why: Models may fabricate table numbers and text; once mixed into the original, it can neither be held accountable nor corrected.
+    see: ["24"]
+  - id: FILE-026
+    title: When chunking, keep each chunk's provenance location and parent heading path; for chunking strategy, see 24
+    level: soft
+    check: auto
+    how: Look up each chunk's location back in the original
+    applies: [kind:llm]
+    why: If chunking loses provenance, retrieved content cannot be cited.
+    see: ["24"]
+  # ── Generation and conversion ──
+  - id: FILE-027
+    title: Generate Office files with the language's native library; do not pass off a renamed CSV as XLSX; round-trip test formulas, dates and numeric types
+    level: soft
+    check: auto
+    how: After generation, read back with the same library or a different one, and compare cell types and values
+    applies: [all]
+    why: Disguised files opened in Excel lose precision, get dates wrong, or pop up format warnings.
+  - id: FILE-028
+    title: For LibreOffice headless conversion, each task uses its own user profile directory and temporary directory, cleaned up when the task ends; tasks do not share profiles
+    level: soft
+    check: semi
+    how: Check that the invocation arguments include `-env:UserInstallation=file:///...` with a per-task generated path
+    applies: [all]
+    why: Shared profile directories cause lock conflicts and state crosstalk; one task's macro settings or cache affect other tasks.
+    sources: [S16]
+  - id: FILE-029
+    title: Pre-provision and embed CJK fonts when generating or converting PDFs; after conversion, check page count, whether text can be extracted, and compare screenshots of key pages, rather than relying only on the command's exit code
+    level: soft
+    check: semi
+    how: Run text extraction and screenshot comparison tests in the conversion pipeline
+    applies: [all]
+    why: When fonts are missing, conversion still returns success, but the output shows tofu boxes or blank pages.
+    detail: Font licenses are separate from software licenses; redistributable fonts include Noto CJK / Source Han series.
+    see: ["04"]
+  # ── Offline and data ──
+  - id: FILE-030
+    title: For projects that require offline deployment, bake model weights, OCR language packs, fonts, browsers and codecs into the image, and pass an end-to-end smoke test in a network-disabled container; production must not download models from the public internet at runtime
+    level: hard
+    check: auto
+    how: CI runs smoke tests for parsing, OCR and conversion with `docker run --network none`; also check DNS and connection logs
+    applies: [kind:onprem]
+    why: Many parsing libraries silently download models on first run; an image that starts is not necessarily an image that works offline.
+    detail: Disable each library's automatic downloads and telemetry (such as Hugging Face's offline environment variables), and load models from an internal artifact repository.
+    see: ["26"]
+  - id: FILE-031
+    title: Before real files are uploaded to a cloud OCR or document recognition service, data classification and approval must be completed; projects that require no network access must not use such services
+    level: hard
+    check: manual
+    how: During review, verify the approval record, including data types, the service's region and retention period
+    applies: [all]
+    why: Files often contain personal information and trade secrets; uploading them to the cloud may violate contracts or cross-border data transfer regulations.
+    see: ["27"]
+  - id: FILE-032
+    title: Delete temporary files and intermediate artifacts produced by parsing when the task ends or times out; logs record only hash, size and type, never file content
+    level: soft
+    check: semi
+    how: Lifecycle tests check that the temporary directory is emptied; spot-check logs
+    applies: [all]
+    why: Leftover temporary files and logs become unmanaged copies of sensitive data.
+    see: ["25"]
+  # ── Licenses ──
+  - id: FILE-033
+    title: Verify licenses separately for parsing components' code, model weights, fonts and codecs; components under AGPL, GPL, or with commercial thresholds or non-commercial terms must be approved per 27 before being distributed with a product or offered as an external service
+    level: hard
+    check: semi
+    how: License scanning tools identify candidates; manually verify the LICENSE and model license files in the official repositories, and keep approval records
+    applies: [all]
+    why: Dual licensing, additional terms, and differing licenses for code and weights are especially common in document parsing; checking only the code license misses obligations.
+    detail: |
+      - PyMuPDF, MuPDF, Ghostscript: AGPL-3.0 or commercial license. Obligations differ between internal use as a standalone tool and distribution with a product or offering a network service.
+      - MinerU: Apache-2.0 with additional terms; a commercial license is required above 100 million monthly active users or USD 20 million monthly revenue, online services offered externally must state that MinerU is used, and violation automatically terminates the license.
+      - Marker: code is Apache-2.0, model weights are under a modified OpenRAIL-M; commercial use beyond research, personal use and small startups requires a separately purchased license.
+      - FFmpeg: LGPL by default; once GPL components are enabled, the whole is GPL.
+      - The libvips bundled with Sharp is LGPL-2.1.
+      - Licenses for these projects have changed more than once in recent years; re-verify on every upgrade.
+    sources: [S06, S08, S09, S18, S19, S20, S21]
+    see: ["27"]
+  - id: FILE-034
+    title: Record parsing-related dependencies, models and fonts in an inventory (version, license, hash), and subscribe to their security advisories and license changes
+    level: soft
+    check: auto
+    how: SBOM and license scanning run in CI; dependency update tools flag new versions
+    applies: [all]
+    why: Parsers have many vulnerabilities and licenses change often; without an inventory you cannot tell whether you are affected.
+    see: ["25", "27"]
+choices:
+  - category: Multi-format structured parsing (unified structure for PDF, Office, HTML)
+    pick: Docling
+    when: General scenarios that need layout, tables, reading order and provenance location
+    alternatives:
+      - { name: MinerU, when: "Complex Chinese PDFs, academic papers, formulas; must be compared against Docling and Marker on your own samples, and its additional license terms accepted" }
+      - { name: Marker, when: "PDF to Markdown/JSON, when multiple speed tiers are needed; model weights have a commercial-use threshold" }
+      - { name: Unstructured (open source library), when: "Heterogeneous sources, data ingestion that needs element-based partitioning; high-resolution mode depends on heavier models" }
+    avoid:
+      - { name: Extracting plain text only, why: "Loses layout, tables and provenance, which cannot be recovered afterwards" }
+      - { name: Settling on one "best" parser without testing, why: Rankings flip across document types }
+    license: "Docling code is MIT, official models Apache-2.0 / CDLA-Permissive-2.0; MinerU is Apache-2.0 with additional terms (commercial threshold, attribution obligation for online services); Marker code is Apache-2.0, weights modified OpenRAIL-M; Unstructured open source library is Apache-2.0, check the models it uses separately"
+    notes: The "open source library" and the commercial hosted service of the same name are two different things; on-premises deployments must pre-provision models.
+    sources: [S04, S05, S06, S07, S08, S15]
+  - category: File type identification and metadata
+    pick: Apache Tika
+    alternatives:
+      - { name: libmagic (the file command and language bindings), when: "Only type identification is needed, without pulling in a Java runtime" }
+    avoid:
+      - { name: Judging by extension, why: The uploader can forge it freely }
+    license: Apache-2.0
+    notes: Tika falls short on complex tables and formulas, and is not suitable as the sole parsing engine.
+    sources: [S14]
+  - category: Text and coordinates from digital PDFs
+    pick: pdfplumber (Python)
+    alternatives:
+      - { name: Apache PDFBox, when: "Java projects, or when PDFs must be generated programmatically" }
+      - { name: pypdf, when: "Page-level operations such as merging, splitting, forms and metadata" }
+      - { name: pdfcpu, when: PDF processing in Go projects }
+      - { name: PyMuPDF, when: "High-performance rendering and geometry operations are needed, and AGPL has been handled per 27 or a commercial license purchased" }
+    avoid:
+      - { name: Running OCR directly on PDFs that have a text layer, why: Less accurate and slower than the native text }
+      - { name: Using PyMuPDF by default without license review, why: "AGPL-3.0; distributing it with a product or offering an external service incurs open source obligations" }
+    license: pdfplumber MIT; PDFBox Apache-2.0; pypdf BSD-3-Clause; pdfcpu Apache-2.0; PyMuPDF AGPL-3.0 or commercial license
+    sources: [S09, S10, S39]
+  - category: OCR (primarily Chinese)
+    pick: PaddleOCR
+    alternatives:
+      - { name: RapidOCR, when: "Lightweight deployment on the ONNX runtime without installing the Paddle framework" }
+      - { name: Tesseract, when: "Mainly Latin scripts, with the lightest dependencies" }
+      - { name: OCRmyPDF, when: "Adding a searchable text layer to scanned PDFs; it calls Ghostscript, so mind the AGPL" }
+    avoid:
+      - { name: Using Tesseract alone for Chinese handwriting and complex tables, why: "Poor results; dedicated models are needed" }
+    license: PaddleOCR, RapidOCR and Tesseract code are all Apache-2.0, check model weights separately; OCRmyPDF MPL-2.0
+    notes: Runs on CPU by default; GPU is only a performance extension.
+    sources: [S11, S12, S13, S40]
+  - category: Office read/write (Python)
+    pick: openpyxl, python-docx, python-pptx
+    alternatives:
+      - { name: XlsxWriter, when: "Large sheets that are only generated, not read" }
+    avoid:
+      - { name: Treating pandas DataFrame as a format-fidelity tool, why: "Loses styles, formulas and cell types" }
+      - { name: Unzipping OOXML yourself and handwriting XML, why: "Relationships, namespaces and compatibility are complex, and it easily introduces XXE" }
+    license: All MIT
+    notes: openpyxl officially recommends also installing defusedxml.
+    sources: [S43]
+  - category: Office read/write (Java)
+    pick: Apache POI
+    alternatives:
+      - { name: FastExcel, when: "High-volume Excel read/write, migrating projects that previously used EasyExcel" }
+    avoid:
+      - { name: EasyExcel, why: "The official repository is archived; do not use it in new projects" }
+    license: POI Apache-2.0; FastExcel Apache-2.0
+    sources: [S32, S25, S26]
+  - category: Office read/write (Go)
+    pick: Excelize
+    avoid:
+      - { name: Assembling OOXML yourself, why: "High cost for formulas, styles and compatibility" }
+    license: BSD-3-Clause
+    sources: [S31]
+  - category: Office read/write (Node)
+    pick: ExcelJS (Excel), PptxGenJS (PPT generation)
+    alternatives:
+      - { name: SheetJS Community Edition, when: "Reading many legacy spreadsheet formats; install from the official channel and pin the hash" }
+    avoid:
+      - { name: The xlsx package on npm, why: "The project no longer publishes new versions to npm, so the version on npm is outdated" }
+    license: ExcelJS MIT; PptxGenJS MIT; SheetJS Community Edition Apache-2.0
+    notes: ExcelJS releases infrequently; for complex needs, call an isolated Python or Java parsing service instead.
+    sources: [S27]
+  - category: Office to PDF or images
+    pick: LibreOffice headless mode (invoked as a separate process)
+    avoid:
+      - { name: Promising conversion output identical to Office layout, why: "Fonts and layout engines differ, so differences are inevitable" }
+    license: MPL-2.0 (includes other open source components)
+    sources: [S16]
+  - category: Conversion between markup formats (Markdown, HTML, DOCX, EPUB, etc.)
+    pick: Pandoc (invoked as a standalone command-line tool, with --sandbox)
+    avoid:
+      - { name: Linking Pandoc as a library into a closed-source product for distribution, why: The GPL license requires the product to be open sourced as well }
+    license: GPL-2.0 or later
+    sources: [S17]
+  - category: HTML to PDF
+    pick: Playwright + Chromium
+    alternatives:
+      - { name: WeasyPrint, when: "Server-side reports laid out with print styles that do not need JavaScript" }
+    avoid:
+      - { name: Stitching screenshots into a PDF, why: "Text is not searchable or copyable, and there is no accessibility information" }
+    license: Playwright Apache-2.0; WeasyPrint BSD-3-Clause
+    notes: Pre-provision the browser and CJK fonts, and intercept external requests (see FILE-007).
+    sources: [S28, S38]
+  - category: Web page main-content extraction
+    pick: trafilatura (Python), Mozilla Readability (JS)
+    avoid:
+      - { name: Stripping HTML with regular expressions, why: "Unreliable and unsafe" }
+      - { name: Feeding the whole page's HTML downstream, why: "Navigation and ads pollute the content" }
+    license: All Apache-2.0
+    notes: Sanitization is still required after extraction (see FILE-014).
+    sources: [S33, S34]
+  - category: HTML security sanitization
+    pick: DOMPurify (browser/JS), nh3 (Python), ammonia (Rust)
+    avoid:
+      - { name: Treating Markdown conversion as sanitization, why: Markdown is not a security boundary }
+    license: DOMPurify Apache-2.0 or MPL-2.0; nh3 MIT; ammonia MIT or Apache-2.0
+    sources: [S35, S36]
+  - category: Secure XML parsing
+    pick: defusedxml for Python; for Java and .NET, disable DTDs per the OWASP XXE Prevention Cheat Sheet
+    license: defusedxml is PSF-2.0
+    notes: The most recent defusedxml commit was in 2024; it updates slowly but remains usable.
+    sources: [S02, S22]
+  - category: Image decoding and conversion
+    pick: Pillow (Python), Sharp (Node)
+    alternatives:
+      - { name: libvips, when: "Batch processing of large images with low memory" }
+      - { name: ImageMagick, when: "Formats only it supports are needed; must be paired with a restrictive policy.xml (see FILE-011)" }
+    avoid:
+      - { name: Passing high-resolution originals directly to models, why: "Expensive, and may also trigger decoding bombs" }
+    license: Pillow MIT-CMU; Sharp Apache-2.0 (bundles libvips, LGPL-2.1); libvips LGPL-2.1
+    sources: [S21, S24, S37]
+  - category: Audio/video probing and transcoding
+    pick: FFmpeg + ffprobe (invoked as separate processes)
+    alternatives:
+      - { name: faster-whisper or whisper.cpp, when: "Offline speech transcription; compare both on your own samples" }
+    avoid:
+      - { name: Uploading recordings to external transcription APIs by default, why: "Unclear data boundaries; see FILE-031" }
+    license: FFmpeg is LGPL-2.1 or later by default, GPL once GPL components are enabled; faster-whisper and whisper.cpp code MIT, check model weights separately
+    sources: [S18, S41, S42]
+  - category: Indirectly introduced PDF and image backends (license note)
+    pick: Before adopting a tool, check whether its dependency chain includes Ghostscript, MuPDF, Poppler or libvips
+    license: Ghostscript AGPL-3.0 (commercial license also available); MuPDF AGPL-3.0 (commercial license also available); libvips LGPL-2.1; Poppler to be verified
+    notes: OCRmyPDF, ImageMagick and some PDF-to-image tools call these backends behind the scenes; judge license obligations by the actual distribution method, per the policy in 27.
+    sources: [S19, S20, S21]
+antipatterns:
+  - { bad: Choosing the parser by file extension, instead: "Identify the real type by content signature, and reject on mismatch" }
+  - { bad: Parsing user-uploaded PDFs and Office files directly in the main service process, instead: "Move it into a separate process or container with resource limits, no network and a timeout" }
+  - { bad: Converting every file to images and then running OCR, instead: "Read native formats natively first, and enable OCR per page as needed" }
+  - { bad: Storing only Markdown or plain text, instead: "Store the original and a structured result with locations; Markdown is only a derived view" }
+  - { bad: Returning an empty string when parsing fails, instead: "Mark failure or partial success, with warnings attached" }
+  - { bad: Citations that record only filename and page number, instead: "Record the source file hash plus page number with coordinates, cell range or timecode" }
+  - { bad: Building FFmpeg or soffice commands as shell strings, instead: "Invoke with argument arrays, using program-generated temporary filenames" }
+  - { bad: Multiple conversion tasks sharing one LibreOffice profile directory, instead: "Give each task its own profile directory, deleted after use" }
+  - { bad: Judging PDF conversion only by the command returning 0, instead: "Check page count, text extractability and key-page screenshots" }
+  - { bad: Treating an image that starts as offline-capable, instead: Pass an end-to-end smoke test in a network-disabled container }
+  - { bad: "Concluding \"open source, commercially usable\" from the code license alone", instead: "Verify code, weights, fonts and codecs separately" }
+  - { bad: Using a model to fill in content that failed to parse without labeling it, instead: "Label it as generated content, or send it for human review" }
+sources:
+  - { id: S01, title: OWASP File Upload Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S02, title: OWASP XML External Entity Prevention Cheat Sheet, url: "https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html", publisher: OWASP, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S03, title: Macros from the internet are blocked by default in Office, url: "https://learn.microsoft.com/en-us/microsoft-365-apps/security/internet-macros-blocked", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: Docling, url: "https://github.com/docling-project/docling", publisher: Docling Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S05, title: Docling models, url: "https://huggingface.co/docling-project/docling-models", publisher: Docling Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S06, title: MinerU Open Source License, url: "https://github.com/opendatalab/MinerU/blob/master/LICENSE.md", publisher: OpenDataLab, date: 2026-04-17, kind: official, checked: 2026-11-14 }
+  - { id: S07, title: Marker, url: "https://github.com/datalab-to/marker", publisher: Datalab, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S08, title: Marker MODEL_LICENSE, url: "https://github.com/datalab-to/marker/blob/master/MODEL_LICENSE", publisher: Datalab, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: PyMuPDF, url: "https://github.com/pymupdf/PyMuPDF", publisher: Artifex, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S10, title: pdfplumber, url: "https://github.com/jsvine/pdfplumber", publisher: pdfplumber, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: PaddleOCR, url: "https://github.com/PaddlePaddle/PaddleOCR", publisher: PaddlePaddle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: RapidOCR, url: "https://github.com/RapidAI/RapidOCR", publisher: RapidAI, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: Tesseract OCR, url: "https://github.com/tesseract-ocr/tesseract", publisher: Tesseract OCR, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: Apache Tika, url: "https://github.com/apache/tika", publisher: Apache Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: Unstructured, url: "https://github.com/Unstructured-IO/unstructured", publisher: Unstructured, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: LibreOffice Licenses, url: "https://www.libreoffice.org/about-us/licenses/", publisher: The Document Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S17, title: "Pandoc User's Guide (--sandbox)", url: "https://pandoc.org/MANUAL.html", publisher: Pandoc, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S18, title: FFmpeg License and Legal Considerations, url: "https://ffmpeg.org/legal.html", publisher: FFmpeg, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S19, title: "Ghostscript (ghostpdl repository LICENSE)", url: "https://github.com/ArtifexSoftware/ghostpdl", publisher: Artifex, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: MuPDF, url: "https://github.com/ArtifexSoftware/mupdf", publisher: Artifex, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: libvips, url: "https://github.com/libvips/libvips", publisher: libvips, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S22, title: defusedxml, url: "https://github.com/tiran/defusedxml", publisher: defusedxml, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S23, title: ImageMagick Security Policy, url: "https://imagemagick.org/security-policy/", publisher: ImageMagick, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S24, title: "Pillow: Image module (MAX_IMAGE_PIXELS)", url: "https://pillow.readthedocs.io/en/stable/reference/Image.html", publisher: Pillow, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S25, title: "EasyExcel (archived)", url: "https://github.com/alibaba/easyexcel", publisher: Alibaba, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: FastExcel, url: "https://github.com/fast-excel/fastexcel", publisher: FastExcel, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: "SheetJS: Node.js installation", url: "https://docs.sheetjs.com/docs/getting-started/installation/nodejs/", publisher: SheetJS, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: "Playwright: Page API", url: "https://playwright.dev/docs/api/class-page", publisher: Microsoft, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: Docling Documentation, url: "https://docling-project.github.io/docling/", publisher: Docling Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: "CWE-22: Path Traversal", url: "https://cwe.mitre.org/data/definitions/22.html", publisher: MITRE, date: null, kind: standard, checked: 2026-11-14 }
+  - { id: S31, title: Excelize, url: "https://github.com/qax-os/excelize", publisher: Excelize, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: Apache POI, url: "https://poi.apache.org/", publisher: Apache Software Foundation, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: trafilatura, url: "https://github.com/adbar/trafilatura", publisher: trafilatura, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: Mozilla Readability, url: "https://github.com/mozilla/readability", publisher: Mozilla, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: DOMPurify, url: "https://github.com/cure53/DOMPurify", publisher: Cure53, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: nh3, url: "https://github.com/messense/nh3", publisher: nh3, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S37, title: sharp, url: "https://github.com/lovell/sharp", publisher: sharp, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S38, title: WeasyPrint, url: "https://github.com/Kozea/WeasyPrint", publisher: Kozea, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S39, title: pypdf, url: "https://github.com/py-pdf/pypdf", publisher: py-pdf, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S40, title: OCRmyPDF, url: "https://github.com/ocrmypdf/OCRmyPDF", publisher: OCRmyPDF, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S41, title: faster-whisper, url: "https://github.com/SYSTRAN/faster-whisper", publisher: SYSTRAN, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S42, title: whisper.cpp, url: "https://github.com/ggml-org/whisper.cpp", publisher: ggml-org, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S43, title: openpyxl documentation, url: "https://openpyxl.readthedocs.io/en/stable/", publisher: openpyxl, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - Poppler's license (reportedly GPL-2.0 or GPL-3.0) was not verified against the official repository this time
+  - Licenses of individual PaddleOCR and RapidOCR model weights were not verified one by one; the license of the models used by Unstructured's high-resolution mode was not verified
+  - Marker's code license changed from GPL-3.0 to Apache-2.0 in 2026-07, and MinerU switched between AGPL-3.0 and Apache-2.0 several times between March and April 2026, ending up as Apache-2.0 with additional terms; both change frequently, so the LICENSE must be re-verified on every upgrade
+  - Selection of programmatic PDF generation tools (ReportLab, PDFKit, pdf-lib, QuestPDF, etc.) and their licenses and maintenance status were not verified, so they are not yet included in the choices
+  - End-of-support dates for LibreOffice release branches were not verified
+  - "Research pending: license risks and alternatives when Ghostscript, Poppler, MuPDF and libvips are introduced indirectly"
+  - "Research pending: parsing and conversion of OFD, WPS proprietary formats, legacy .doc/.xls/.ppt, and PDFs with electronic seals"
+  - "Research pending: Office writing and PDF processing libraries for Go and Rust; licenses of .NET Office and PDF libraries (QuestPDF, ImageSharp, etc.)"
+  - "Research pending: availability of parsers, OCR, LibreOffice and Chromium on Chinese domestic CPUs and operating systems (ARM64, Loongson, UnionTech UOS, Kylin)"
+  - "Research pending: data residency and on-premises deployment options for cloud OCR and document recognition services (in China and abroad)"

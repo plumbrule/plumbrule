@@ -1,0 +1,674 @@
+id: "14"
+slug: jvm
+title: Java and Kotlin (Server-side)
+summary: How to handle JDK versions and distributions, Maven / Gradle build baselines, dependency locking, formatting and static analysis, architecture tests, testing, logging, Spring Boot, virtual threads, database access and migration tools, and dependency vulnerability scanning in JVM server-side projects.
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - JDK version policy (LTS), distribution choice, and licensing
+    - "Server-side baseline for Maven / Gradle: Wrapper, BOM, version catalogs, dependency locking and verification, repository allowlist"
+    - Spring Boot release lines, BOM, and compatibility matrix; compatible combinations of Kotlin and Gradle
+    - How to use Spotless, google-java-format, Checkstyle, Error Prone, SpotBugs, ktlint, and detekt
+    - ArchUnit architecture tests
+    - How to use JUnit, AssertJ, Mockito / MockK, and Testcontainers in Java / Kotlin
+    - JVM-specific practices for SLF4J logging and exception handling
+    - Prerequisites for enabling virtual threads and native images
+    - How to write and choose among JDBC / JPA / jOOQ / MyBatis; choosing Flyway / Liquibase and their licenses
+    - How to wire OWASP Dependency-Check, OSV-Scanner, and the CycloneDX plugins into JVM builds
+  excludes:
+    - { what: "General principles of formatting and lint; cross-language conventions for log fields, error propagation, timeouts, and retries", see: "02" }
+    - { what: "Architecture principles such as module boundaries, dependency direction, outbox, and idempotent consumers", see: "01" }
+    - { what: "Test layering, connecting to real components, coverage definitions, offline acceptance", see: "04" }
+    - { what: "API style, OpenAPI, error response format (RFC 9457), API compatibility checks", see: "16" }
+    - { what: "Data modeling, migration principles, transactions and isolation levels, backup and restore", see: "17" }
+    - { what: "Choosing message queues, caches, job scheduling, and workflows (Quartz, XXL-JOB, Camunda, etc.)", see: "18" }
+    - { what: "Login, JWT validation, password hashing, authorization, and multi-tenant isolation", see: "19" }
+    - { what: "Parsing untrusted files with POI, PDFBox, Tika, etc.", see: "20" }
+    - { what: "Overall choice of security scanning tools, SBOM, signing, secrets management", see: "25" }
+    - { what: "Container images, health checks, shutdown orchestration, observability (OTel)", see: "26" }
+    - { what: "Open-source license policy and license scanning tools", see: "27" }
+    - { what: "Gradle / AGP baseline for Android and Kotlin practices on mobile", see: "29" }
+overview: |
+  1. **Use an LTS JDK that is still in support.** Non-LTS releases are for experiments only; release builds never enable preview features. Pin the compile target with `--release` or a toolchain, and have the deployment manifest state the distribution, major version, and CPU architecture.
+  2. **Default to Eclipse Temurin; check the license before using Oracle JDK.** Oracle JDK's no-fee terms (NFTC) are time-limited: later updates to an older LTS revert to the OTN license, which requires a paid subscription, so you cannot assume it is free.
+  3. **Builds are reproducible.** Commit and verify the Wrapper; Maven uses a BOM and pinned plugin versions, Gradle uses a version catalog plus lock files; no SNAPSHOT, `+`, or version ranges; dependencies come only from approved repositories. Projects delivered offline must actually be built once with no network.
+  4. **Version combinations follow the official matrices.** Let the Spring Boot BOM manage the dependencies it manages rather than chasing the latest of each; combinations of Spring Cloud (including Spring Cloud Alibaba), the Kotlin plugin, and Gradle must all be in the official compatibility tables. Upgrade before a Spring Boot release line leaves open-source support.
+  5. **Leave formatting and checks to tools.** Java: Spotless + google-java-format, plus Error Prone (or SpotBugs) for defects; Kotlin: ktlint + detekt. Track existing issues in baseline files.
+  6. **Write architecture rules as ArchUnit tests.** Dependency direction and "domain code does not depend on frameworks" run in CI, not just in documentation.
+  7. **Test against a real database.** JUnit + AssertJ; integration tests use Testcontainers to start the same database as production, never H2 standing in for PostgreSQL or a domestic Chinese database; Mockito / MockK only replace uncontrollable external boundaries.
+  8. **Logging depends only on SLF4J.** No `System.out` or `printStackTrace`; do not swallow exceptions or interrupts.
+  9. **Default to Spring MVC.** Virtual threads and native images must first be compared under real load, with a rollback prepared; connection pools and downstream capacity still need limits.
+  10. **Database: one access style per service, all SQL parameterized, Hibernate never alters tables in production.** Default migration tool is Flyway Community; Liquibase switched to the FSL license (not OSI open source) as of 5.0, so check before choosing it.
+  11. **Dependency vulnerability scanning runs in CI.** OWASP Dependency-Check or OSV-Scanner; offline environments must sync the vulnerability database and record its update date.
+rules:
+  # ── JDK versions and distributions ──
+  - id: JVM-001
+    title: The JDK used for production builds and runtime must be an LTS release that is still in support; non-LTS releases are not the server-side default
+    level: hard
+    check: auto
+    how: Build plugins check the JDK version (Maven Enforcer's `requireJavaVersion`, Gradle toolchain's `languageVersion`); CI prints `java -version` and compares it with the distribution's support roadmap
+    applies: [lang:jvm]
+    why: A non-LTS release is maintained only until the next release ships, so after about six months it stops receiving security patches; an LTS gets years of updates.
+    detail: |
+      - New services default to the latest LTS; when the customer environment or a vendor component is only certified on the previous LTS, you may use that, but schedule the upgrade before it leaves support.
+      - Java ships an LTS roughly every two years; the support period follows the roadmap of the distribution you use, and it differs between vendors.
+    sources: [S01, S03]
+  - id: JVM-002
+    title: Release builds must not enable JDK preview features (`--enable-preview`) or incubator modules (`jdk.incubator.*`)
+    level: hard
+    check: auto
+    how: CI scans build files, startup scripts, and container entrypoints for `--enable-preview` and `jdk.incubator`; any hit fails
+    applies: [lang:jvm]
+    why: Preview and incubator features may change or be removed in later releases; class files compiled with preview features run only on the same JDK major version, so upgrading the JDK makes startup fail outright.
+    detail: To try new features, do it on an unreleased experimental branch or in a separate experimental project.
+  - id: JVM-003
+    title: Pin the compile target with `--release` or the build tool's toolchain, instead of relying on whatever JDK happens to be installed on the developer machine
+    level: hard
+    check: auto
+    how: Check Maven's `maven.compiler.release` or Toolchains configuration and Gradle's `java.toolchain.languageVersion` (`jvmToolchain` for Kotlin); CI builds in an image with no other JDK preinstalled
+    applies: [lang:jvm]
+    why: With only `-source` / `-target` set, code compiled by a newer JDK can still call APIs missing from the older version, and you only get `NoSuchMethodError` after deployment.
+    detail: |
+      - The JDK that runs Gradle itself (the daemon JDK) and the toolchain that compiles code are separate things; configure them separately.
+      - In offline environments, disable toolchain auto-download and preinstall the required JDKs in the build image.
+    sources: [S08, S09]
+  - id: JVM-004
+    title: The deployment manifest states the JDK distribution, major version, and CPU architecture; build, test, and production for the same product use the same distribution
+    level: soft
+    check: semi
+    how: Review the deployment manifest or image metadata; CI reads the vendor and version from `java -version` in the runtime image and compares them with the manifest
+    applies: [lang:jvm, kind:service]
+    why: Distributions differ in patch cadence, support period, and license; if the manifest only says "Java 21", when something goes wrong you cannot find out whose build and which version was actually running.
+    detail: For delivery to ARM servers or domestic Chinese operating systems, JNI native libraries, fonts, and monitoring agents must also have actually run on the target architecture; "Java is cross-platform" does not mean native libraries are.
+    see: ["26"]
+  - id: JVM-005
+    title: Before using Oracle JDK, check the license terms that currently apply to that version; if the terms require a paid subscription, either have one or switch to another OpenJDK distribution
+    level: hard
+    check: semi
+    how: Scan build images and deployment manifests for Oracle JDK (the vendor in `java -version` output); when found, require the license basis to be attached
+    applies: [lang:jvm]
+    why: Oracle JDK's no-fee terms (NFTC) cover only a limited period; the official roadmap states that later updates to the previous LTS move to the OTN license, and production use requires a paid subscription.
+    detail: |
+      - Default to an OpenJDK distribution released under GPLv2 + Classpath Exception, such as Eclipse Temurin, which has no such time limit.
+      - If Oracle JDK is already in use, record the version on each machine and, before the no-fee period ends, upgrade to a version that is still free or switch distributions.
+    sources: [S01, S10]
+    see: ["27"]
+  # ── Build and dependencies ──
+  - id: JVM-006
+    title: Use the Maven Wrapper or Gradle Wrapper and commit it; CI and developers all build through the Wrapper; the Gradle Wrapper sets `distributionSha256Sum` and CI verifies the wrapper jar
+    level: hard
+    check: auto
+    how: Check that the repository has `mvnw` / `.mvn/wrapper/` or `gradlew` / `gradle/wrapper/`; CI only invokes the Wrapper; Gradle projects run wrapper validation in CI (e.g. wrapper-validation from gradle/actions)
+    applies: [lang:jvm]
+    why: Without the Wrapper every machine has a different build tool version; the wrapper jar is an executable binary, and if it is replaced it can run arbitrary code on the build machine.
+    sources: [S11, S12, S13]
+  - id: JVM-007
+    title: Release builds must not depend on SNAPSHOT, dynamic versions (`+`, `latest.release`), or version ranges
+    level: hard
+    check: auto
+    how: Maven uses Enforcer rules such as `requireReleaseDeps`; Gradle uses `resolutionStrategy.failOnDynamicVersions()` and `failOnChangingVersions()`
+    applies: [lang:jvm]
+    why: These versions may resolve differently each time, so the same commit built today and tomorrow produces different artifacts, and it leaves an opening for repository poisoning.
+    sources: [S14]
+  - id: JVM-008
+    title: Maven projects centralize dependency versions in a BOM or `dependencyManagement`, and every plugin has an explicitly pinned version
+    level: hard
+    check: auto
+    how: Maven Enforcer's `requirePluginVersions`; review dependencies in submodules that specify version numbers directly
+    applies: [lang:jvm]
+    why: Without plugin versions, Maven uses its built-in defaults, so changing the Maven version changes build behavior; with versions scattered across modules, an upgrade always misses a few.
+    detail: A BOM only coordinates versions; it does not lock the resolution of transitive dependencies. At release time, also output `mvn dependency:tree` and an SBOM for the record.
+    sources: [S14]
+  - id: JVM-009
+    title: Gradle projects centralize dependency and plugin versions in the version catalog (`gradle/libs.versions.toml`), and build scripts only reference aliases
+    level: soft
+    check: semi
+    how: Review dependency declarations in build scripts that contain version strings directly
+    applies: [lang:jvm]
+    why: Multi-module projects are only easy to upgrade and review when versions live in one place; but the version catalog only governs declarations and does not lock transitive dependencies; for locking see JVM-010.
+    sources: [S15]
+  - id: JVM-010
+    title: Applications built with Gradle enable dependency locking (`dependencyLocking`) and commit the lock files; lock file changes are reviewed in the PR
+    level: hard
+    check: auto
+    how: Check that build scripts have `lockAllConfigurations()` and the repository has `gradle.lockfile`; the CI build fails when the lock file does not match the resolution result
+    applies: [lang:jvm, kind:service]
+    why: Without locking, transitive dependencies change silently as upstream publishes, and when a production problem occurs you cannot reproduce the dependency combination of the time.
+    detail: |
+      - Update lock files with `./gradlew dependencies --write-locks`, in a separate PR.
+      - Libraries consumed by others are usually not locked (consumers decide versions), but CI tests the locked combination at least once.
+      - Enable dependency verification (`gradle/verification-metadata.xml`) when tamper protection is needed; the checksums generated the first time must have their origin checked by a person; being generated does not make them trustworthy.
+    sources: [S16, S17]
+  - id: JVM-011
+    title: Dependencies and plugins may only come from approved repositories (usually an internal mirror); Gradle sets `repositoriesMode` to `FAIL_ON_PROJECT_REPOS`, and Maven uses `mirrorOf` in `settings.xml` to point everything at the internal mirror
+    level: hard
+    check: auto
+    how: CI checks `dependencyResolutionManagement` and `pluginManagement` in `settings.gradle(.kts)`; the Maven `settings.xml` for CI is provided by the pipeline, and poms in the repository must not add their own `<repositories>`
+    applies: [lang:jvm]
+    why: A third-party repository casually added by any one module becomes a dependency source for the whole project; when it is poisoned or goes offline, the entire build is affected.
+    detail: Repository credentials are injected from CI secrets and are not committed in `settings.xml` or `gradle.properties` (see 25).
+    see: ["25"]
+  - id: JVM-012
+    title: Projects that must be delivered offline must complete build and test in a CI environment with no internet access, starting from an empty local cache and using only internal mirrors
+    level: hard
+    check: auto
+    how: "An isolated-network CI job: clear the `~/.m2` or `~/.gradle` cache, allow access only to internal repositories and image registries, and run build, test, and image packaging"
+    applies: [lang:jvm, kind:onprem]
+    why: Passing with `mvn -o` or `gradle --offline` on a developer machine only shows that the local cache happens to have everything; offline flags do not fill in missing dependencies, JDKs, or container images.
+    see: ["TST-035", "ARC-032"]
+  # ── Version combinations and Spring Boot ──
+  - id: JVM-013
+    title: When using Spring Boot, dependencies managed by its BOM do not get their own versions; where an override is really needed, state the reason and recheck it when upgrading Spring Boot
+    level: soft
+    check: semi
+    how: Review overrides of managed dependency versions in poms or build scripts (Maven `<version>` or property overrides, Gradle forced versions)
+    applies: [lang:jvm]
+    why: The version combination in the BOM is tested together with the framework; chasing the latest of each means using a combination nobody has tested.
+    detail: When fixing a security vulnerability requires upgrading a managed dependency early, use a property override (such as Maven's version property) rather than a direct version, and remove the override after the next Spring Boot upgrade.
+    sources: [S04, S05]
+  - id: JVM-014
+    title: Version combinations of Spring Boot and Spring Cloud (including third-party suites such as Spring Cloud Alibaba) must be in the official compatibility tables; do not mix and match on your own
+    level: hard
+    check: semi
+    how: Record the combination in use and the link to the corresponding official compatibility table in the repository; upgrade PRs are reviewed against the table and run the full integration tests
+    applies: [lang:jvm]
+    why: These suites are released per Spring Boot release line; combinations not covered by the official tables often show missing classes or ineffective configuration only at runtime.
+    detail: Third-party suites (such as Spring Cloud Alibaba) often lag behind new Spring Boot versions; if its compatibility table does not list a Spring Boot version, stay on a version that is in the table.
+    sources: [S06]
+  - id: JVM-015
+    title: The Gradle version used by a Kotlin project must be within the compatibility range officially declared by the Kotlin Gradle plugin in use; check the compatibility table before upgrading either one
+    level: hard
+    check: semi
+    how: PRs upgrading Kotlin or Gradle attach the compatibility table link; CI prints `./gradlew --version` and the Kotlin plugin version
+    applies: [lang:jvm]
+    why: The Kotlin plugin fully supports only a range of Gradle versions; going past the upper limit can produce deprecation warnings or even build failures.
+    detail: So Kotlin server-side projects cannot necessarily use the latest Gradle major version. Android projects are also constrained by AGP; see 29.
+    sources: [S07]
+    see: ["29"]
+  - id: JVM-016
+    title: The Spring Boot release line used in production must be within its open-source support period or have commercial support; finish upgrading before support ends
+    level: hard
+    check: auto
+    how: CI reads the Spring Boot version in use and compares it with the official supported versions table; it fails when the version is out of open-source support and there is no commercial support
+    applies: [lang:jvm]
+    why: Once a release line leaves support it gets no more security fixes, and Spring Boot manages the versions of a large number of transitive dependencies.
+    ref_value: The official policy states that each minor release line gets at least 13 months of open-source support, and the last minor line of a major version gets longer commercial support; specific dates follow the official support table.
+    sources: [S02, S04]
+  - id: JVM-017
+    title: New web services default to Spring MVC (blocking model); use WebFlux only when the whole path end to end is non-blocking
+    level: soft
+    check: manual
+    how: Review the technology choice write-up
+    applies: [lang:jvm, kind:service]
+    why: A WebFlux service that makes blocking calls such as JDBC stalls the event loop threads, and ends up slower and harder to troubleshoot than MVC.
+  - id: JVM-018
+    title: With the current Spring Boot major version, JSON uses its default Jackson major version; if another Jackson major version must be introduced, state the reason and add serialization contract tests
+    level: soft
+    check: semi
+    how: Dependency tree check for two Jackson major versions present at once; review the corresponding contract tests
+    applies: [lang:jvm]
+    why: The two Jackson major versions differ in package names and default behavior; when mixed, annotations and modules may take effect for only one of them, and serialization output changes silently.
+    sources: [S18]
+  - id: JVM-019
+    title: In production, Actuator management endpoints must not be exposed to the public internet; expose only the endpoints you need, and split health checks into liveness and readiness
+    level: hard
+    check: semi
+    how: Check `management.endpoints.web.exposure.include` and the management port configuration; at the deployment layer confirm the management port is not externally reachable
+    applies: [lang:jvm, kind:service]
+    why: Endpoints such as `env` and `heapdump` leak configuration, secrets, and memory contents; counting database failures toward liveness makes everything restart whenever a downstream dependency hiccups.
+    sources: [S19]
+    see: ["26"]
+  - id: JVM-020
+    title: Services enable graceful shutdown and set a maximum wait for each shutdown phase that is shorter than the termination grace period given by the orchestration platform
+    level: soft
+    check: semi
+    how: Check `server.shutdown` and `spring.lifecycle.timeout-per-shutdown-phase`; an integration test sends SIGTERM and asserts that in-flight requests complete
+    applies: [lang:jvm, kind:service]
+    why: Exiting immediately interrupts in-flight requests and transactions; if the wait exceeds the platform grace period, the process is force-killed, which is as good as not setting it.
+    sources: [S20]
+    see: ["26"]
+  - id: JVM-021
+    title: Before enabling virtual threads or GraalVM native images, compare against the default approach under real load and record the results and a rollback switch; still set limits such as connection pool size and concurrency
+    level: soft
+    check: manual
+    how: "Review the enablement write-up: comparison data (throughput, latency percentiles, memory), known incompatibilities, rollback method"
+    applies: [lang:jvm, kind:service]
+    why: Virtual threads only help workloads dominated by blocking I/O, and the database connection pool and downstream capacity are still the bottleneck; native images carry compatibility costs for reflection, dynamic proxies, JDBC drivers, and monitoring agents.
+    detail: Do not layer virtual threads on top of Kotlin coroutine or Reactor code and then claim a performance gain; use thread dumps and JFR when troubleshooting.
+    sources: [S21, S22]
+  # ── Formatting and static analysis ──
+  - id: JVM-022
+    title: Java code is formatted uniformly by one formatter (google-java-format by default), checked in CI through Spotless
+    level: hard
+    check: auto
+    how: CI runs `spotlessCheck` (Gradle) or `spotless:check` (Maven); any diff fails
+    applies: [lang:jvm]
+    why: Once formatting is left to a tool, reviews stop debating whitespace and import order; code written by agents and by people is formatted the same way.
+    detail: If Checkstyle is used alongside the formatter, enable only the rules the formatter does not cover (naming, banned APIs, etc.) and do not double-check indentation and line breaks, or the two will fight each other.
+    sources: [S23, S24, S25]
+    see: ["COD-038"]
+  - id: JVM-023
+    title: Kotlin code is formatted and checked with ktlint (can be invoked through Spotless) and statically analyzed with detekt; both run in CI
+    level: hard
+    check: auto
+    how: CI runs `ktlintCheck` or `spotlessCheck`, plus `detekt`; any new issue fails
+    applies: [lang:jvm]
+    why: ktlint handles formatting and detekt handles code smells and potential bugs; their responsibilities do not overlap.
+    detail: |
+      - Existing projects record current issues in detekt's baseline file and block only new ones; do not set every rule to error from day one.
+      - Use only stable releases of the tools; do not put pre-releases into the baseline.
+    sources: [S26, S27]
+    see: ["COD-040"]
+  - id: JVM-024
+    title: Beyond the formatter, Java projects enable at least one defect-finding static analyzer (Error Prone or SpotBugs) and block new error-level issues in CI
+    level: soft
+    check: auto
+    how: CI enables Error Prone at compile time or runs SpotBugs; the configuration lists enabled and disabled rules by rule ID
+    applies: [lang:jvm]
+    why: Correct formatting does not mean correct logic; these tools catch null dereferences, unclosed resources, inconsistent `equals` and `hashCode`, and similar issues at compile time.
+    detail: |
+      - Default to Error Prone (runs at compile time, fast feedback); add NullAway when null-safety checks are needed.
+      - Turn on `-Xlint` for javac; new code adds no new warnings.
+      - Warning suppressions must name the specific rule, e.g. `@SuppressWarnings("unchecked")`, never `"all"` (see COD-039).
+    sources: [S28, S29, S30]
+    see: ["COD-039"]
+  - id: JVM-025
+    title: Kotlin code does not launch coroutines with `GlobalScope`; the `!!` non-null assertion is used only with a comment explaining why the value cannot be null
+    level: hard
+    check: auto
+    how: detekt enables `GlobalCoroutineUsage` and `UnsafeCallOnNullableType`; exceptions use `@Suppress` with the rule name and a stated reason
+    applies: [lang:jvm]
+    why: "Coroutines in `GlobalScope` are not cancelled with the lifecycle of the request or service, so they leak; `!!` turns compile-time null safety into a runtime null pointer exception."
+    detail: Request and response types at service boundaries state nullability explicitly; `lateinit` is only for framework injection, not to paper over initialization-order problems.
+    sources: [S27]
+    see: ["COD-035"]
+  # ── Architecture tests ──
+  - id: JVM-026
+    title: Dependency direction between modules or packages is written as ArchUnit tests that run in CI alongside unit tests
+    level: soft
+    check: auto
+    how: Test code contains ArchUnit rules (e.g. domain packages do not depend on Spring, JPA, or web packages; no cycles between modules), run in CI
+    applies: [lang:jvm]
+    why: Dependency direction written only in documentation erodes over time; written as tests, violating PRs fail outright.
+    detail: |
+      - Record existing violations with ArchUnit's freezing rules (FreezingArchRule) and block only new ones.
+      - When a Spring project organizes code by business module, Spring Modulith can verify module boundaries.
+      - Rules need deliberately violating negative examples to prove the check really fails (see ARC-011).
+    sources: [S31, S32]
+    see: ["ARC-006", "ARC-010", "ARC-011"]
+  # ── Testing ──
+  - id: JVM-027
+    title: Unit tests use the JUnit Platform (Jupiter programming model) with AssertJ assertions; Kotlin projects may use Kotest assertions and MockK
+    level: soft
+    check: manual
+    how: Review how new tests are written and their dependencies
+    applies: [lang:jvm]
+    why: A uniform test framework is recognized directly by IDEs, build tools, and CI reports; AssertJ failure messages are far clearer than `assertTrue`.
+    detail: Test dependency versions are managed by the Spring Boot or JUnit BOM rather than pinned one by one.
+    sources: [S33, S34]
+    see: ["04"]
+  - id: JVM-028
+    title: Integration tests involving databases, message queues, or caches use Testcontainers to start components of the same product and major version as production, rather than in-memory stand-ins such as H2
+    level: hard
+    check: semi
+    how: When the dependency check finds H2 or HSQLDB in test scope while production is not that database, require an explanation; review how integration tests start their dependencies
+    applies: [lang:jvm]
+    why: H2's SQL dialect, locking, constraints, and type behavior differ from PostgreSQL and domestic Chinese databases; queries that pass on H2 still break in production.
+    detail: |
+      - Spring Boot projects use `@ServiceConnection` to inject container connection details into the application, instead of hand-writing ports and addresses.
+      - Pin images by digest; in intranet environments pull from the internal image registry (see TST-013).
+      - When a domestic Chinese database has no usable image, use an isolated dedicated test instance and clean up after tests.
+    sources: [S35, S36]
+    see: ["TST-010", "TST-013"]
+  - id: JVM-029
+    title: Mockito / MockK only replace uncontrollable external boundaries; external HTTP dependencies use an HTTP mock such as WireMock; do not mock out the database and transactions
+    level: soft
+    check: manual
+    how: "Review mocked objects in tests: mocking a Repository, DataSource, or transaction manager requires a stated reason"
+    applies: [lang:jvm]
+    why: Once the database is mocked out, errors in SQL, transaction boundaries, and serialization go undetected, and the test only verifies the mock itself.
+    sources: [S37, S38]
+    see: ["TST-039"]
+  # ── Logging and exceptions ──
+  - id: JVM-030
+    title: Application code logs only through the SLF4J interface; no `System.out`, `System.err`, or `printStackTrace()`; only one logging implementation at runtime
+    level: hard
+    check: auto
+    how: ArchUnit rules such as `NO_CLASSES_SHOULD_ACCESS_STANDARD_STREAMS` or Checkstyle ban these calls; the dependency check fails when multiple SLF4J bindings are found
+    applies: [lang:jvm]
+    why: Standard output has no levels or structure and does not reach the logging system; when several logging implementations coexist, which one takes effect depends on classpath order.
+    detail: Spring Boot's default Logback is fine; switching to Log4j2 requires excluding the default implementation. Use placeholders `log.info("order {} paid", id)` or the key-value API, not string concatenation; production logs of Spring Boot services use the framework's built-in structured format (`logging.structured.format.*`) with trace IDs, with no extra encoder dependency needed. For field conventions see 02.
+    sources: [S31, S39, S40]
+    see: ["COD-016", "COD-017", "COD-019"]
+  - id: JVM-031
+    title: No empty `catch` blocks; after catching `InterruptedException`, either restore the interrupt flag or rethrow
+    level: hard
+    check: auto
+    how: Checked by Error Prone, SpotBugs, or detekt (`SwallowedException`, `EmptyCatchBlock`); review the handling of `catch (InterruptedException e)`
+    applies: [lang:jvm]
+    why: Swallowing exceptions silently turns failures into successes; swallowing interrupts breaks thread pool shutdown and task cancellation.
+    sources: [S28, S27]
+    see: ["COD-010"]
+  - id: JVM-032
+    title: Resources that need closing (streams, connections, statements, result sets) are managed with try-with-resources or Kotlin's `use`
+    level: hard
+    check: auto
+    how: SpotBugs unclosed-resource checks (OBL and ODR rules) or the related Error Prone checks; review hand-written `finally { close() }`
+    applies: [lang:jvm]
+    why: Each connection leaked on an exception path is one fewer in the pool, and under heavy load the pool is exhausted quickly.
+    sources: [S29]
+  - id: JVM-033
+    title: Do not read untrusted data with Java native serialization (`ObjectInputStream`); if you must, set a deserialization filter; Jackson does not enable global polymorphic typing (default typing)
+    level: hard
+    check: semi
+    how: SpotBugs with find-sec-bugs checks for `ObjectInputStream` and Jackson default typing; review the `jdk.serialFilter` configuration
+    applies: [lang:jvm]
+    why: Deserializing untrusted data can trigger "gadget chains" on the classpath and execute code directly; it is one of the most common sources of remote code execution on the JVM.
+    sources: [S41, S42]
+    see: ["25"]
+  - id: JVM-034
+    title: HTTP clients (JDK HttpClient, RestClient, Ktor Client, etc.) must explicitly set a connect timeout and a read or request timeout
+    level: hard
+    check: semi
+    how: Review client construction code; integration tests use WireMock to simulate slow responses and assert failure within the timeout
+    applies: [lang:jvm]
+    why: JDK HttpClient has no request timeout by default; when a downstream hangs, request threads stay occupied and eventually bring down the whole service.
+    detail: Use Resilience4j or built-in framework capabilities for retries and circuit breaking, and retry only idempotent operations (see COD-034).
+    sources: [S43]
+    see: ["COD-033", "COD-034"]
+  # ── Database access ──
+  - id: JVM-035
+    title: SQL parameters always use bind parameters (`PreparedStatement`, JdbcClient / JdbcTemplate parameters, JPA parameters, MyBatis `#{}`), never concatenated user input; MyBatis `${}` may only take identifiers from an allowlist
+    level: hard
+    check: semi
+    how: find-sec-bugs SQL injection checks; scan Mapper files for `${`; review where identifiers in dynamic SQL come from
+    applies: [lang:jvm]
+    why: Concatenated SQL is the direct source of injection vulnerabilities; `${}` is verbatim substitution, no different from string concatenation.
+    sources: [S42]
+    see: ["25"]
+  - id: JVM-036
+    title: In production, Hibernate must not create or alter tables automatically (`ddl-auto` set to `update`, `create`, or `create-drop`); schema changes go only through the migration tool
+    level: hard
+    check: auto
+    how: CI checks that `spring.jpa.hibernate.ddl-auto` in production configuration is only `none` or `validate`
+    applies: [lang:jvm]
+    why: Automatic table changes have no review and no record, may drop columns and lose data outright, and conflict with each other when multiple replicas start at once.
+    detail: For migration principles (fix forward, a separate release step, not running at every instance startup) see 17.
+    sources: [S44]
+    see: ["17"]
+  - id: JVM-037
+    title: Each service picks only one primary data access style (one of JDBC / JdbcClient, JPA, jOOQ, MyBatis)
+    level: soft
+    check: manual
+    how: "Review the dependency tree and data access layer: a second style requires an explanation"
+    applies: [lang:jvm]
+    why: When several coexist, transactions, batch writes, caching, and error handling each have their own way of being written, and transaction boundaries go wrong easily.
+    detail: A small number of complex queries such as reports may be supplemented with JdbcClient in a JPA project, but the boundary must be spelled out in the write-up.
+  - id: JVM-038
+    title: JPA entities are not used directly as API requests or responses; use separate DTOs or query projections
+    level: soft
+    check: semi
+    how: "ArchUnit rule: Controller method signatures must not contain `@Entity` types"
+    applies: [lang:jvm, kind:service]
+    why: Returning entities directly triggers lazy loading and N+1 queries and exposes internal fields; accepting entities directly lets mass assignment change fields that should not change.
+    sources: [S31]
+    see: ["16"]
+  - id: JVM-039
+    title: When using a "PostgreSQL-compatible" domestic Chinese database such as openGauss, confirm the driver class name does not clash with pgJDBC, and run migrations and integration tests on the target database
+    level: soft
+    check: semi
+    how: Dependency tree check for pgJDBC and the vendor driver present at once; run migrations, CRUD, and concurrency tests on a target database instance
+    applies: [lang:jvm]
+    why: Some openGauss drivers reuse the `org.postgresql.Driver` class name; when both drivers are on the classpath, which one loads depends on order.
+    sources: [S45]
+    see: ["17"]
+  # ── Dependency security and libraries ──
+  - id: JVM-040
+    title: CI runs vulnerability scanning on JVM dependencies (OWASP Dependency-Check or OSV-Scanner), blocking at the severity level set by the project; offline environments use an internally synced vulnerability database and record its update date
+    level: hard
+    check: auto
+    how: CI runs the Dependency-Check Maven / Gradle plugin (with `failBuildOnCVSS` set) or `osv-scanner`; false positives go into a suppression file with a reason and expiry date
+    applies: [lang:jvm]
+    why: JVM projects have many transitive dependencies, and most known vulnerabilities are in dependencies that are not declared directly.
+    detail: Dependency-Check needs an API key to download NVD data; manage it as a secret (see 25). A "pass" without a synced vulnerability database does not count as having scanned. Generate the SBOM at build time with the CycloneDX Maven / Gradle plugins and keep it with the release artifacts; this is more accurate than scanning JARs after the fact.
+    sources: [S46, S47, S48]
+    see: ["25"]
+  - id: JVM-041
+    title: Libraries consumed by others do not use the Spring Boot packaging plugin; run binary compatibility checks on the public API (japicmp for Java, the Kotlin plugin's ABI validation for Kotlin)
+    level: soft
+    check: auto
+    how: Dependency check that library modules do not have `spring-boot-maven-plugin` or the `org.springframework.boot` plugin; CI runs japicmp or the ABI validation task against the previous release
+    applies: [lang:jvm, kind:library]
+    why: The Boot plugin packages the library as an executable JAR that others cannot depend on normally; source compatibility is not binary compatibility, and removing an overload or changing a return type causes runtime errors for consumers that do not recompile.
+    detail: The standalone binary-compatibility-validator plugin has entered maintenance mode; new features have moved to the ABI validation built into the Kotlin Gradle plugin (still experimental for now).
+    sources: [S49, S50]
+    see: ["16"]
+choices:
+  - category: JDK distribution
+    pick: Eclipse Temurin (Adoptium)
+    alternatives:
+      - { name: "Amazon Corretto, Microsoft Build of OpenJDK, Red Hat build of OpenJDK", when: "Deployed on that vendor's cloud or OS and you want the vendor to support it too" }
+      - { name: "Azul Zulu, BellSoft Liberica", when: "You need a commercial support contract or a longer patch period" }
+      - { name: "OpenJDK distributions from Chinese vendors", when: "The customer's domestic CPU or OS is certified only on a particular distribution; check its support period and update cadence first" }
+    avoid:
+      - { name: "Using Oracle JDK without checking the license", why: "The no-fee terms are time-limited; updates after expiry require a paid subscription (JVM-005)" }
+      - { name: "Different distributions for development, CI, and production", why: "Patch cadences differ and problems are hard to reproduce" }
+    license: OpenJDK distributions are GPLv2 + Classpath Exception; Oracle JDK is under NFTC or OTN terms depending on the version
+    sources: [S01, S10]
+  - category: Build tool
+    pick: Maven (Wrapper + Spring Boot parent / BOM + Enforcer)
+    when: Spring Boot services written mainly in Java
+    alternatives:
+      - { name: "Gradle (Kotlin DSL + version catalog + dependency locking)", when: "Kotlin projects, large multi-module repositories, custom build logic needed; versions are constrained by the Kotlin plugin compatibility table (JVM-015)" }
+    avoid:
+      - { name: "Maintaining two build systems in the same repository", why: "Dependency and plugin configuration diverge" }
+    license: Maven and Gradle are both Apache-2.0
+    sources: [S11, S12, S14, S15]
+  - category: Web framework
+    pick: Spring Boot (Spring MVC)
+    alternatives:
+      - { name: Quarkus, when: "Sensitive to memory and startup time, or planning to use native images; choose its LTS release line" }
+      - { name: Micronaut, when: "You want compile-time dependency injection and less reflection" }
+      - { name: Ktor, when: "Lightweight HTTP services written in Kotlin that do not need the Spring ecosystem" }
+    avoid:
+      - { name: "Choosing WebFlux for a service that uses JDBC", why: "Blocking calls stall the event loop (JVM-017)" }
+      - { name: "Writing your own HTTP framework", why: "Existing frameworks already handle routing, validation, security, and observability" }
+    license: All of the above frameworks are Apache-2.0
+    notes: This is a choice by constraints, not a performance ranking; to compare, run actual benchmarks with the target workload and deployment resources.
+    sources: [S04, S51, S52, S53]
+  - category: Data access
+    pick: Spring JDBC's JdbcClient / JdbcTemplate
+    when: Services with simple SQL that want full control over the SQL
+    alternatives:
+      - { name: "JPA (Hibernate)", when: "The domain model has aggregates and object relationships, and the team is familiar with ORM sessions and lazy loading" }
+      - { name: jOOQ, when: "Complex reports and join queries where you want type-safe SQL; a paid edition is required for commercial databases" }
+      - { name: MyBatis, when: "The team already has many Mappers, or SQL is heavily hand-written" }
+      - { name: Exposed, when: "Pure Kotlin projects that do not depend on Spring" }
+    avoid:
+      - { name: "Multiple access layers coexisting in one service", why: "Transactions and error handling each have their own approach (JVM-037)" }
+      - { name: "A home-grown \"universal Repository\"", why: "The SQL is opaque and hard to audit and maintain" }
+    license: Hibernate ORM is Apache-2.0 from 7.0 (earlier versions are LGPL-2.1); the jOOQ open-source edition is Apache-2.0 and supports only open-source databases, commercial databases require a commercial license; MyBatis and Exposed are Apache-2.0
+    notes: MyBatis-Plus's logical delete, tenant condition, and pagination plugins rewrite SQL automatically; understand what it generates before using it; tenant isolation must not rely on the plugin alone (see 19).
+    sources: [S54, S55]
+  - category: PostgreSQL driver and connection pool
+    pick: pgJDBC + HikariCP (Spring Boot default)
+    alternatives:
+      - { name: "JDBC driver provided by the database vendor", when: "Using a domestic Chinese database (mind JVM-039)" }
+      - { name: Agroal, when: "Quarkus projects" }
+    avoid:
+      - { name: "An unbounded connection pool or a new connection per request", why: "Overwhelms the database" }
+    license: pgJDBC is BSD-2-Clause; HikariCP is Apache-2.0
+    sources: [S56]
+  - category: Database migration tool
+    pick: Flyway Community
+    when: Projects whose unit of migration is a SQL file; for migration principles see 17
+    alternatives:
+      - { name: Liquibase Community, when: "You want one set of changesets to support multiple databases, or need its changeset management features; first confirm the FSL license fits how the project uses and distributes it" }
+    avoid:
+      - { name: "Hibernate ddl-auto altering the production database", why: "No review, no record, possible data loss (JVM-036)" }
+      - { name: "Hand-written DDL execution logic in the application", why: "Multiple replicas execute it at once and it cannot be reviewed" }
+    license: Flyway Community is Apache-2.0, maintained by Redgate; features such as undo migrations are only in the paid Teams / Enterprise editions, and some databases also require a paid edition. Liquibase Community is FSL-1.1-ALv2 from 5.0, which allows internal and production use, forbids using it to build commercial products or services that compete with Liquibase, and converts each release to Apache-2.0 two years after it ships; it is not an OSI-approved open-source license, and earlier versions are still Apache-2.0
+    notes: The Community edition provides no undo; rollback relies on fixing forward (see 17). Support for domestic Chinese databases cannot be extrapolated from PostgreSQL support; actually run it.
+    sources: [S57, S58, S59]
+  - category: Formatting
+    pick: Spotless + google-java-format (Java); ktlint (Kotlin)
+    alternatives:
+      - { name: palantir-java-format, when: "The team wants a wider line length, switching the whole repository at once" }
+    avoid:
+      - { name: "Relying only on IDE formatting settings", why: "Everyone has a different configuration and CI cannot check it" }
+    license: Spotless and google-java-format are Apache-2.0; ktlint is MIT
+    sources: [S23, S25, S26]
+  - category: Static analysis
+    pick: Error Prone (Java, compile time); detekt (Kotlin)
+    alternatives:
+      - { name: NullAway, when: "You want to enforce null safety in Java code; runs as an Error Prone plugin" }
+      - { name: "SpotBugs (with find-sec-bugs)", when: "You want bytecode-based checks for resource leaks, concurrency, and security issues" }
+      - { name: Checkstyle, when: "You want to enforce rules the formatter does not cover, such as naming and banned APIs" }
+      - { name: PMD, when: "The team already has a PMD rule set" }
+      - { name: "Self-hosted SonarQube", when: "You have the resources to maintain the server and need a cross-project quality dashboard" }
+    avoid:
+      - { name: "Enabling all rules at once", why: "False positives drown real problems; use a baseline and block only new issues (COD-024)" }
+    license: Error Prone and detekt are Apache-2.0; NullAway is MIT; SpotBugs and Checkstyle are LGPL-2.1; PMD is under a BSD-style license. All are tools run separately at build time and are not part of the distributed product (policy in 27)
+    sources: [S27, S28, S29, S30, S42]
+  - category: Architecture tests
+    pick: ArchUnit
+    alternatives:
+      - { name: Spring Modulith, when: "A Spring project organized by business module that wants to verify module boundaries and generate module documentation at the same time" }
+    license: ArchUnit and Spring Modulith are both Apache-2.0
+    sources: [S31, S32]
+  - category: Testing
+    pick: JUnit (Jupiter) + AssertJ + Mockito; Testcontainers for integration tests
+    alternatives:
+      - { name: "MockK, Kotest", when: "Kotlin projects" }
+      - { name: WireMock, when: "Mocking external HTTP dependencies" }
+      - { name: JMH, when: "Microbenchmarks; do not estimate performance from a single timing" }
+    avoid:
+      - { name: "H2 standing in for the production database", why: "Dialect and behavior differ (JVM-028)" }
+    license: JUnit is EPL-2.0; AssertJ, MockK, and WireMock are Apache-2.0; Mockito and Testcontainers are MIT; JMH is GPLv2 + Classpath Exception (used only in tests)
+    sources: [S33, S34, S35, S37, S38]
+  - category: Logging
+    pick: SLF4J + Logback (Spring Boot default)
+    alternatives:
+      - { name: Log4j2, when: "Existing projects already use it, or you need its async logging features; exclude the default Logback" }
+    avoid:
+      - { name: 'System.out and printStackTrace', why: "No levels, no structure (JVM-030)" }
+    license: SLF4J is MIT; Logback is dual-licensed EPL-1.0 / LGPL-2.1; Log4j2 is Apache-2.0
+    sources: [S39, S40]
+  - category: HTTP client and resilience
+    pick: Spring's RestClient (or JDK HttpClient) + Resilience4j
+    alternatives:
+      - { name: Ktor Client, when: "Kotlin / Ktor projects" }
+      - { name: "OkHttp, Apache HttpClient", when: "You need their specific connection management or interceptors" }
+    avoid:
+      - { name: "Hand-written retry loops in business code", why: "Easy to retry without limit or retry non-idempotent operations" }
+    license: Resilience4j is Apache-2.0
+    sources: [S43, S60]
+  - category: Dependency vulnerability scanning
+    pick: OWASP Dependency-Check (Maven / Gradle plugin)
+    alternatives:
+      - { name: OSV-Scanner, when: "You want to read lock files or SBOMs directly, or do not want to maintain NVD data sync" }
+      - { name: "General-purpose scanners such as Trivy", when: "You also need to scan container images and OS packages (see 25)" }
+    license: Dependency-Check and OSV-Scanner are Apache-2.0
+    notes: The Dependency-Check code repository has moved from a personal account to the dependency-check organization; the old repository is archived.
+    sources: [S46, S47]
+  - category: SBOM generation
+    pick: CycloneDX Maven / Gradle plugins
+    license: Apache-2.0
+    sources: [S48]
+  - category: Library binary compatibility checks
+    pick: japicmp (Java); ABI validation built into the Kotlin Gradle plugin (Kotlin)
+    alternatives:
+      - { name: binary-compatibility-validator, when: "Kotlin projects already using it; the plugin has entered maintenance mode" }
+    license: All are Apache-2.0
+    sources: [S49, S50]
+antipatterns:
+  - { bad: "Putting a new service into production on the latest non-LTS JDK", instead: "Use an LTS that is still in support (JVM-001)" }
+  - { bad: "Assuming Oracle JDK is free without checking the terms that apply to the current version", instead: "Use an OpenJDK distribution such as Temurin, or check the license (JVM-005)" }
+  - { bad: "Explicitly writing the latest patch version on every starter", instead: "Let the Spring Boot BOM manage it (JVM-013)" }
+  - { bad: "Upgrading both the Kotlin plugin and Gradle to the latest in a Kotlin project without checking the compatibility table", instead: "Choose versions within the Gradle range declared by the Kotlin plugin (JVM-015)" }
+  - { bad: "Claiming offline delivery is supported because `mvn -o` succeeded on a developer machine", instead: "Build from an empty cache in CI with no internet access (JVM-012)" }
+  - { bad: "Testing SQL for PostgreSQL or a domestic Chinese database only on H2", instead: "Testcontainers or an isolated target database instance (JVM-028)" }
+  - { bad: "Mocking out every Repository and transaction with Mockito", instead: "Run the database through real integration tests; use mocks only for uncontrollable external boundaries (JVM-029)" }
+  - { bad: "Running production with `ddl-auto=update`", instead: "Manage the schema with Flyway / Liquibase (JVM-036)" }
+  - { bad: "Returning JPA entities directly as JSON", instead: "DTOs or query projections (JVM-038)" }
+  - { bad: "Running tasks that must execute only once with plain `@Scheduled` in a multi-replica service", instead: "Use a scheduling solution with a cluster lock (choices in 18)" }
+  - { bad: "Skipping review because Spotless reported nothing", instead: "Formatting is only the first gate; defect checks and human review still happen" }
+  - { bad: "Adopting XXL-JOB (GPL-3.0), self-hosted Camunda 8, or jOOQ on a commercial database without looking at the license", instead: "Review the license per the policy in 27 before adopting" }
+sources:
+  - { id: S01, title: Oracle Java SE Support Roadmap, url: "https://www.oracle.com/java/technologies/java-se-support-roadmap.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: Spring Support Policy, url: "https://spring.io/support-policy", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S03, title: "Eclipse Temurin (Adoptium)", url: "https://adoptium.net/", publisher: Eclipse Adoptium, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Spring Boot: Build Systems (dependency management and starters)", url: "https://docs.spring.io/spring-boot/reference/using/build-systems.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "Spring Boot Maven Plugin: Using the Plugin", url: "https://docs.spring.io/spring-boot/maven-plugin/using.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: Spring Cloud Alibaba version notes, url: "https://sca.aliyun.com/docs/2025.x/overview/version-explain/", publisher: Alibaba, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Kotlin: Configure a Gradle project (Gradle compatibility table)", url: "https://kotlinlang.org/docs/gradle-configure-project.html", publisher: JetBrains, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: "Gradle: Toolchains for JVM projects", url: "https://docs.gradle.org/current/userguide/toolchains.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S09, title: "Gradle: Compatibility Matrix", url: "https://docs.gradle.org/current/userguide/compatibility.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: "Oracle No-Fee Terms and Conditions (NFTC)", url: "https://www.oracle.com/downloads/licenses/no-fee-license.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S11, title: Apache Maven Wrapper, url: "https://maven.apache.org/tools/wrapper/", publisher: Apache Maven, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S12, title: "Gradle: The Gradle Wrapper", url: "https://docs.gradle.org/current/userguide/gradle_wrapper.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S13, title: "gradle/actions (including wrapper-validation)", url: "https://github.com/gradle/actions", publisher: Gradle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S14, title: Maven Enforcer Built-In Rules, url: "https://maven.apache.org/enforcer/enforcer-rules/index.html", publisher: Apache Maven, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: "Gradle: Version Catalogs", url: "https://docs.gradle.org/current/userguide/version_catalogs.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S16, title: "Gradle: Locking Dependency Versions", url: "https://docs.gradle.org/current/userguide/dependency_locking.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: "Gradle: Verifying Dependencies", url: "https://docs.gradle.org/current/userguide/dependency_verification.html", publisher: Gradle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: Introducing Jackson 3 support in Spring, url: "https://spring.io/blog/2025/10/07/introducing-jackson-3-support-in-spring/", publisher: Spring, date: 2025-10-07, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: "Spring Boot: Actuator Endpoints", url: "https://docs.spring.io/spring-boot/reference/actuator/endpoints.html", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S20, title: "Spring Boot: Graceful Shutdown", url: "https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S21, title: Java 25 Virtual Threads, url: "https://docs.oracle.com/en/java/javase/25/core/virtual-threads.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: "Spring Boot: SpringApplication (including virtual threads)", url: "https://docs.spring.io/spring-boot/reference/features/spring-application.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: Google Java Style Guide, url: "https://google.github.io/styleguide/javaguide.html", publisher: Google, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: Checkstyle Google Java Style configuration, url: "https://checkstyle.org/google-style.html", publisher: Checkstyle, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: Spotless Gradle plugin, url: "https://plugins.gradle.org/plugin/com.diffplug.spotless", publisher: DiffPlug, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S26, title: ktlint, url: "https://github.com/pinterest/ktlint", publisher: Pinterest, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S27, title: detekt, url: "https://github.com/detekt/detekt", publisher: detekt, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S28, title: Error Prone, url: "https://errorprone.info/", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S29, title: SpotBugs, url: "https://spotbugs.github.io/", publisher: SpotBugs, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S30, title: NullAway, url: "https://github.com/uber/NullAway", publisher: Uber, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S31, title: ArchUnit, url: "https://www.archunit.org/", publisher: TNG, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S32, title: Spring Modulith, url: "https://github.com/spring-projects/spring-modulith", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: JUnit release notes, url: "https://docs.junit.org/6.1.3/release-notes", publisher: JUnit, date: 2026-08-07, kind: official, checked: 2026-11-13 }
+  - { id: S34, title: AssertJ, url: "https://assertj.github.io/doc/", publisher: AssertJ, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: Testcontainers for Java, url: "https://github.com/testcontainers/testcontainers-java", publisher: Testcontainers, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S36, title: "Spring Boot: Testcontainers", url: "https://docs.spring.io/spring-boot/reference/testing/testcontainers.html", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S37, title: Mockito, url: "https://github.com/mockito/mockito", publisher: Mockito, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S38, title: WireMock, url: "https://wiremock.org/", publisher: WireMock, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S39, title: SLF4J, url: "https://www.slf4j.org/", publisher: QOS.ch, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S40, title: "Spring Boot: Logging (including structured logging)", url: "https://docs.spring.io/spring-boot/reference/features/logging.html", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S41, title: Java 25 Serialization Filtering, url: "https://docs.oracle.com/en/java/javase/25/core/serialization-filtering1.html", publisher: Oracle, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S42, title: find-sec-bugs, url: "https://github.com/find-sec-bugs/find-sec-bugs", publisher: find-sec-bugs, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S43, title: "Spring Boot: Calling REST Services (RestClient)", url: "https://docs.spring.io/spring-boot/reference/io/rest-client.html", publisher: Spring, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S44, title: "Spring Boot Migration Guide (including ddl-auto and migration tools)", url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide", publisher: Spring, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S45, title: openGauss JDBC driver class and environment class, url: "https://docs.opengauss.org/zh/docs/latest/developer_guide/jdbc_package_driver_class_and_environment_class.html", publisher: openGauss, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S46, title: OWASP Dependency-Check, url: "https://github.com/dependency-check/DependencyCheck", publisher: OWASP, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S47, title: OSV-Scanner, url: "https://github.com/google/osv-scanner", publisher: Google, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S48, title: CycloneDX Maven plugin, url: "https://github.com/CycloneDX/cyclonedx-maven-plugin", publisher: CycloneDX, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S49, title: japicmp, url: "https://github.com/siom79/japicmp", publisher: siom79, date: null, kind: community, checked: 2026-11-14 }
+  - { id: S50, title: "Kotlin binary-compatibility-validator (maintenance mode notice)", url: "https://github.com/Kotlin/binary-compatibility-validator", publisher: JetBrains, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S51, title: Quarkus Releases, url: "https://quarkus.io/releases/", publisher: Quarkus, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S52, title: Micronaut Release Announcements, url: "https://micronaut.io/category/release-announcements/", publisher: Micronaut Foundation, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S53, title: Ktor Releases, url: "https://ktor.io/docs/releases.html", publisher: JetBrains, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S54, title: Hibernate ORM relicensed under ASL 2.0, url: "https://in.relation.to/2025/03/14/orm-asl/", publisher: Hibernate, date: 2025-03-14, kind: official, checked: 2026-11-14 }
+  - { id: S55, title: jOOQ Licensing, url: "https://www.jooq.org/legal/licensing", publisher: Data Geekery, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S56, title: HikariCP, url: "https://github.com/brettwooldridge/HikariCP", publisher: brettwooldridge, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S57, title: "flyway/flyway (LICENSE)", url: "https://github.com/flyway/flyway", publisher: Redgate, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S58, title: "The Flyway engine, OSS and Redgate", url: "https://www.red-gate.com/blog/the-flyway-engine-oss-open-source-software-and-redgate", publisher: Redgate, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S59, title: "Liquibase Community for the future (FSL)", url: "https://www.liquibase.com/blog/liquibase-community-for-the-future-fsl", publisher: Liquibase, date: 2025-09-30, kind: official, checked: 2026-11-14 }
+  - { id: S60, title: Resilience4j, url: "https://resilience4j.readme.io/", publisher: Resilience4j, date: null, kind: official, checked: 2026-11-14 }
+open_questions:
+  - "The current Java LTS is Java 25; per the Oracle roadmap the next LTS is Java 29 (2027-09, the roadmap notes this may change); updates to Oracle JDK 21 after 2026-09 move to the OTN license. All of this comes from the Oracle roadmap; version numbers are not written into rules and are tracked in the version ledger"
+  - "The specific end-of-support dates for each Spring Boot release line (such as 4.0 and 4.1) were seen only on third-party summary pages and not checked one by one against the official support table; rules cite only the official policy (at least 13 months of open-source support per minor release line)"
+  - "The current Gradle major version is 9 (verified from the official release notes); the specific upper limit behind the original report's claim that \"the highest Gradle version fully supported by the Kotlin plugin is below the latest Gradle\" has not been rechecked against the official Kotlin compatibility table; follow the table when upgrading"
+  - "Flyway Community is still Apache-2.0 and maintained by Redgate; the current feature split of Teams / Enterprise and which databases require a paid edition were seen only on older Redgate pages, and the 2026 status has not been verified"
+  - "The official blog does not directly say whether \"distributing Liquibase to customers bundled with a product\" counts as competing use under the FSL; for private deliveries that ship Liquibase with the product, confirm separately per the policy in 27"
+  - "The compatibility of the current Spring Cloud Alibaba version with new Spring Boot release lines (the original report said it covers only an older release line) has not been rechecked"
+  - "Versions and dates in the original report for Seata, Nacos, Dubbo, Testcontainers, and others were self-contradictory or unverified and none were included; for middleware choices see 18"
+  - "The maintenance status of EasyExcel, Valiktor, and QuickTheories has not been verified (suspected unmaintained); they were not included in the choices"
+  - "Licenses in the choices: Hibernate, Liquibase, and Flyway were verified against official statements; the rest were filled in from GitHub's LICENSE detection on each repository (the repositories of google-java-format, PMD, Logback, and jOOQ gave no standard detection, so official statements were used); the full license texts were not read one by one"
+  - "Sources added on 2026-11-14 (S03, S08, S10, S11–S15, S19, S20, S26–S32, S34, S35, S37–S43, S46–S50, S56–S58, S60) were only confirmed to be working links to official entry points; the specific passages corresponding to each rule were not checked page by page"
+  - "Research needed: systematic changes in the latest Spring Boot major version and Spring Framework major version (Jakarta EE baseline, nullability annotations, starter renames, etc.); the original report covered only Jackson 3 and starter renames"
+  - "Research needed: Gradle-based Spring Boot / Ktor service templates and a Maven-based library template, to be published only after they actually build successfully"
+  - "Research needed: support periods and update cadence of Chinese JDK distributions (those targeting domestic Chinese CPUs); items from the Alibaba Java Coding Guidelines that can be adopted directly"
+  - "Research needed: there are no sourced recommendations for JVM memory and CPU parameters in containers (sizing the heap to the container limit, etc.)"

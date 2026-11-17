@@ -1,0 +1,98 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import TopicGrid from './TopicGrid.astro';
+import { getLang } from '../lib/site.ts';
+
+const lang = getLang(Astro.url.pathname);
+const copy = lang === 'en' ? {
+  title: 'Engineering standards for software',
+  description: 'A general engineering standard: every rule states whether it is required or recommended, how to check it, why it exists, and where it comes from. Readable on the web, usable by coding agents.',
+  eyebrow: 'General engineering standards · For people and agents',
+  h1: 'Engineering standards for software',
+  intro: '32 topics, from architecture, coding, and testing to security, compliance, mobile, and coding agents. Every rule states whether it is required or recommended, how to check it, why it matters, and where it comes from. Reviewed regularly.',
+  browse: 'Browse topics',
+  install: 'Install for my agent',
+  installComment: '# Install into Claude Code and Codex',
+  agentsComment: '# Generate AGENTS.md rules for a project',
+  legendLabel: 'Three kinds of markers',
+  hard: 'Hard constraint', hardLead: 'Must follow', hardText: 'There is a reliable source and a concrete check. If you cannot comply, stop and explain.',
+  soft: 'Soft guidance', softLead: 'Follow by default', softText: 'You may skip it for a reason, but state the reason and the rule ID.',
+  pending: 'Pending', pendingLead: 'Not verified yet', pendingText: 'Listed separately and not enforced as a rule until it has been verified.',
+  all: 'All topics',
+} : {
+  title: '准绳 · 做软件的准绳',
+  description: '一套通用的工程规范：每条规则写明必须还是建议、怎么检查、为什么、出处在哪。网页可查，编码 Agent 可用。',
+  eyebrow: '通用工程规范 · 给人查，也给 Agent 用',
+  h1: '做软件的准绳',
+  intro: '32 个主题，从架构、编码、测试到安全、合规、移动端和编码 Agent。每条规则写明必须还是建议、怎么检查、为什么、出处在哪，定期复核。',
+  browse: '浏览主题',
+  install: '装到我的 Agent',
+  installComment: '# 装到 Claude Code 和 Codex',
+  agentsComment: '# 按项目生成 AGENTS.md 里的规则',
+  legendLabel: '三种标记',
+  hard: '硬约束', hardLead: '必须遵守', hardText: '有可靠出处，写得出检查方法。做不到就停下来说明。',
+  soft: '软指导', softLead: '默认照做', softText: '有理由可以不做，但要写明理由和规则编号。',
+  pending: '待确认', pendingLead: '还没核实', pendingText: '单独列出，不当成规则执行，核实后再转正。',
+  all: '全部主题',
+};
+---
+<StarlightPage frontmatter={{ title: copy.title, description: copy.description, template: 'splash', head: [{ tag: 'script', content: "document.documentElement.dataset.home = ''" }] }}>
+  <div class="not-content home">
+    <section class="hero">
+      <div class="hero-text">
+        <p class="eyebrow">{copy.eyebrow}</p>
+        <h1>{copy.h1}</h1>
+        <p class="intro">{copy.intro}</p>
+        <div class="actions">
+          <a class="pr-btn" href={lang === 'en' ? '/en/topics/' : '/topics/'}>{copy.browse}</a>
+          <a class="pr-btn ghost" href={lang === 'en' ? '/en/install/' : '/install/'}>{copy.install}</a>
+        </div>
+      </div>
+      <div class="pr-code hero-code">
+        <div class="c">{copy.installComment}</div>
+        <div><span class="p">$ </span>npx plumbrule install</div>
+        <div class="c">{copy.agentsComment}</div>
+        <div><span class="p">$ </span>npx plumbrule agents-md --tags lang:go,kind:service</div>
+      </div>
+    </section>
+
+    <section class="legend" aria-label={copy.legendLabel}>
+      <div class="pr-card">
+        <div class="lh"><span class="pr-badge hard">{copy.hard}</span><strong>{copy.hardLead}</strong></div>
+        <p>{copy.hardText}</p>
+      </div>
+      <div class="pr-card">
+        <div class="lh"><span class="pr-badge soft">{copy.soft}</span><strong>{copy.softLead}</strong></div>
+        <p>{copy.softText}</p>
+      </div>
+      <div class="pr-card">
+        <div class="lh"><span class="pr-badge pending">{copy.pending}</span><strong>{copy.pendingLead}</strong></div>
+        <p>{copy.pendingText}</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>{copy.all}</h2>
+      <TopicGrid />
+    </section>
+  </div>
+</StarlightPage>
+<style>
+  .home { display: flex; flex-direction: column; gap: 3rem; padding-block: 1.5rem 1rem; }
+  .hero { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 2.5rem; align-items: center; }
+  .eyebrow { margin: 0; color: var(--sl-color-accent); font-weight: 600; font-size: 0.9375rem; }
+  h1 { margin: 0.5rem 0 0.75rem; font-size: clamp(2.25rem, 5vw, 3.25rem); line-height: 1.15; font-weight: 700; color: var(--sl-color-white); }
+  .intro { margin: 0; font-size: 1.125rem; color: var(--sl-color-gray-2); max-width: 36rem; }
+  .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.5rem; }
+  .actions .pr-btn { padding: 0.625rem 1.125rem; font-size: 1rem; }
+  .hero-code { font-size: 0.875rem; }
+  .legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+  .legend .pr-card { padding: 1rem 1.25rem; }
+  .lh { display: flex; align-items: center; gap: 0.625rem; }
+  .legend p { margin: 0.5rem 0 0; color: var(--sl-color-gray-2); font-size: 0.9375rem; }
+  h2 { font-size: 1.5rem; margin: 0 0 1.25rem; color: var(--sl-color-white); }
+  @media (max-width: 50rem) {
+    .hero { grid-template-columns: 1fr; gap: 1.5rem; }
+    .legend { grid-template-columns: 1fr; }
+  }
+</style>

@@ -1,0 +1,21 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import TopicGrid from './TopicGrid.astro';
+import { getLang, getSite } from '../lib/site.ts';
+
+const lang = getLang(Astro.url.pathname);
+const { counts } = getSite(lang);
+const copy = lang === 'en' ? {
+  title: 'All topics',
+  description: "Plumbrule's 32 topics, grouped by domain.",
+  text: `${counts.topics} topics, ${counts.rules} rules, including ${counts.hard} hard constraints. Topics marked “In progress” are still being written.`,
+} : {
+  title: '全部主题',
+  description: '准绳的 32 个主题，按领域分组。',
+  text: `已整理 ${counts.topics} 个主题，共 ${counts.rules} 条规则，其中硬约束 ${counts.hard} 条。标「整理中」的主题还在编写。`,
+};
+---
+<StarlightPage frontmatter={{ title: copy.title, description: copy.description, tableOfContents: false }}>
+  <p>{copy.text}</p>
+  <TopicGrid />
+</StarlightPage>

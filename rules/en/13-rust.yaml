@@ -1,0 +1,612 @@
+id: "13"
+slug: rust
+title: Rust
+summary: "How to choose and write the toolchain and MSRV, Cargo.lock, rustfmt and Clippy, unsafe, error handling, async (Tokio), tracing-based logging, test tooling, cargo-deny, database access and migration tools, FFI, and HTTP frameworks for Rust projects."
+status: draft
+reviewed_on: 2026-11-14
+next_review: 2027-05-14
+scope:
+  includes:
+    - "rustup toolchains and rust-toolchain.toml, edition, MSRV policy"
+    - "Rules for committing Cargo.lock, dependency sources and features"
+    - "rustfmt, Clippy, and the [lints] table in Cargo.toml"
+    - "Using, commenting, and reviewing unsafe"
+    - Error handling (thiserror / anyhow) and panics
+    - "Tokio async: blocking, locks, channels, task lifetimes, timeouts"
+    - How to wire up tracing for logging and tracing
+    - "Test tooling: cargo-nextest, doctest, proptest, loom, Miri, cargo-fuzz, insta"
+    - How to use cargo-deny / cargo-audit
+    - Database access libraries and migration tools (SQLx, etc.)
+    - FFI and cross-language bindings
+    - Choosing HTTP service frameworks and clients
+  excludes:
+    - { what: "General principles for formatting and linting (a single formatter; exceptions need a reason and an expiry date), cross-language conventions for log fields and error propagation", see: "02" }
+    - { what: "General requirements for test layering, coverage measurement, snapshots, and acceptance evidence", see: "04" }
+    - { what: "API style, OpenAPI, error response format, idempotency semantics (the same key with a different request returns 422), retry semantics", see: "16" }
+    - { what: "Migration principles, transactions and isolation levels, outbox", see: "17" }
+    - { what: "Choosing task queues, message queues, caches, and rate limiting", see: "18" }
+    - { what: "Authentication, JWT validation, authorization models", see: "19" }
+    - { what: "Parsing and limits for untrusted files (archives, PDFs, images)", see: "20" }
+    - { what: "Overall security: supply chain, overall SCA tool selection, SBOM, secret scanning, cryptography library selection", see: "25" }
+    - { what: "Container images, shutdown orchestration, OTel and observability", see: "26" }
+    - { what: "Open-source license policy and license scanning", see: "27" }
+    - { what: Tauri and other desktop frameworks, see: "31" }
+overview: |
+  1. **Put the toolchain in the repository.** Applications pin a patch release in `rust-toolchain.toml`, including rustfmt and clippy; libraries declare the minimum supported Rust version (MSRV) with `rust-version` in `Cargo.toml`, and CI actually runs once on that version.
+  2. **New projects use the 2024 edition.** It is stable since Rust 1.85; changing the edition gets its own PR, migrated with `cargo fix --edition`.
+  3. **Commit Cargo.lock by default.** The official guidance no longer distinguishes libraries from applications, and `cargo new` tracks the lockfile by default; application CI always uses `--locked`. A library's lockfile does not affect downstream users, so libraries also run an extra build with the latest dependencies.
+  4. **Leave formatting and linting to tools.** `cargo fmt --check` and `cargo clippy -- -D warnings` go into CI; lint levels are configured in one place, the `[lints]` / `[workspace.lints]` table in `Cargo.toml`.
+  5. **unsafe is the exception and must leave evidence.** Crates that do not need it simply `forbid` it; every unsafe block has a `// SAFETY:` comment, enforced by Clippy; changes to unsafe code are reviewed by designated reviewers, and tests run under Miri where feasible.
+  6. **Errors come in two layers.** Libraries expose concrete error types (thiserror); application entry points use anyhow to add context. Expected failures are not handled with `unwrap` / `expect` / `panic`.
+  7. **Async must not block.** Tokio by default; blocking and CPU-heavy work goes to `spawn_blocking` or Rayon; synchronous locks are not held across `.await`; channels are bounded; every external call has a timeout; `tokio::spawn` is not a durable task.
+  8. **Log with tracing.** Libraries only emit events and spans and never initialize a subscriber; the application entry point initializes it once.
+  9. **Don't skip doctests.** nextest does not run documentation tests, so run `cargo test --doc` separately; use loom for concurrency primitives, proptest / cargo-fuzz for parsers, and have humans review snapshot diffs.
+  10. **Put cargo-deny in CI.** One check covers vulnerabilities (the RustSec advisory database), licenses, duplicate and banned crates, and dependency sources; commit `deny.toml`.
+  11. **Default stack:** Tokio, Axum + tower-http, reqwest, SQLx (migrations with `sqlx migrate`), serde, thiserror / anyhow, tracing, clap. async-std is no longer maintained and serde_yaml is deprecated; use neither.
+rules:
+  # ── Toolchain, edition, MSRV ──
+  - id: RS-001
+    title: Applications, services, and command-line tools commit rust-toolchain.toml at the repository root, pin the toolchain to a specific patch release, and list the required components and targets
+    level: hard
+    check: auto
+    how: "CI checks that the file exists and that `channel` is a full patch version number rather than `stable`; the build log prints `rustc -V` for comparison"
+    applies: [lang:rust, kind:service, kind:cli]
+    why: "With only `stable`, different machines and different dates build with different compilers, and newly added Clippy warnings turn CI red for no reason."
+    detail: |
+      - Components include at least `rustfmt` and `clippy`; targets used for cross-compilation also go in `targets`.
+      - Upgrading the toolchain gets its own PR, which also handles any newly appearing Clippy warnings.
+      - In air-gapped environments, preinstall the matching toolchain version and targets in the build image or an internal mirror.
+    sources: [S02]
+  - id: RS-002
+    title: Libraries meant for others to depend on declare their MSRV with rust-version in Cargo.toml, and CI actually builds and tests on that version
+    level: hard
+    check: auto
+    how: "CI adds a job using the MSRV toolchain (or `cargo hack check --rust-version`); failure blocks the merge"
+    applies: [lang:rust, kind:library]
+    why: "Without actually testing on the MSRV, the declared minimum version quickly drifts from reality; users only find out it doesn't compile after upgrading dependencies."
+    detail: |
+      - Libraries should not use rust-toolchain.toml to lock downstream developers into a specific patch release; if present in the repository it serves only this repository's development and CI, and does not replace `rust-version`.
+      - The 2024 edition's default dependency resolver (resolver 3) takes `rust-version` into account when choosing dependency versions, so it only helps if the declaration is accurate.
+    sources: [S04, S05, S28]
+  - id: RS-003
+    title: Raising a library's MSRV is recorded in the changelog with a reason; it is not raised automatically with every stable release
+    level: soft
+    check: semi
+    how: "When CI detects a change in `rust-version`, it requires a corresponding note in the PR description and the changelog"
+    applies: [lang:rust, kind:library]
+    why: "Raising the MSRV prevents downstream users still on older compilers from upgrading; whether it counts as a breaking change is up to the project's versioning policy, but it must be stated explicitly."
+    detail: "Write the MSRV policy (e.g. \"the latest N stable releases\") in the README; N is up to the project, and there is no official requirement."
+    sources: [S05]
+  - id: RS-004
+    title: New projects use the latest edition; edition migrations get their own PR and are done with cargo fix --edition
+    level: soft
+    check: auto
+    how: "CI checks the `edition` field of each crate; migration PRs contain only edition-related changes"
+    applies: [lang:rust]
+    why: "New editions tighten a set of error-prone patterns (such as unsafe-related rules); mixed in with feature changes, the review becomes unclear."
+    detail: "The latest is currently the 2024 edition, which requires Rust 1.85 or later. Agents and contributors must not change the edition, `rust-version`, or targets as a drive-by."
+    sources: [S01, S06]
+  # ── Dependencies and lockfiles ──
+  - id: RS-005
+    title: Applications, services, and command-line tools must commit Cargo.lock, and CI and release builds always use --locked
+    level: hard
+    check: auto
+    how: "CI checks that Cargo.lock is committed; every `cargo build`, `cargo test`, and `cargo clippy` command uses `--locked` and fails if the lockfile would need to change"
+    applies: [lang:rust, kind:service, kind:cli]
+    why: "Without a lockfile, each resolution may pick different patch releases, builds are not reproducible, and git bisect cannot locate problems."
+    detail: '`cargo install` ignores the lockfile by default; when publishing an installable command-line tool, document `cargo install --locked`.'
+    sources: [S03, S07]
+  - id: RS-006
+    title: Libraries also commit Cargo.lock by default; additionally, CI runs a build and test with the latest compatible dependencies
+    level: soft
+    check: auto
+    how: "A scheduled or PR job runs `cargo update` before building and testing, and alerts on failure"
+    applies: [lang:rust, kind:library]
+    why: "The official guidance now has `cargo new` track the lockfile by default, but a library's lockfile does not affect downstream users; locking only your own CI hides problems downstream users will hit."
+    sources: [S03, S07]
+  - id: RS-007
+    title: Dependency versions are never `*`; git dependencies must pin a rev; dependencies may only come from approved registries or mirrors
+    level: hard
+    check: auto
+    how: "cargo-deny's `[sources]` allows only approved registries and git URLs, and `[bans]` sets `wildcards = \"deny\"`"
+    applies: [lang:rust]
+    why: '`*` and branch HEADs can pull in arbitrary new code without anyone noticing and are an entry point for supply-chain attacks; crates.io itself refuses to publish crates with wildcard dependency versions.'
+    sources: [S07, S14]
+    see: ["25"]
+  - id: RS-008
+    title: New dependencies have their purpose stated in the PR; enable only the features you need and turn off unused default features
+    level: soft
+    check: semi
+    how: "During review, look at changes to Cargo.toml and Cargo.lock; use `cargo tree -e features` to see which features are actually enabled, and tools such as cargo-machete to find unused dependencies"
+    applies: [lang:rust]
+    why: "Enabling all features (such as `tokio`'s `full`) slows compilation and widens the attack surface and license scope."
+    see: ["02"]
+  # ── Formatting and linting ──
+  - id: RS-009
+    title: Code must pass rustfmt; CI runs `cargo fmt --all -- --check`
+    level: hard
+    check: auto
+    how: "CI runs this command and fails on a non-zero exit; if there is a rustfmt.toml, it is committed"
+    applies: [lang:rust]
+    why: Leave formatting to the tool so reviews focus on logic.
+    sources: [S08]
+    see: ["02"]
+  - id: RS-010
+    title: CI runs `cargo clippy --all-targets --locked -- -D warnings` with the pinned toolchain, with no warnings allowed
+    level: hard
+    check: auto
+    how: "CI runs this command; when features are mutually exclusive, run it separately per feature combination instead of forcing `--all-features`"
+    applies: [lang:rust]
+    why: "Clippy's default correctness and suspicious-pattern checks catch real defects directly; without a pinned toolchain, new warnings interrupt CI for no reason."
+    detail: "Do not write `#![allow(warnings)]` at the crate root or disable the whole `clippy::correctness` group."
+    sources: [S09]
+  - id: RS-011
+    title: Lint levels are configured in one place, the [lints] table in Cargo.toml; multi-crate workspaces use [workspace.lints], and each member inherits it with `lints.workspace = true`
+    level: soft
+    check: auto
+    how: "CI checks that every member crate inherits the workspace lint configuration; during review, look for stray `#![deny(...)]` at crate roots"
+    applies: [lang:rust]
+    why: "Lint configuration is only readable and maintainable when it lives in one place; scattered across files it is easy to miss updates and end up contradictory."
+    detail: |
+      Example:
+      ```toml
+      [workspace.lints.rust]
+      unsafe_code = "forbid"          # relax individually for crates that need unsafe
+      [workspace.lints.clippy]
+      undocumented_unsafe_blocks = "deny"
+      unwrap_used = "warn"
+      expect_used = "warn"
+      dbg_macro = "warn"
+      ```
+      Combined with `-D warnings` in CI, `warn` effectively blocks too; don't put lints here that you want to be advisory only.
+    sources: [S04, S09]
+  - id: RS-012
+    title: Optional lint groups such as pedantic and nursery are evaluated and enabled lint by lint, not set to deny as a whole group
+    level: soft
+    check: semi
+    how: "During review, look for whole-group settings such as `pedantic = \"deny\"` in the lint configuration"
+    applies: [lang:rust]
+    why: "These groups contain lints with stylistic disputes and higher false-positive rates; enabling the whole group invites a flood of `allow`s that drowns out real problems."
+    sources: [S09]
+  - id: RS-013
+    title: When disabling a lint locally, state the reason; prefer `#[expect(lint, reason = "...")]` over `#[allow]` without a reason
+    level: soft
+    check: auto
+    how: "Enable Clippy's `allow_attributes_without_reason` (and `allow_attributes`) checks"
+    applies: [lang:rust]
+    why: '`expect` warns in turn once the warning disappears, prompting removal; with the reason written in the code, both review and later cleanup have something to go on.'
+    sources: [S09]
+    see: ["02"]
+  # ── unsafe ──
+  - id: RS-014
+    title: Crates that don't need unsafe set `unsafe_code = "forbid"`; necessary unsafe is concentrated in a few modules that expose a safe interface
+    level: soft
+    check: auto
+    how: '[lints] table configures `unsafe_code`; CI uses grep or cargo-geiger to count where unsafe appears'
+    applies: [lang:rust]
+    why: "The compiler guarantees memory safety only outside unsafe; the more scattered unsafe is, the harder it is to review."
+    sources: [S10]
+  - id: RS-015
+    title: Every unsafe block is preceded by a `// SAFETY:` comment explaining which preconditions are satisfied; every `unsafe fn` has a `# Safety` doc section describing the preconditions callers must uphold
+    level: hard
+    check: auto
+    how: "Clippy's `undocumented_unsafe_blocks` and `missing_safety_doc` are set to deny; `unsafe_op_in_unsafe_fn` must not be relaxed"
+    applies: [lang:rust]
+    why: "The correctness of unsafe code relies on human reasoning; if the preconditions aren't written down, it can't be reviewed or rechecked after changes."
+    detail: "Since the 2024 edition, `unsafe_op_in_unsafe_fn` warns by default: unsafe operations inside an `unsafe fn` body must also be in an explicit `unsafe {}` block."
+    sources: [S06, S09, S10]
+  - id: RS-016
+    title: New or modified unsafe code must be approved by a designated reviewer; authors cannot approve their own
+    level: hard
+    check: semi
+    how: "When CI detects `unsafe` in a change, it adds a label and requires a designated reviewer; modules that concentrate unsafe are listed in CODEOWNERS"
+    applies: [lang:rust]
+    why: "The compiler no longer vouches for unsafe code; independent human review is the only line of defense."
+    see: ["03", "23"]
+  - id: RS-017
+    title: Code containing unsafe or raw pointer operations has its relevant unit tests run under Miri
+    level: soft
+    check: auto
+    how: "CI runs `cargo miri test` with a nightly toolchain (relevant modules only is fine)"
+    applies: [lang:rust]
+    why: "Miri detects undefined behavior such as out-of-bounds access, dangling pointers, and data races while tests run, which ordinary tests cannot find."
+    detail: "Miri does not support FFI calls and some system calls, so such tests must be skipped; cover the skipped parts with sanitizers instead."
+    sources: [S11]
+  # ── Error handling ──
+  - id: RS-018
+    title: Libraries expose concrete error types (such as enums defined with thiserror) and do not return anyhow::Error or Box<dyn Error> from public APIs
+    level: soft
+    check: semi
+    how: "Review public APIs; use cargo-semver-checks to detect breaking changes to error types"
+    applies: [lang:rust, kind:library]
+    why: "Callers need to branch on the kind of error; a vague error type can only be treated as a string. Error types are also part of the public API."
+    detail: |
+      - Error enums implement `std::error::Error` and keep the underlying cause with `#[source]`; enums that may gain variants publicly get `#[non_exhaustive]`.
+      - Application entry points, command-line main, and task wiring layers use anyhow with `.context(...)` to add context.
+      - Don't mix thiserror and snafu in the same module.
+      - For mapping errors to API responses, see 16; never expose internal details such as SQL, paths, or stacks externally.
+    sources: [S12, S13, S29]
+    see: ["02", "16"]
+  - id: RS-019
+    title: Expected failures in production code (input, network, files, database) must not be handled with unwrap, expect, or panic
+    level: hard
+    check: semi
+    how: "Enable Clippy's `unwrap_used`, `expect_used`, and `panic`; set `allow-unwrap-in-tests = true` and `allow-expect-in-tests = true` in clippy.toml to exempt tests; justify each remaining case with `#[expect(..., reason = \"...\")]`"
+    applies: [lang:rust]
+    why: "Turning an expected failure into a panic fails a request at best and kills the whole process at worst, with no usable error information."
+    detail: "Places that truly cannot fail (such as a regex from a compile-time constant) may use `expect`, with the message explaining why it cannot fail."
+    sources: [S09]
+  - id: RS-020
+    title: When a public function can panic or return an error, its docs include `# Panics` and `# Errors` sections
+    level: soft
+    check: auto
+    how: "Enable Clippy's `missing_panics_doc` and `missing_errors_doc`"
+    applies: [lang:rust, kind:library]
+    why: "Callers need to know when it can fail and whether it can crash in order to handle it correctly."
+    sources: [S09, S29]
+  # ── Async and concurrency ──
+  - id: RS-021
+    title: Async code does not make blocking calls or run long CPU computations directly; blocking operations use spawn_blocking, and CPU-intensive work goes to Rayon or a dedicated thread pool
+    level: hard
+    check: semi
+    how: "During review, check async functions for `std::fs`, `std::thread::sleep`, synchronous database drivers, and heavy computation loops; during load testing, use tokio-console or tracing timing data to find tasks that hold on for a long time without yielding"
+    applies: [lang:rust]
+    why: "Tokio has a limited number of worker threads; one blocking task stalls every request on the same thread, showing up as soaring tail latency."
+    sources: [S15]
+  - id: RS-022
+    title: Do not hold std or parking_lot synchronous locks across `.await`
+    level: hard
+    check: auto
+    how: "Clippy's `await_holding_lock` and `await_holding_refcell_ref` are set to deny"
+    applies: [lang:rust]
+    why: "After yielding while holding the lock, another task on the same thread trying to take the same lock deadlocks; the lock is also held for unpredictable durations."
+    detail: "First shrink the critical section and release it before the await; when it truly must be held across an await, use `tokio::sync::Mutex`."
+    sources: [S09, S15]
+  - id: RS-023
+    title: Channels between tasks are bounded by default; using an unbounded channel requires stating why it cannot grow without limit
+    level: soft
+    check: semi
+    how: "Use grep to find `unbounded_channel` and confirm the reason during review"
+    applies: [lang:rust]
+    why: "Unbounded channels have no backpressure; when producers outpace consumers, memory keeps growing until the process is killed."
+    sources: [S15]
+  - id: RS-024
+    title: "Spawned tasks must have an owner: manage them with JoinSet or TaskTracker, and on shutdown send cancellation and wait for them to finish with a time limit; work that must be guaranteed to complete cannot rely on tokio::spawn alone"
+    level: soft
+    check: manual
+    how: "During review, check that each `tokio::spawn` JoinHandle is held or handed to a task group, and that the shutdown path has a cancellation signal (such as CancellationToken)"
+    applies: [lang:rust, kind:service]
+    why: "Errors in unowned tasks go unnoticed, and they are simply dropped on shutdown; once the process exits, in-memory tasks are gone."
+    detail: "Work that must run reliably and be retryable goes into a persistent task queue or outbox (see 17, 18). For futures used in `tokio::select!`, confirm whether they are cancellation-safe."
+    sources: [S15]
+    see: ["17", "18", "26"]
+  - id: RS-025
+    title: Every external call has a timeout; the HTTP client reuses one Client within the process, configured with connect and overall timeouts
+    level: hard
+    check: semi
+    how: "During review, check that `reqwest::Client::builder()` sets `timeout` and `connect_timeout`; wrap other calls in `tokio::time::timeout`; verify with fault-injection tests"
+    applies: [lang:rust]
+    why: "reqwest has no overall timeout by default, so when the peer doesn't respond the request hangs forever, holding a connection and a task; creating a new Client each time throws away the connection pool."
+    sources: [S16]
+  - id: RS-026
+    title: Non-idempotent write requests are not retried automatically unless the API supports idempotency keys; retry and idempotency semantics follow 16
+    level: soft
+    check: semi
+    how: "Review the scope of retry middleware (such as reqwest-retry or backon) and confirm it covers only idempotent methods or requests carrying an idempotency key"
+    applies: [lang:rust]
+    why: "A timeout is not a failure; blindly retrying write requests causes duplicate charges and duplicate orders."
+    detail: "When the same idempotency key comes with different request content, the server returns 422 (see 16)."
+    see: ["16"]
+  # ── Logging and tracing ──
+  - id: RS-027
+    title: Use tracing for logging and tracing; libraries only emit events and spans and never initialize a subscriber, and only the application entry point initializes it, once
+    level: soft
+    check: auto
+    how: "CI uses grep to check that library crates have no `tracing_subscriber` initialization calls and don't log with `println!` / `eprintln!` (Clippy's `print_stdout`, `print_stderr`)"
+    applies: [lang:rust]
+    why: "A library initializing its own subscriber conflicts with the application's configuration; output printed to stdout has no level or structure and cannot be collected."
+    detail: |
+      - Services output JSON via `tracing-subscriber`; when cross-service tracing is needed, hook up OpenTelemetry (see 26).
+      - For conventions on log fields, levels, and "log the same error only once, at the boundary", see 02.
+      - When using `#[instrument(skip(...))]`, skip large and sensitive arguments.
+    sources: [S17]
+    see: ["02", "26"]
+  - id: RS-028
+    title: Secrets and sensitive fields stay out of logs, spans, and Debug output; types holding secrets use a wrapper such as secrecy or a hand-written redacting Debug
+    level: hard
+    check: semi
+    how: "During review, check whether structs with secret fields `#[derive(Debug)]`; logging tests assert that test secrets do not appear in the output; for secret scanning see 25"
+    applies: [lang:rust]
+    why: '`#[derive(Debug)]` prints every field as is; a single `?` format or instrument is enough to write a secret into the logs.'
+    see: ["02", "25"]
+  # ── Testing ──
+  - id: RS-029
+    title: When running tests with cargo-nextest, `cargo test --doc` must also be run separately
+    level: hard
+    check: auto
+    how: "CI has both a `cargo nextest run --locked` step and a `cargo test --doc --locked` step"
+    applies: [lang:rust]
+    why: "nextest does not execute documentation tests; running only nextest lets the examples in the docs silently break."
+    sources: [S18]
+  - id: RS-030
+    title: Parsers, codecs, and functions that handle external input get property tests with proptest; those facing untrusted input also get fuzz testing with cargo-fuzz
+    level: soft
+    check: semi
+    how: "During review, check whether these modules have property tests; run fuzzing as a scheduled job, and add any crash samples found to regression tests"
+    applies: [lang:rust]
+    why: "Memory safety does not mean no panics, no infinite loops, or no memory exhaustion; random input is the easiest way to find these problems."
+    sources: [S19, S20]
+    see: ["04", "20"]
+  - id: RS-031
+    title: Hand-written concurrency primitives (atomics, lock-free structures, custom synchronization) are tested with loom
+    level: soft
+    check: semi
+    how: "During review, check that modules implementing synchronization logic with `std::sync::atomic` have loom tests"
+    applies: [lang:rust]
+    why: "Concurrency bugs depend on thread interleaving order and almost never show up in ordinary tests; loom exhaustively explores interleavings."
+    sources: [S21]
+  - id: RS-032
+    title: insta snapshot diffs are accepted only after human review; CI never automatically writes or accepts snapshots
+    level: hard
+    check: auto
+    how: "CI sets `INSTA_UPDATE=no` (or uses `cargo insta test --check`) and fails on snapshot mismatches; changes to snapshot files are reviewed separately in the PR"
+    applies: [lang:rust]
+    why: Automatically accepting snapshots writes regressions straight into the new expectations.
+    sources: [S22]
+    see: ["04", "23"]
+  # ── Supply chain ──
+  - id: RS-033
+    title: CI runs cargo-deny to check vulnerabilities, licenses, duplicate and banned crates, and dependency sources; deny.toml is committed
+    level: hard
+    check: auto
+    how: "CI runs `cargo deny check` and fails on a non-zero exit; when ignoring an advisory, record the reason and a review date in deny.toml"
+    applies: [lang:rust]
+    why: "One check covers RustSec vulnerability advisories, the license allowlist, duplicate dependencies, and sources at once, which is simpler than configuring several tools separately."
+    detail: |
+      - Vulnerability data comes from the RustSec advisory database; in air-gapped environments use an internal mirror and record the advisory database's update time in the results — an offline scan is only valid for that snapshot.
+      - Projects already using cargo-audit can keep it; both use the same advisory database, so there's no need to stack them.
+      - For license allowlist policy see 27; for overall SCA and SBOM requirements see 25.
+    sources: [S14, S23]
+    see: ["25", "27"]
+  - id: RS-034
+    title: Builds for air-gapped or on-premises delivery prepare dependencies with cargo vendor or an internal registry mirror, and verify with `cargo build --release --locked --offline`
+    level: hard
+    check: auto
+    how: CI has a network-disabled build job that runs this command
+    applies: [lang:rust, kind:onprem]
+    why: "Being able to compile online does not mean being able to compile offline; vendor includes only crate sources, not the toolchain, native libraries, protoc, etc., so it must be verified in a truly air-gapped environment."
+    detail: "Building offline does not mean running offline; for runtime acceptance see 26."
+    sources: [S24]
+    see: ["26"]
+  # ── Database access and migration tools ──
+  - id: RS-035
+    title: SQL always uses parameter binding (the `query!` macro or `.bind()`), never format! to splice in user input
+    level: hard
+    check: semi
+    how: "Use grep or Semgrep to find `format!` results passed to `sqlx::query` / `query_as`; dynamically spliced identifiers may only come from an allowlist"
+    applies: [lang:rust]
+    why: Splicing SQL is a direct source of injection vulnerabilities.
+    sources: [S25]
+    see: ["17", "25"]
+  - id: RS-036
+    title: When using SQLx compile-time checked macros and CI does not connect to a database, commit the .sqlx directory and have CI run `cargo sqlx prepare --check`
+    level: hard
+    check: auto
+    how: "CI runs `cargo sqlx prepare --check`; builds do not set `DATABASE_URL`, confirming the offline cache is used"
+    applies: [lang:rust]
+    why: "If a query or schema changes but the cache isn't updated, offline builds validate against the old schema and the problem surfaces only at runtime."
+    detail: "When `DATABASE_URL` is set, the macros still try to connect to the database, so CI's offline build step must make sure it is not set."
+    sources: [S25]
+  - id: RS-037
+    title: Migration files are committed and run with the migration tool that goes with the chosen library (`sqlx migrate` for SQLx); migration principles follow 17
+    level: soft
+    check: semi
+    how: "Review migration files; confirm that in production, migrations are run separately by the release process rather than by each instance on startup"
+    applies: [lang:rust, kind:service]
+    why: "A project uses only one migration tool so the migration history is traceable; multiple replicas running migrations at startup conflict with each other."
+    see: ["17"]
+  # ── FFI and cross-language ──
+  - id: RS-038
+    title: At FFI boundaries, panics must not cross `extern "C"`; types crossing the boundary use `#[repr(C)]`, and String, Vec, or plain Rust structs are not passed directly
+    level: hard
+    check: semi
+    how: '`improper_ctypes` and `improper_ctypes_definitions` must not be relaxed; during review, check that each exported function catches panics with `catch_unwind` or explicitly uses `extern "C-unwind"`'
+    applies: [lang:rust]
+    why: "Rust's memory layout is not guaranteed to be stable; a panic crossing the C boundary aborts the process outright or causes undefined behavior."
+    detail: |
+      - Whoever allocates, frees: memory allocated by Rust comes with a matching free function, and the other side must not free it with free.
+      - Document string encoding, integer widths, null-pointer conventions, and the ABI version.
+      - Since the 2024 edition, `extern` blocks must be written as `unsafe extern`, and attributes such as `no_mangle` must be written as `#[unsafe(no_mangle)]`.
+      - Cross-language tests cover every exported function; where feasible, CI runs them under AddressSanitizer.
+    sources: [S06, S10]
+  - id: RS-039
+    title: Bindings for Python, Node, and C++ use mature binding libraries (PyO3, napi-rs, cxx) instead of a hand-written C ABI layer
+    level: soft
+    check: manual
+    how: Review the binding approach used by new cross-language modules
+    applies: [lang:rust]
+    why: "A hand-written C ABI must handle ownership, exception translation, the GIL, and event loops on its own; binding libraries already handle these boundaries."
+    detail: "When upgrading a binding library, retest across the target language versions and platform matrix; it isn't enough that the Rust side compiles."
+    sources: [S26, S27, S30]
+  # ── Public libraries ──
+  - id: RS-040
+    title: Before publishing a library, check for breaking changes to the public API with cargo-semver-checks, and bump the version according to SemVer
+    level: soft
+    check: auto
+    how: "The release process runs `cargo semver-checks` and fails if a breaking change is found without a corresponding version bump"
+    applies: [lang:rust, kind:library]
+    why: "Breaking changes to public APIs are easy to miss by eye, and downstream users suddenly fail to compile after `cargo update`."
+    sources: [S31]
+choices:
+  - category: Toolchain management
+    pick: rustup + rust-toolchain.toml at the repository root
+    alternatives:
+      - { name: Nix or mise, when: "You need to manage multiple languages and system dependencies uniformly on one machine" }
+    avoid:
+      - { name: rustc from the system package manager, why: "Lags behind, is hard to switch, and lacks some components and targets" }
+    sources: [S02]
+  - category: Lint configuration
+    pick: The [lints] / [workspace.lints] table in Cargo.toml + clippy.toml (lint parameters only)
+    avoid:
+      - { name: 'A string of `#![deny(...)]` at each crate root', why: "Scattered and hard to change uniformly" }
+    sources: [S04, S09]
+  - category: Async runtime
+    pick: Tokio
+    when: "Network services and programs that need async I/O; pure CPU computation or simple synchronous command-line tools don't bring in an async runtime"
+    alternatives:
+      - { name: smol, when: "You want a smaller runtime, and the libraries you use don't depend on Tokio" }
+    avoid:
+      - { name: async-std, why: "Officially announced as discontinued, with a recommendation to migrate to smol" }
+    license: Tokio is MIT
+    sources: [S15, S32, S33]
+  - category: HTTP service framework
+    pick: Axum + tower / tower-http middleware
+    alternatives:
+      - { name: Actix Web, when: "The team already knows it, or there is existing Actix code" }
+      - { name: tonic, when: Serving gRPC APIs }
+    avoid:
+      - { name: Building ordinary business services directly on hyper, why: "You have to write routing, extractors, and middleware yourself; Axum already provides these on top of hyper" }
+    license: Axum is MIT
+    notes: "Configure request body size, timeouts, CORS, etc. uniformly with tower-http middleware; for API contracts and OpenAPI see 16."
+    sources: [S34, S35]
+  - category: HTTP client
+    pick: reqwest (reuse one Client within the process, with timeouts set)
+    alternatives:
+      - { name: hyper client, when: "You need very fine-grained connection control, or are writing a low-level library" }
+    avoid:
+      - { name: Creating a new Client per request, why: "Throws away the connection pool and adds handshake overhead" }
+    sources: [S16]
+  - category: Database access
+    pick: SQLx (SQL-first, with compile-time checked queries)
+    alternatives:
+      - { name: SeaORM, when: "Lots of CRUD and a need to build queries dynamically" }
+      - { name: Diesel, when: "You want a strongly typed query builder and accept a synchronous API or pair it with diesel-async" }
+      - { name: tokio-postgres + deadpool-postgres, when: "PostgreSQL only, and you need fine-grained control at the driver level" }
+    avoid:
+      - { name: Mixing multiple database access libraries in one project, why: "Transactions, connection pools, and error handling each become separate systems" }
+    license: SQLx is MIT OR Apache-2.0
+    sources: [S25]
+  - category: Database migration tool
+    pick: sqlx-cli (`sqlx migrate`), with migration files committed under migrations/
+    when: "Projects using SQLx; for migration principles see 17"
+    alternatives:
+      - { name: sea-orm-migration, when: Using SeaORM }
+      - { name: diesel_migrations, when: Using Diesel }
+    avoid:
+      - { name: Hand-written DDL in application startup code, why: "Runs concurrently on multiple replicas, leaves no record, and cannot be reviewed" }
+    sources: [S25]
+  - category: Error handling
+    pick: Libraries define error enums with thiserror; application entry points use anyhow
+    alternatives:
+      - { name: snafu, when: "You need many errors with structured context; don't mix it with thiserror in the same module" }
+    avoid:
+      - { name: "unwrap everywhere, or converting every error to a String", why: "On failure there is no type to branch on and no context to investigate" }
+    sources: [S12, S13]
+  - category: Logging and tracing
+    pick: tracing + tracing-subscriber (services output JSON)
+    alternatives:
+      - { name: log + env_logger, when: "Very small command-line tools that don't need spans" }
+      - { name: tracing-opentelemetry, when: "Cross-service tracing is needed (see 26)" }
+    avoid:
+      - { name: println! / eprintln! as logging, why: "No levels, no structure, and cannot be collected" }
+    sources: [S17]
+  - category: Test runner
+    pick: cargo-nextest + `cargo test --doc`
+    alternatives:
+      - { name: cargo test only, when: "Very few tests, and speed and isolation don't matter" }
+    sources: [S18]
+  - category: Advanced testing
+    pick: "proptest (property testing), cargo-fuzz (fuzzing), loom (concurrency interleavings), Miri (undefined behavior), insta (snapshots)"
+    notes: "cargo-fuzz and Miri need a nightly toolchain; run them in a separate CI job or scheduled job so the main toolchain pin is unaffected."
+    sources: [S11, S19, S20, S21, S22]
+  - category: Dependency auditing
+    pick: cargo-deny
+    alternatives:
+      - { name: cargo-audit, when: "You only need vulnerability checks, or want features such as `cargo audit fix`" }
+    license: "cargo-deny is MIT OR Apache-2.0; used as a standalone tool run in CI"
+    sources: [S14, S23]
+  - category: Serialization
+    pick: serde + serde_json
+    avoid:
+      - { name: serde_yaml, why: "Marked deprecated by its author and no longer maintained; for a YAML replacement see open questions" }
+    sources: [S36]
+  - category: Command-line arguments
+    pick: clap (derive style)
+    alternatives:
+      - { name: "argh, lexopt", when: "Binary size and compile time matter a lot" }
+    sources: [S37]
+  - category: Cross-language bindings
+    pick: 'C/C++: cxx or the thinnest possible `extern "C"`; Python: PyO3 + maturin; Node: napi-rs; browser: wasm-bindgen'
+    avoid:
+      - { name: Treating the memory layout of Rust structs directly as a C ABI, why: "The layout is unstable, and neither destructors nor panics can cross the boundary" }
+    sources: [S26, S27, S30]
+  - category: Cross-compilation
+    pick: Prefer native build machines for the target architecture; otherwise use rustup target + cross
+    alternatives:
+      - { name: cargo-zigbuild, when: "You need to specify a glibc version, or don't want to depend on containers" }
+    avoid:
+      - { name: 'Assuming adding `--target` solves native dependencies', why: "C libraries such as OpenSSL need a toolchain and sysroot for the matching target" }
+    notes: "cross depends on Docker or Podman; a target compiling does not mean it runs on the target machine, so smoke-test on the target machine. Target support tiers follow the official platform support page."
+    sources: [S38]
+antipatterns:
+  - { bad: 'Only `channel = "stable"` in rust-toolchain.toml', instead: "Pin to a patch release, and upgrade in a separate PR" }
+  - { bad: 'Dependencies written as `git = "...", branch = "main"`', instead: "Use a version published to a registry, or pin `rev`, and register the source in cargo-deny" }
+  - { bad: "Adding `'static`, `Box::leak`, or `Arc<Mutex<T>>` everywhere whenever the borrow checker complains", instead: "Rethink ownership; use `Arc<T>` for shared immutable state, and prefer message passing for mutable state" }
+  - { bad: "Reading large files, calling synchronous drivers, or doing heavy computation directly in a Tokio handler", instead: '`spawn_blocking`, Rayon, or split it into a separate service' }
+  - { bad: "Using `tokio::spawn` to send emails or write audit records as if it were a reliable background task", instead: "Write to a persistent task queue or outbox (see 17, 18)" }
+  - { bad: "Running only `cargo nextest run` while the doc examples stopped compiling long ago", instead: 'Also run `cargo test --doc`' }
+  - { bad: '`cargo insta accept` to accept all snapshot diffs in one go', instead: "Review each diff, and explain in the PR why the expectation changed" }
+  - { bad: 'Writing `#![allow(warnings)]` at the crate root to turn CI green', instead: 'Fix each case; when an exception is truly needed, write `#[expect(..., reason = "...")]`' }
+  - { bad: "New projects bringing in async-std or serde_yaml by copying old tutorials", instead: "Use Tokio; for YAML pick a library that is still maintained" }
+  - { bad: "Writing every new service in Rust because \"Rust is fast\"", instead: "First confirm the bottleneck is computation rather than the database or network, then decide based on benchmark data and team capability" }
+sources:
+  - { id: S01, title: "Announcing Rust 1.85.0 and Rust 2024", url: "https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/", publisher: Rust Project, date: 2025-02-20, kind: official, checked: 2026-11-14 }
+  - { id: S02, title: "rustup: Overrides (rust-toolchain.toml)", url: "https://rust-lang.github.io/rustup/overrides.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S03, title: "Cargo FAQ: Why have Cargo.lock in version control?", url: "https://doc.rust-lang.org/cargo/faq.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S04, title: "Cargo Reference: The Manifest Format (lints, rust-version)", url: "https://doc.rust-lang.org/cargo/reference/manifest.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S05, title: "Cargo Reference: Rust version", url: "https://doc.rust-lang.org/cargo/reference/rust-version.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S06, title: "Rust Edition Guide: Rust 2024", url: "https://doc.rust-lang.org/edition-guide/rust-2024/index.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S07, title: "Change in Guidance on Committing Lockfiles", url: "https://blog.rust-lang.org/2023/08/29/committing-lockfiles.html", publisher: Rust Project, date: 2023-08-29, kind: official, checked: 2026-11-13 }
+  - { id: S08, title: rustfmt, url: "https://github.com/rust-lang/rustfmt", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S09, title: Clippy Documentation, url: "https://doc.rust-lang.org/clippy/", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S10, title: The Rustonomicon, url: "https://doc.rust-lang.org/nomicon/", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S11, title: Miri, url: "https://github.com/rust-lang/miri", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S12, title: thiserror, url: "https://docs.rs/thiserror", publisher: docs.rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S13, title: anyhow, url: "https://docs.rs/anyhow", publisher: docs.rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S14, title: cargo-deny, url: "https://github.com/EmbarkStudios/cargo-deny", publisher: Embark Studios, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S15, title: Tokio documentation, url: "https://docs.rs/tokio/latest/tokio/", publisher: Tokio, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S16, title: reqwest, url: "https://docs.rs/reqwest", publisher: docs.rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S17, title: tracing, url: "https://docs.rs/tracing", publisher: Tokio, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S18, title: cargo-nextest, url: "https://nexte.st/", publisher: nextest, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S19, title: proptest, url: "https://github.com/proptest-rs/proptest", publisher: proptest, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S20, title: cargo-fuzz, url: "https://github.com/rust-fuzz/cargo-fuzz", publisher: rust-fuzz, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S21, title: loom, url: "https://github.com/tokio-rs/loom", publisher: Tokio, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S22, title: insta, url: "https://insta.rs/", publisher: insta, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S23, title: RustSec Advisory Database, url: "https://rustsec.org/", publisher: Rust Secure Code WG, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S24, title: "Cargo: cargo vendor", url: "https://doc.rust-lang.org/cargo/commands/cargo-vendor.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S25, title: "SQLx: query! macro (offline mode)", url: "https://docs.rs/sqlx/latest/sqlx/macro.query.html", publisher: SQLx, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S26, title: PyO3 user guide, url: "https://pyo3.rs/", publisher: PyO3, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S27, title: napi-rs, url: "https://napi.rs/", publisher: napi-rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S28, title: cargo-hack, url: "https://github.com/taiki-e/cargo-hack", publisher: taiki-e, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S29, title: Rust API Guidelines, url: "https://rust-lang.github.io/api-guidelines/", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S30, title: "CXX: safe interop between Rust and C++", url: "https://cxx.rs/", publisher: cxx, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S31, title: cargo-semver-checks, url: "https://github.com/obi1kenobi/cargo-semver-checks", publisher: cargo-semver-checks, date: null, kind: community, checked: 2026-11-13 }
+  - { id: S32, title: "async-std has been discontinued", url: "https://docs.rs/async-std/latest/async_std/", publisher: async-std, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S33, title: "Tokio: LICENSE", url: "https://github.com/tokio-rs/tokio/blob/master/LICENSE", publisher: Tokio, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S34, title: axum, url: "https://github.com/tokio-rs/axum", publisher: Tokio, date: null, kind: official, checked: 2026-11-14 }
+  - { id: S35, title: tower-http, url: "https://docs.rs/tower-http", publisher: Tower, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S36, title: serde_yaml (deprecated), url: "https://docs.rs/serde_yaml/latest/serde_yaml/", publisher: docs.rs, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S37, title: clap, url: "https://docs.rs/clap", publisher: clap, date: null, kind: official, checked: 2026-11-13 }
+  - { id: S38, title: "rustc: Platform Support", url: "https://doc.rust-lang.org/rustc/platform-support.html", publisher: Rust Project, date: null, kind: official, checked: 2026-11-13 }
+open_questions:
+  - "The original research claimed that Rust 1.100 (2026-11-12) stabilized a dependency publish cooldown (`global-min-publish-age`, which does not constrain `cargo install`), `[lints.cargo]` unused-dependency diagnostics, and the never type; online searches found only indirect mentions and no official release notes, so this is not yet a rule; once verified, consider adding \"recommend enabling the cooldown\""
+  - "Cargo.lock: the Cargo FAQ has been verified to say \"cargo new tracks the lockfile by default; whether to commit it depends on the project's needs\"; the change in guidance in the 2023-08-29 official blog post was not reopened and rechecked this time"
+  - "YAML serialization: serde_yaml is deprecated; the yaml_serde crate recommended by the original research has an uncommon name and unclear maintenance status, so check crates.io before settling on a replacement"
+  - "Whether Rocket has stopped publishing stable releases (the original research claimed the latest stable release dates from 2024-05) is unverified, so it is not yet listed as not recommended"
+  - "Licenses not verified against the official LICENSE files: thiserror, anyhow, tracing, reqwest, clap, cargo-nextest, Actix Web, SeaORM, Diesel, proptest, loom, insta, PyO3, napi-rs, cxx"
+  - "cargo-deny's maintenance activity (latest release date) could not be confirmed from the repository home page this time; the README does not name the advisory database, and the claim that it is RustSec is based on existing knowledge"
+  - "The rmcp, zip, and utoipa version lines in the original research differ significantly from the published versions; verify them if referenced later"
+  - "Research to add: there is no data on \"when Rust is worth using\" or \"how reliably coding agents write Rust\"; the original research offers only engineering judgment"
+  - "Research to add: runnable examples of deny.toml, clippy.toml (including test exemptions), and a CI feature matrix; examples must actually run successfully before publishing"
+  - "Research to add: compatibility of openGauss and other domestic Chinese databases with SQLx / tokio-postgres; hands-on testing of targets for domestic Chinese CPUs and operating systems (to be settled together with 17 and 26)"
+  - "The division of responsibilities between Rust and Tauri desktop backends for FFI and native dependency packaging needs to be agreed with 31"

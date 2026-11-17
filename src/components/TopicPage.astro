@@ -1,0 +1,290 @@
+---
+// 主题页：一页结论、范围外跳转、可筛选的规则卡片、选型、常见错误、待确认、来源。
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { md, mdi, resolveSee, ruleAnchor, statusName, scopeName, levelName, checkName, sourceKindName, getSite, type Topic, type Lang } from '../lib/site.ts';
+import { config } from '../../tools/lib.ts';
+
+interface Props { topic: Topic; lang: Lang }
+const { topic: t, lang } = Astro.props;
+const hard = t.rules.filter((r) => r.level === 'hard').length;
+const srcById = new Map(t.sources.map((s) => [s.id, s]));
+const srcAnchor = (id: string) => `src-${id.toLowerCase()}`;
+const editUrl = `${config.repoUrl}/edit/main/rules/${lang === 'en' ? 'en/' : ''}${t.id}-${t.slug}.yaml`;
+
+const openParen = lang === 'en' ? ' (' : '（';
+const closeParen = lang === 'en' ? ')' : '）';
+const colon = lang === 'en' ? ': ' : '：';
+
+const c = lang === 'en' ? {
+  summary: 'Summary', rules: 'Rules', choices: 'Tool choices', anti: 'Common mistakes', open: 'Open questions', sources: 'Sources',
+  notCovered: 'Not covered here:', draft: 'Draft', reviewed: 'Reviewed',
+  reviewedOn: `Reviewed ${t.reviewed_on} · Next review ${t.next_review}`,
+  ruleCount: `${t.rules.length} rules · ${hard} hard constraints`,
+  edit: 'Edit on GitHub',
+  legal: 'This topic covers law and compliance. Its content is engineering reference only and is not legal advice; consult a qualified lawyer for specific questions.',
+  level: 'Level', all: 'All', check: 'Check method', hard: 'Hard constraint', soft: 'Soft guidance', auto: 'Automated', semi: 'Semi-automated', manual: 'Manual',
+  showing: 'Showing', checkPrefix: 'Check:', how: 'How to check:', refValue: 'Reference value:', whySources: 'Why and sources', why: 'Why:', sourcesPrefix: 'Sources:', seeAlso: 'See also:',
+  empty: 'No rules match these filters.',
+  category: 'Category', default: 'Default', alternatives: 'Alternatives (when to use)', avoid: 'Avoid',
+  alt: 'Alternatives:', bad: 'Avoid:', badPractice: 'Bad practice:', instead: 'Instead:',
+  openIntro: 'The items below have not been verified or still need research. Do not enforce them as rules.',
+  checkedOn: 'Checked', filterLabel: 'Filter rules', sourceKinds: { standard: 'Standard', official: 'Official documentation', community: 'Community', case: 'Case study' } as Record<string, string>,
+} : {
+  summary: '一页结论', rules: '规则', choices: '选型', anti: '常见错误', open: '待确认', sources: '来源',
+  notCovered: '不在本主题：', draft: '草稿', reviewed: '已复核',
+  reviewedOn: `复核于 ${t.reviewed_on} · 下次复核 ${t.next_review}`,
+  ruleCount: `${t.rules.length} 条规则 · 硬约束 ${hard} 条`,
+  edit: '在 GitHub 上修改',
+  legal: '本主题涉及法律与合规，内容只是工程参考，不构成法律意见；具体问题请咨询专业律师。',
+  level: '级别', all: '全部', check: '检查方式', hard: '硬约束', soft: '软指导', auto: '自动', semi: '半自动', manual: '人工',
+  showing: '显示', checkPrefix: '检查：', how: '怎么检查：', refValue: '参考值：', whySources: '为什么、来源', why: '为什么：', sourcesPrefix: '来源：', seeAlso: '另见：',
+  empty: '没有符合条件的规则。',
+  category: '类别', default: '默认', alternatives: '备选（何时用）', avoid: '不推荐',
+  alt: '备选：', bad: '不推荐：', badPractice: '错误做法：', instead: '应该：',
+  openIntro: '下面的内容还没核实或待补调研，不要当成规则执行。',
+  checkedOn: '核实于', filterLabel: '筛选规则', sourceKinds: { standard: '标准', official: '官方文档', community: '社区', case: '案例' } as Record<string, string>,
+};
+
+const headings = [
+  { depth: 2, slug: 'summary', text: c.summary },
+  { depth: 2, slug: 'rules', text: c.rules },
+  ...(t.choices?.length ? [{ depth: 2, slug: 'choices', text: c.choices }] : []),
+  ...(t.antipatterns?.length ? [{ depth: 2, slug: 'anti', text: c.anti }] : []),
+  ...(t.open_questions?.length ? [{ depth: 2, slug: 'open', text: c.open }] : []),
+  { depth: 2, slug: 'src', text: c.sources },
+];
+const levels = [['all', c.all], ['hard', c.hard], ['soft', c.soft]];
+const checks = [['all', c.all], ['auto', c.auto], ['semi', c.semi], ['manual', c.manual]];
+const kindName = (kind: string) => c.sourceKinds[kind] ?? sourceKindName(kind, lang) ?? kind;
+---
+
+<StarlightPage frontmatter={{ title: `${t.id} ${t.title}`, description: t.summary }} headings={headings}>
+  <div class="not-content topic-head">
+    <p class="lede">{t.summary}</p>
+    <div class="meta">
+      <span class:list={['pr-badge', t.status === 'reviewed' ? 'soft' : 'pending']}>{statusName(t.status, lang)}</span>
+      <span>{c.reviewedOn}</span>
+      <span>{c.ruleCount}</span>
+      <a href={editUrl}>{c.edit}</a>
+    </div>
+    {t.legal_notice && <p class="legal">{c.legal}</p>}
+  </div>
+
+  <h2 id="summary">{c.summary}</h2>
+  <Fragment set:html={md(t.overview)} />
+
+  {t.scope?.excludes?.length ? (
+    <div class="not-content pr-card excludes">
+      <span class="excl-label">{c.notCovered}</span>
+      {t.scope.excludes.map((e) => {
+        const s = resolveSee(e.see, lang);
+        return s.href ? <a href={s.href}>{e.what} → {s.label}</a> : <span>{e.what} → {s.label}</span>;
+      })}
+    </div>
+  ) : null}
+
+  <h2 id="rules">{c.rules}</h2>
+  <div class="not-content filter" role="group" aria-label={c.filterLabel} data-filter-root>
+    <span class="flabel">{c.level}</span>
+    <div class="pills">
+      {levels.map(([v, l]) => <button type="button" class="pr-pill" data-key="level" data-val={v} aria-pressed={v === 'all' ? 'true' : 'false'}>{l}</button>)}
+    </div>
+    <span class="flabel">{c.check}</span>
+    <div class="pills">
+      {checks.map(([v, l]) => <button type="button" class="pr-pill" data-key="check" data-val={v} aria-pressed={v === 'all' ? 'true' : 'false'}>{l}</button>)}
+    </div>
+    <span class="shown" aria-live="polite">{c.showing} <span data-shown>{t.rules.length}</span></span>
+  </div>
+
+  <div class="not-content rules">
+    {t.rules.map((r) => (
+      <article id={ruleAnchor(r.id)} class="pr-card rule" data-level={r.level} data-check={r.check}>
+        <div class="rule-top">
+          <a href={`#${ruleAnchor(r.id)}`} class="pr-mono rid">{r.id}</a>
+          <span class:list={['pr-badge', r.level]}>{levelName(r.level, lang)}</span>
+          <span class="pr-chip">{c.checkPrefix}{checkName(r.check, lang)}</span>
+          {r.applies.filter((a) => a !== 'all').map((a) => <span class="pr-chip">{scopeName(a, lang)}</span>)}
+        </div>
+        <h3 set:html={mdi(r.title)} />
+        <div class="line"><span class="k">{c.how}</span><span set:html={mdi(r.how)} /></div>
+        {r.ref_value && <div class="line"><span class="k">{c.refValue}</span><span set:html={mdi(r.ref_value)} /></div>}
+        <details class="rule-more" open>
+          <summary>{c.whySources}</summary>
+          <div class="line"><span class="k">{c.why}</span><span set:html={mdi(r.why)} /></div>
+          {r.detail && <div class="detail" set:html={md(r.detail)} />}
+          {(r.sources?.length || r.see?.length) ? (
+            <div class="refs">
+              {r.sources?.length ? (
+                <span>{c.sourcesPrefix}{r.sources.map((id, i) => <>{i > 0 && '; '}<a href={`#${srcAnchor(id)}`}>{srcById.get(id)?.title ?? id}</a></>)}</span>
+              ) : null}
+              {r.see?.length ? (
+                <span>{c.seeAlso}{r.see.map((ref, i) => { const s = resolveSee(ref, lang); return <>{i > 0 && '; '}{s.href ? <a href={s.href}>{s.label}</a> : s.label}</>; })}</span>
+              ) : null}
+            </div>
+          ) : null}
+        </details>
+      </article>
+    ))}
+    <p class="empty pr-muted" hidden data-empty>{c.empty}</p>
+  </div>
+
+  {t.choices?.length ? (
+    <>
+      <h2 id="choices">{c.choices}</h2>
+      <div class="not-content choices-table pr-card">
+        <table>
+          <thead><tr><th>{c.category}</th><th>{c.default}</th><th>{c.alternatives}</th><th>{c.avoid}</th></tr></thead>
+          <tbody>
+            {t.choices.map((ch) => (
+              <tr>
+                <td>{ch.category}</td>
+                <td><strong set:html={mdi(ch.pick)} />{ch.license && <span class="pr-muted"> · {ch.license}</span>}{ch.when && <div class="pr-muted small" set:html={mdi(ch.when)} />}</td>
+                <td>{ch.alternatives?.length ? ch.alternatives.map((a) => <div><span set:html={mdi(a.name)} /><span class="pr-muted">{openParen}<span set:html={mdi(a.when)} />{closeParen}</span></div>) : '—'}</td>
+                <td>{ch.avoid?.length ? ch.avoid.map((a) => <div><span set:html={mdi(a.name)} /><span class="pr-muted">{colon}<span set:html={mdi(a.why)} /></span></div>) : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div class="not-content choices-cards">
+        {t.choices.map((ch) => (
+          <div class="pr-card choice">
+            <div class="pr-muted small">{ch.category}</div>
+            <div><strong set:html={mdi(ch.pick)} />{ch.license && <span class="pr-muted small"> · {ch.license}</span>}</div>
+            {ch.alternatives?.length ? <div class="small">{c.alt}{ch.alternatives.map((a, i) => <>{i > 0 && '; '}<span set:html={mdi(a.name)} />{openParen}<span set:html={mdi(a.when)} />{closeParen}</>)}</div> : null}
+            {ch.avoid?.length ? <div class="small bad">{c.bad}{ch.avoid.map((a, i) => <>{i > 0 && '; '}<span set:html={mdi(a.name)} /></>)}</div> : null}
+          </div>
+        ))}
+      </div>
+      {t.choices.some((ch) => ch.notes) && (
+        <ul class="choice-notes">
+          {t.choices.filter((ch) => ch.notes).map((ch) => <li><strong>{ch.category}{colon}</strong><span set:html={mdi(ch.notes)} /></li>)}
+        </ul>
+      )}
+    </>
+  ) : null}
+
+  {t.antipatterns?.length ? (
+    <>
+      <h2 id="anti">{c.anti}</h2>
+      <div class="not-content anti">
+        {t.antipatterns.map((a) => (
+          <div class="pr-card">
+            <div class="bad"><span aria-hidden="true">✕ </span><span class="sr">{c.badPractice}</span><span set:html={mdi(a.bad)} /></div>
+            <div class="good"><span aria-hidden="true">✓ </span><span class="sr">{c.instead}</span><span set:html={mdi(a.instead)} /></div>
+          </div>
+        ))}
+      </div>
+    </>
+  ) : null}
+
+  {t.open_questions?.length ? (
+    <>
+      <h2 id="open">{c.open}</h2>
+      <div class="not-content open">
+        <p>{c.openIntro}</p>
+        <ul>{t.open_questions.map((q) => <li set:html={mdi(q)} />)}</ul>
+      </div>
+    </>
+  ) : null}
+
+  <h2 id="src">{c.sources}</h2>
+  <ol class="not-content sources">
+    {t.sources.map((s) => (
+      <li id={srcAnchor(s.id)}>
+        <span class="pr-mono pr-muted">{s.id}</span> <a href={s.url}>{s.title}</a>
+        <span class="pr-muted"> · {[s.publisher, kindName(s.kind), s.date].filter(Boolean).join(' · ')} · {c.checkedOn} {s.checked}</span>
+      </li>
+    ))}
+  </ol>
+</StarlightPage>
+
+<script>
+  // 规则筛选：级别 × 检查方式。窄屏默认收起「为什么、来源」。
+  const root = document.querySelector<HTMLElement>('[data-filter-root]');
+  const cards = [...document.querySelectorAll<HTMLElement>('article.rule')];
+  const state: Record<string, string> = { level: 'all', check: 'all' };
+  const apply = () => {
+    let n = 0;
+    for (const card of cards) {
+      const ok = (state.level === 'all' || card.dataset.level === state.level) && (state.check === 'all' || card.dataset.check === state.check);
+      card.hidden = !ok;
+      if (ok) n++;
+    }
+    root!.querySelector('[data-shown]')!.textContent = String(n);
+    document.querySelector<HTMLElement>('[data-empty]')!.hidden = n > 0;
+  };
+  root?.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-key]');
+    if (!b) return;
+    state[b.dataset.key!] = b.dataset.val!;
+    for (const x of root.querySelectorAll<HTMLButtonElement>(`button[data-key="${b.dataset.key}"]`)) x.setAttribute('aria-pressed', String(x === b));
+    apply();
+  });
+  if (matchMedia('(max-width: 40rem)').matches) {
+    const target = location.hash.slice(1);
+    for (const d of document.querySelectorAll<HTMLDetailsElement>('details.rule-more')) {
+      if (d.closest('article')?.id !== target) d.open = false;
+    }
+  }
+</script>
+
+<style>
+  .topic-head { margin-top: -0.5rem; }
+  .lede { font-size: 1.0625rem; color: var(--sl-color-gray-2); margin: 0.5rem 0 0; }
+  .meta a { color: var(--sl-color-accent); }
+  .meta { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; margin-top: 0.875rem; font-size: 0.8125rem; color: var(--sl-color-gray-3); align-items: center; }
+  .legal { margin-top: 0.875rem; font-size: var(--sl-text-sm); background: var(--pr-open-bg); border: 1px solid var(--pr-open-line); color: var(--pr-open-fg); border-radius: 8px; padding: 0.5rem 0.875rem; }
+  .excludes { margin-top: 1.25rem; padding: 0.875rem 1.125rem; font-size: var(--sl-text-sm); display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; }
+  .excl-label { font-weight: 600; }
+  .filter { display: flex; flex-wrap: wrap; gap: 0.625rem 1rem; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid var(--pr-line); position: sticky; top: var(--sl-nav-height); background: var(--sl-color-black); z-index: 2; }
+  .flabel { font-size: var(--sl-text-sm); color: var(--sl-color-gray-3); white-space: nowrap; flex: none; }
+  .pills { display: flex; gap: 0.375rem; flex-wrap: wrap; }
+  .shown { margin-inline-start: auto; font-size: var(--sl-text-sm); color: var(--sl-color-gray-3); }
+  .rules { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1rem; }
+  .rule { padding: 1rem 1.25rem; scroll-margin-top: calc(var(--sl-nav-height) + 4rem); }
+  .rule:target { border-color: var(--sl-color-accent); box-shadow: 0 0 0 2px var(--sl-color-accent-low); }
+  .rule-top { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.625rem; }
+  .rule a.rid { font-size: 0.8125rem; color: var(--sl-color-gray-3); text-decoration: none; }
+  .rule a.rid:hover { color: var(--sl-color-accent); }
+  .rule h3 { margin: 0.5rem 0 0.375rem; font-size: 1.0625rem; line-height: 1.5; font-weight: 600; color: var(--sl-color-white); }
+  .line { font-size: var(--sl-text-sm); color: var(--sl-color-gray-2); margin-top: 0.125rem; }
+  .k { color: var(--sl-color-gray-3); }
+  .rule-more > summary { display: none; }
+  .detail { font-size: var(--sl-text-sm); color: var(--sl-color-gray-2); margin-top: 0.375rem; }
+  .detail :global(table) { border-collapse: collapse; margin: 0.5rem 0; display: block; overflow-x: auto; }
+  .detail :global(th), .detail :global(td) { border: 1px solid var(--pr-line); padding: 0.25rem 0.5rem; text-align: start; vertical-align: top; }
+  .detail :global(p), .detail :global(ul), .detail :global(ol) { margin: 0.25rem 0; }
+  .refs { display: flex; flex-wrap: wrap; gap: 0.375rem 1rem; margin-top: 0.5rem; font-size: 0.8125rem; color: var(--sl-color-gray-3); }
+  .choices-table { overflow-x: auto; margin-top: 0.75rem; }
+  .choices-table table { width: 100%; border-collapse: collapse; font-size: var(--sl-text-sm); min-width: 40rem; }
+  .choices-table th { text-align: start; background: var(--sl-color-gray-7); padding: 0.625rem 0.875rem; font-weight: 600; }
+  .choices-table td { border-top: 1px solid var(--pr-line); padding: 0.625rem 0.875rem; vertical-align: top; }
+  .choices-cards { display: none; flex-direction: column; gap: 0.625rem; margin-top: 0.75rem; }
+  .choice { padding: 0.75rem 0.875rem; font-size: var(--sl-text-sm); }
+  .small { font-size: 0.8125rem; }
+  .bad { color: var(--pr-bad); }
+  .good { color: var(--sl-color-accent); margin-top: 0.375rem; }
+  .anti { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+  .anti > div { padding: 0.875rem 1rem; font-size: var(--sl-text-sm); }
+  .anti .bad, .anti .good { font-weight: 600; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .open { margin-top: 0.75rem; background: var(--pr-open-bg); border: 1px solid var(--pr-open-line); border-radius: 10px; padding: 0.875rem 1.125rem; font-size: var(--sl-text-sm); color: var(--pr-open-fg); }
+  .open p { margin: 0 0 0.375rem; }
+  .open ul { margin: 0; padding-inline-start: 1.25rem; }
+  .sources { margin-top: 0.75rem; padding-inline-start: 1.375rem; font-size: var(--sl-text-sm); color: var(--sl-color-gray-2); display: flex; flex-direction: column; gap: 0.25rem; }
+  .sources li { scroll-margin-top: calc(var(--sl-nav-height) + 1rem); }
+  .sources li:target { background: var(--sl-color-accent-low); }
+  @media (max-width: 40rem) {
+    .filter { flex-wrap: nowrap; overflow-x: auto; position: static; }
+    .pills { flex-wrap: nowrap; flex: none; }
+    .pr-pill { flex: none; min-height: 2.25rem; }
+    .shown { white-space: nowrap; }
+    .rule { padding: 0.875rem 1rem; }
+    .rule h3 { font-size: 1rem; }
+    .rule-more > summary { display: list-item; color: var(--sl-color-accent); font-size: 0.8125rem; margin-top: 0.375rem; min-height: 1.5rem; cursor: pointer; }
+    .choices-table { display: none; }
+    .choices-cards { display: flex; }
+    .anti { grid-template-columns: 1fr; }
+  }
+</style>

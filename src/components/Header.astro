@@ -4,24 +4,29 @@ import Search from 'virtual:starlight/components/Search';
 import SiteTitle from 'virtual:starlight/components/SiteTitle';
 import SocialIcons from 'virtual:starlight/components/SocialIcons';
 import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
+import LanguageSelect from 'virtual:starlight/components/LanguageSelect';
+import { getLang, localize, strings } from '../lib/site.ts';
 
 const path = Astro.url.pathname;
+const lang = getLang(path);
+const s = strings[lang];
 const nav = [
-  { href: '/topics/', label: '主题', on: path.startsWith('/topics/') },
-  { href: '/rules/', label: '全部规则', on: path.startsWith('/rules/') },
-  { href: '/install/', label: '安装', on: path.startsWith('/install/') },
-  { href: '/guide/', label: '怎么读规则', on: path.startsWith('/guide/') },
-  { href: '/changelog/', label: '更新记录', on: path.startsWith('/changelog/') },
-];
+  { href: '/topics/', label: s.nav.topics, on: path.startsWith('/topics/') || path.startsWith('/en/topics/') },
+  { href: '/rules/', label: s.nav.rules, on: path.startsWith('/rules/') || path.startsWith('/en/rules/') },
+  { href: '/install/', label: s.nav.install, on: path.startsWith('/install/') || path.startsWith('/en/install/') },
+  { href: '/guide/', label: s.nav.guide, on: path.startsWith('/guide/') || path.startsWith('/en/guide/') },
+  { href: '/changelog/', label: s.nav.changelog, on: path.startsWith('/changelog/') || path.startsWith('/en/changelog/') },
+].map((n) => ({ ...n, href: localize(n.href, lang) }));
 ---
 
 <div class="pr-header">
   <div class="pr-title"><SiteTitle /></div>
-  <nav aria-label="主导航" class="pr-nav sl-hidden md:sl-flex">
+  <nav aria-label={lang === 'en' ? 'Main navigation' : '主导航'} class="pr-nav sl-hidden md:sl-flex">
     {nav.map((n) => <a href={n.href} aria-current={n.on ? 'page' : undefined}>{n.label}</a>)}
   </nav>
   <div class="pr-search print:hidden"><Search /></div>
   <div class="sl-hidden md:sl-flex print:hidden pr-right">
+    <LanguageSelect />
     <ThemeSelect />
     <SocialIcons />
   </div>
@@ -36,5 +41,6 @@ const nav = [
   .pr-nav a[aria-current='page'] { color: var(--sl-color-accent-high); font-weight: 600; }
   .pr-search { margin-inline-start: auto; display: flex; }
   .pr-right { gap: 1rem; align-items: center; }
+  .pr-right :global(starlight-lang-select) { display: flex; }
   @media (min-width: 50rem) { .pr-search { min-width: 18rem; } }
 </style>
